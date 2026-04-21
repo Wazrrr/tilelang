@@ -123,6 +123,7 @@ def get_best_config(
     skip_check: bool = False,
     cache_input_tensors: bool = False,
     topk: int = 20,
+    use_pipeline: bool = False,
 ):
     autotuner, _, _ = _build_autotuner(
         M=M,
@@ -135,7 +136,7 @@ def get_best_config(
         cache_input_tensors=cache_input_tensors,
         topk=topk,
     )
-    autotuner_result, _measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout)
+    autotuner_result, _measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout, use_pipeline=use_pipeline)
     return autotuner_result
 
 
@@ -220,6 +221,7 @@ def run_autotune_with_measurements(
     skip_check: bool = True,
     cache_input_tensors: bool = True,
     topk: int = 20,
+    use_pipeline: bool = False,
 ) -> tuple[Any | None, dict[str, Any]]:
     autotuner, configs, _ = _build_autotuner(
         M=M,
@@ -247,6 +249,7 @@ def run_autotune_with_measurements(
         "rep": rep,
         "timeout": timeout,
         "cache_input_tensors": cache_input_tensors,
+        "use_pipeline": use_pipeline,
         "cpu_count_env": os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1"),
         "end_to_end_s": None,
         "compilation_s": None,
@@ -261,17 +264,18 @@ def run_autotune_with_measurements(
     }
     result = None
     run_measurement = None
+    started = time.perf_counter()
     try:
-        result, run_measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout)
+        result, run_measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout, use_pipeline=use_pipeline)
     except Exception as ex:
         metrics["status"] = "failed"
         metrics["error"] = f"{type(ex).__name__}: {ex}"
+    finally:
+        metrics["end_to_end_s"] = time.perf_counter() - started
     if run_measurement is not None:
         metrics["end_to_end_s"] = run_measurement.get("total_s")
         metrics["compilation_s"] = run_measurement.get("compilation_s")
         metrics["benchmark_s"] = run_measurement.get("benchmark_s")
-    else:
-        raise RuntimeError("Autotuning did not produce any measurement results, cannot extract metrics")
 
     if result is not None:
         total_flops = 2 * M * N * K

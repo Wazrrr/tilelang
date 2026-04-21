@@ -26,6 +26,7 @@ except ImportError:  # Python < 3.10
 from tqdm.auto import tqdm
 import logging
 import concurrent.futures
+from collections import deque
 import torch
 import os
 import sys
@@ -313,13 +314,14 @@ class AutoTuner:
         result = AutotuneResult.load_from_disk(self.cache_dir / key, self.compile_args)
         return result
 
-    def run(self, warmup: int = 25, rep: int = 100, timeout: int = 30):
+    def run(self, warmup: int = 25, rep: int = 100, timeout: int = 30, use_pipeline: bool = False):
         """Run the auto-tuning process.
 
         Args:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
+            use_pipeline: Whether to pipeline benchmarking with compilation.
 
         Returns:
             Tuple[AutotuneResult, dict[str, Any]]: The autotune artifact and timing measurements.
@@ -333,6 +335,7 @@ class AutoTuner:
             "num_configs_submitted": 0,
             "num_configs_compiled": 0,
             "num_configs_benchmarked": 0,
+            "use_pipeline": use_pipeline,
         }
 
         def _pack_return(result: AutotuneResult):
@@ -554,6 +557,7 @@ class AutoTuner:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
         future_to_index = {}
+        ready_queue = deque()
 
         def cuda_device_wrapper(func, device):
             def inner(**config_arg):
@@ -579,48 +583,132 @@ class AutoTuner:
             future_to_index[future] = i
 
         measurement["num_configs_submitted"] = len(futures)
-        results_with_configs = []
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Compiling configurations"):
-            idx = future_to_index[future]
-            config = config_args[idx]
-            try:
-                result = future.result()
-                results_with_configs.append((result, config))
-            except Exception as e:
-                logger.debug(f"Compilation failed for config {config} at index {idx} with error: {e}")
-                continue
-        measurement["compilation_s"] = time.perf_counter() - compilation_start
-        measurement["num_configs_compiled"] = len(results_with_configs)
-
         ref_latency = None
-        benchmark_start = time.perf_counter()
-        measurement["num_configs_benchmarked"] = len(results_with_configs)
-        progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
-        for i in progress_bar:
-            jit_kernel, config = results_with_configs[i]
+
+        if use_pipeline:
+            pending_futures = set(futures)
+            compile_finished = False
+            benchmark_started = False
+            benchmark_start = 0.0
+            compile_progress = tqdm(total=len(futures), desc="Compiling configurations")
+            progress_bar = tqdm(total=len(config_args), desc="Bench configurations")
+
             try:
-                # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
-                # Because tma init may behave strangely with one thread
-                # latency, ref_latency = target_fn(jit_kernel)
-                latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
-            except TimeoutException:
-                logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
-                continue
-            except Exception:
-                logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
-                logger.debug(f"Error: {traceback.format_exc()}")
-                continue
+                while pending_futures or ready_queue:
+                    done = set()
+                    if pending_futures:
+                        # Block only when no compiled kernel is available for benchmarking.
+                        if ready_queue:
+                            done, pending_futures = concurrent.futures.wait(
+                                pending_futures,
+                                timeout=0,
+                                return_when=concurrent.futures.FIRST_COMPLETED,
+                            )
+                        else:
+                            done, pending_futures = concurrent.futures.wait(
+                                pending_futures,
+                                return_when=concurrent.futures.FIRST_COMPLETED,
+                            )
 
-            if latency < best_latency:
-                best_latency = latency
-                best_config = config
-                best_kernel = jit_kernel
+                    for future in done:
+                        compile_progress.update(1)
+                        idx = future_to_index[future]
+                        config = config_args[idx]
+                        try:
+                            jit_kernel = future.result()
+                            ready_queue.append((jit_kernel, config, idx))
+                            measurement["num_configs_compiled"] += 1
+                        except Exception as e:
+                            logger.debug(f"Compilation failed for config {config} at index {idx} with error: {e}")
 
-            progress_bar.set_postfix({"best_latency": best_latency})
-            tqdm.write(f"Tuned Latency {latency} with config {config} at index {i}")
-        measurement["benchmark_s"] = time.perf_counter() - benchmark_start
+                    if (not compile_finished) and (not pending_futures):
+                        measurement["compilation_s"] = time.perf_counter() - compilation_start
+                        compile_finished = True
 
-        pool.shutdown()
+                    if ready_queue:
+                        if not benchmark_started:
+                            benchmark_started = True
+                            benchmark_start = time.perf_counter()
+                        jit_kernel, config, idx = ready_queue.popleft()
+                        measurement["num_configs_benchmarked"] += 1
+                        progress_bar.update(1)
+                        try:
+                            # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
+                            # Because tma init may behave strangely with one thread
+                            # latency, ref_latency = target_fn(jit_kernel)
+                            latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
+                        except TimeoutException:
+                            logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
+                            continue
+                        except Exception:
+                            logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
+                            logger.debug(f"Error: {traceback.format_exc()}")
+                            continue
+
+                        if latency < best_latency:
+                            best_latency = latency
+                            best_config = config
+                            best_kernel = jit_kernel
+
+                        progress_bar.set_postfix({"best_latency": best_latency})
+                        tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
+
+                if not compile_finished:
+                    measurement["compilation_s"] = time.perf_counter() - compilation_start
+
+                if benchmark_started:
+                    measurement["benchmark_s"] = time.perf_counter() - benchmark_start
+
+                # Avoid misleading unfinished progress bars when compile failures happen.
+                progress_bar.total = max(progress_bar.n, measurement["num_configs_benchmarked"])
+                progress_bar.refresh()
+            finally:
+                compile_progress.close()
+                progress_bar.close()
+                pool.shutdown()
+        else:
+            results_with_configs = []
+            compile_progress = tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Compiling configurations")
+            try:
+                for future in compile_progress:
+                    idx = future_to_index[future]
+                    config = config_args[idx]
+                    try:
+                        jit_kernel = future.result()
+                        results_with_configs.append((jit_kernel, config, idx))
+                    except Exception as e:
+                        logger.debug(f"Compilation failed for config {config} at index {idx} with error: {e}")
+                measurement["compilation_s"] = time.perf_counter() - compilation_start
+                measurement["num_configs_compiled"] = len(results_with_configs)
+
+                benchmark_start = time.perf_counter()
+                measurement["num_configs_benchmarked"] = len(results_with_configs)
+                progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
+                for i in progress_bar:
+                    jit_kernel, config, idx = results_with_configs[i]
+                    try:
+                        latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
+                    except TimeoutException:
+                        logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
+                        continue
+                    except Exception:
+                        logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
+                        logger.debug(f"Error: {traceback.format_exc()}")
+                        continue
+
+                    if latency < best_latency:
+                        best_latency = latency
+                        best_config = config
+                        best_kernel = jit_kernel
+
+                    progress_bar.set_postfix({"best_latency": best_latency})
+                    tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
+                if len(results_with_configs) > 0:
+                    measurement["benchmark_s"] = time.perf_counter() - benchmark_start
+                progress_bar.close()
+            finally:
+                compile_progress.close()
+                pool.shutdown()
 
         if best_kernel is None:
             error_msg = "Auto-tuning failed: No configuration successfully compiled and passed benchmarking/validation."

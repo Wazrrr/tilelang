@@ -20,6 +20,7 @@ When no arguments are passed, the script runs:
 - `rep`: `20`
 - `timeout`: `180`
 - `with_roller`: `False`
+- `use_pipeline`: `False`
 - `skip_check`: `True`
 - `disable_cache`: `True`
 - output CSV: `results/gemm_autotune_e2e.csv`
@@ -67,6 +68,12 @@ python benchmark/autotune/run_gemm_autotune_e2e.py \
   --topk 20
 ```
 
+Enable compile/benchmark pipelining (fallback two-phase mode):
+
+```bash
+python benchmark/autotune/run_gemm_autotune_e2e.py --pipeline
+```
+
 ## CSV Columns
 
 - `shape_tag`, `shape_class`, `shape`
@@ -82,5 +89,5 @@ python benchmark/autotune/run_gemm_autotune_e2e.py \
 - `cpu_count_env`
 - `execution_backend`, `profile_backend`
 - `warmup`, `rep`, `timeout`
-- `with_roller`, `topk`, `skip_check`, `cache_input_tensors`
+- `with_roller`, `topk`, `skip_check`, `cache_input_tensors`, `use_pipeline`
 - `best_config` (JSON string)

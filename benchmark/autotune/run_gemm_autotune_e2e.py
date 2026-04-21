@@ -64,6 +64,7 @@ def run_single_case(
     execution_backend: str,
     skip_check: bool,
     cache_input_tensors: bool,
+    use_pipeline: bool,
 ) -> dict[str, Any]:
     m, n, k = shape
 
@@ -84,6 +85,7 @@ def run_single_case(
             execution_backend=execution_backend,
             skip_check=skip_check,
             cache_input_tensors=cache_input_tensors,
+            use_pipeline=use_pipeline,
         )
     finally:
         if previous_cpu_count is None:
@@ -121,6 +123,7 @@ def run_single_case(
         "topk": topk,
         "skip_check": skip_check,
         "cache_input_tensors": cache_input_tensors,
+        "use_pipeline": use_pipeline,
         "best_config": json.dumps(best_config, sort_keys=True) if best_config is not None else "",
     }
     return row
@@ -195,6 +198,11 @@ def parse_args() -> argparse.Namespace:
     tensor_group.add_argument("--no-cache-input-tensors", dest="cache_input_tensors", action="store_false")
     parser.set_defaults(cache_input_tensors=True)
 
+    pipeline_group = parser.add_mutually_exclusive_group()
+    pipeline_group.add_argument("--pipeline", dest="use_pipeline", action="store_true")
+    pipeline_group.add_argument("--no-pipeline", dest="use_pipeline", action="store_false")
+    parser.set_defaults(use_pipeline=False)
+
     return parser.parse_args()
 
 
@@ -253,6 +261,7 @@ def main() -> int:
         "topk",
         "skip_check",
         "cache_input_tensors",
+        "use_pipeline",
         "best_config",
     ]
 
@@ -284,6 +293,7 @@ def main() -> int:
                         execution_backend=args.execution_backend,
                         skip_check=args.skip_check,
                         cache_input_tensors=args.cache_input_tensors,
+                        use_pipeline=args.use_pipeline,
                     )
                     writer.writerow(row)
                     fp.flush()
