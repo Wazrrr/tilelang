@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=4 python run_gemm_autotune_e2e.py --with-roller --enable-check --cpu-count 16

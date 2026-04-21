@@ -1,5 +1,8 @@
 import argparse
 import itertools
+import os
+import time
+from typing import Any
 import tilelang as tl
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
@@ -113,6 +116,39 @@ def get_best_config(
     K,
     with_roller: bool = False,
     profile_backend: str = "event",
+    execution_backend: str = "auto",
+    warmup: int = 3,
+    rep: int = 20,
+    timeout: int = 30,
+    skip_check: bool = False,
+    cache_input_tensors: bool = False,
+    topk: int = 20,
+):
+    autotuner, _, _ = _build_autotuner(
+        M=M,
+        N=N,
+        K=K,
+        with_roller=with_roller,
+        profile_backend=profile_backend,
+        execution_backend=execution_backend,
+        skip_check=skip_check,
+        cache_input_tensors=cache_input_tensors,
+        topk=topk,
+    )
+    autotuner_result, _measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout)
+    return autotuner_result
+
+
+def _build_autotuner(
+    M: int,
+    N: int,
+    K: int,
+    with_roller: bool,
+    profile_backend: str,
+    execution_backend: str,
+    skip_check: bool,
+    cache_input_tensors: bool,
+    topk: int,
 ):
     def kernel(
         block_M=None,
@@ -152,20 +188,102 @@ def get_best_config(
 
         return main
 
+    configs = get_configs(M, N, K, with_roller, topk=topk)
     autotuner = (
-        AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller))
+        AutoTuner.from_kernel(kernel=kernel, configs=configs)
         .set_compile_args(
             out_idx=[-1],
             target="auto",
+            execution_backend=execution_backend,
         )
         .set_profile_args(
             supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
+            ref_prog=None if skip_check else ref_program,
+            skip_check=skip_check,
+            cache_input_tensors=cache_input_tensors,
             backend=profile_backend,
         )
     )
-    return autotuner.run(warmup=3, rep=20)
+    return autotuner, configs, kernel
+
+
+def run_autotune_with_measurements(
+    M: int,
+    N: int,
+    K: int,
+    with_roller: bool = False,
+    profile_backend: str = "event",
+    execution_backend: str = "auto",
+    warmup: int = 1,
+    rep: int = 10,
+    timeout: int = 180,
+    skip_check: bool = True,
+    cache_input_tensors: bool = True,
+    topk: int = 20,
+) -> tuple[Any | None, dict[str, Any]]:
+    autotuner, configs, _ = _build_autotuner(
+        M=M,
+        N=N,
+        K=K,
+        with_roller=with_roller,
+        profile_backend=profile_backend,
+        execution_backend=execution_backend,
+        skip_check=skip_check,
+        cache_input_tensors=cache_input_tensors,
+        topk=topk,
+    )
+
+    metrics: dict[str, Any] = {
+        "m": M,
+        "n": N,
+        "k": K,
+        "num_configs": len(configs),
+        "with_roller": with_roller,
+        "topk": topk,
+        "skip_check": skip_check,
+        "execution_backend": execution_backend,
+        "profile_backend": profile_backend,
+        "warmup": warmup,
+        "rep": rep,
+        "timeout": timeout,
+        "cache_input_tensors": cache_input_tensors,
+        "cpu_count_env": os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1"),
+        "end_to_end_s": None,
+        "compilation_s": None,
+        "benchmark_s": None,
+        "best_latency_ms": None,
+        "ref_latency_ms": None,
+        "best_tflops": None,
+        "ref_tflops": None,
+        "best_config": None,
+        "status": "ok",
+        "error": "",
+    }
+    result = None
+    run_measurement = None
+    try:
+        result, run_measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout)
+    except Exception as ex:
+        metrics["status"] = "failed"
+        metrics["error"] = f"{type(ex).__name__}: {ex}"
+    if run_measurement is not None:
+        metrics["end_to_end_s"] = run_measurement.get("total_s")
+        metrics["compilation_s"] = run_measurement.get("compilation_s")
+        metrics["benchmark_s"] = run_measurement.get("benchmark_s")
+    else:
+        raise RuntimeError("Autotuning did not produce any measurement results, cannot extract metrics")
+
+    if result is not None:
+        total_flops = 2 * M * N * K
+        metrics["best_latency_ms"] = result.latency
+        metrics["ref_latency_ms"] = result.ref_latency
+        metrics["best_config"] = result.config
+        if result.latency is not None and result.latency > 0:
+            metrics["best_tflops"] = total_flops / result.latency * 1e-9
+        if result.ref_latency is not None and result.ref_latency > 0:
+            metrics["ref_tflops"] = total_flops / result.ref_latency * 1e-9
+
+    return result, metrics
 
 
 def get_heuristic_config() -> dict:

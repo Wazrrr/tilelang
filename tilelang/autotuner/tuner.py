@@ -34,6 +34,7 @@ import json
 import hashlib
 import threading
 import traceback
+import time
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
@@ -321,9 +322,22 @@ class AutoTuner:
             timeout: Maximum time per configuration.
 
         Returns:
-            AutotuneResult: Results of the auto-tuning process.
+            Tuple[AutotuneResult, dict[str, Any]]: The autotune artifact and timing measurements.
         """
         _init_logger_handlers()
+        run_start = time.perf_counter()
+        measurement: dict[str, Any] = {
+            "compilation_s": 0.0,
+            "benchmark_s": 0.0,
+            "total_s": 0.0,
+            "num_configs_submitted": 0,
+            "num_configs_compiled": 0,
+            "num_configs_benchmarked": 0,
+        }
+
+        def _pack_return(result: AutotuneResult):
+            measurement["total_s"] = time.perf_counter() - run_start
+            return result, measurement
 
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
@@ -366,14 +380,14 @@ class AutoTuner:
                         "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.",
                         kernel_name,
                     )
-                    return cached_result
+                    return _pack_return(cached_result)
 
                 # Then check disk cache
                 result = self._load_result_from_disk(key)
                 if result is not None:
                     # Populate memory cache with disk result
                     self._memory_cache[key] = result
-                    return result
+                    return _pack_return(result)
 
         best_latency: float = 1e8
         best_config: dict[str, Any] | None = None
@@ -509,10 +523,14 @@ class AutoTuner:
                     f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
                 )
                 # compile the kernel with the provided parameters
+                compilation_start = time.perf_counter()
                 jit_kernel = self.jit_compile()
                 autotuner_result = AutotuneResult(libcode=jit_kernel.get_kernel_source(), func=jit_kernel.prim_func, kernel=jit_kernel)
+                measurement["compilation_s"] = time.perf_counter() - compilation_start
+                measurement["num_configs_submitted"] = 1
+                measurement["num_configs_compiled"] = 1
                 self._memory_cache[key] = autotuner_result
-                return autotuner_result
+                return _pack_return(autotuner_result)
         # get the cpu count
         available_cpu_count = get_available_cpu_count()
         cpu_utilizations = float(env.TILELANG_AUTO_TUNING_CPU_UTILITIES)
@@ -544,6 +562,7 @@ class AutoTuner:
 
             return inner
 
+        compilation_start = time.perf_counter()
         for i, config_arg in enumerate(config_args):
             compile_func = self.jit_compile
 
@@ -559,6 +578,7 @@ class AutoTuner:
             futures.append(future)
             future_to_index[future] = i
 
+        measurement["num_configs_submitted"] = len(futures)
         results_with_configs = []
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Compiling configurations"):
             idx = future_to_index[future]
@@ -569,8 +589,12 @@ class AutoTuner:
             except Exception as e:
                 logger.debug(f"Compilation failed for config {config} at index {idx} with error: {e}")
                 continue
+        measurement["compilation_s"] = time.perf_counter() - compilation_start
+        measurement["num_configs_compiled"] = len(results_with_configs)
 
         ref_latency = None
+        benchmark_start = time.perf_counter()
+        measurement["num_configs_benchmarked"] = len(results_with_configs)
         progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
         for i in progress_bar:
             jit_kernel, config = results_with_configs[i]
@@ -594,6 +618,7 @@ class AutoTuner:
 
             progress_bar.set_postfix({"best_latency": best_latency})
             tqdm.write(f"Tuned Latency {latency} with config {config} at index {i}")
+        measurement["benchmark_s"] = time.perf_counter() - benchmark_start
 
         pool.shutdown()
 
@@ -626,13 +651,13 @@ class AutoTuner:
 
         self._memory_cache[key] = autotuner_result
 
-        return autotuner_result
+        return _pack_return(autotuner_result)
 
     def __call__(self) -> Any:
         """Make the AutoTuner callable, running the auto-tuning process.
 
         Returns:
-            AutotuneResult: Results of the auto-tuning process.
+            Tuple[AutotuneResult, dict[str, Any]]: Results of the auto-tuning process with measurements.
         """
         return self.run()
 
@@ -716,7 +741,7 @@ class AutoTuneImpl(Generic[_P, _T]):
                 autotuner.jit_compile = jit_compile
                 autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
 
-            artifact = autotuner.run()
+            artifact, _measurement = autotuner.run()
             self._tuner_cache[key] = artifact.kernel, artifact.config
 
         best_kernel, best_config = self._tuner_cache[key]
