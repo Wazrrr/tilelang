@@ -21,6 +21,8 @@ When no arguments are passed, the script runs:
 - `timeout`: `180`
 - `with_roller`: `False`
 - `use_pipeline`: `False`
+- `enable_grouped_compile`: `False`
+- `group_compile_size`: `2`
 - `skip_check`: `True`
 - `disable_cache`: `True`
 - output CSV: `results/gemm_autotune_e2e.csv`
@@ -74,6 +76,15 @@ Enable compile/benchmark pipelining (fallback two-phase mode):
 python benchmark/autotune/run_gemm_autotune_e2e.py --pipeline
 ```
 
+Enable grouped compile units (current phase: CUDA + cython only, otherwise auto-fallback):
+
+```bash
+python benchmark/autotune/run_gemm_autotune_e2e.py \
+  --execution-backend cython \
+  --grouped-compile \
+  --group-compile-size 2
+```
+
 ## CSV Columns
 
 - `shape_tag`, `shape_class`, `shape`
@@ -84,6 +95,10 @@ python benchmark/autotune/run_gemm_autotune_e2e.py --pipeline
 - `end_to_end_s`
 - `compilation_s`: compile stage time from futures submission to compile collection
 - `benchmark_s`: benchmark stage time spent in the benchmark loop
+- `enable_grouped_compile`, `group_compile_size`
+- `grouped_compile_active`: whether grouped mode is actually active for this run
+- `num_compile_units_submitted`, `avg_group_size`
+- `grouped_compile_reason`: fallback reason when grouped mode is requested but inactive
 - `best_latency_ms`, `best_tflops`
 - `ref_latency_ms`, `ref_tflops`
 - `cpu_count_env`

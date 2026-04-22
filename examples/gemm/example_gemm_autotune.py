@@ -124,6 +124,8 @@ def get_best_config(
     cache_input_tensors: bool = False,
     topk: int = 20,
     use_pipeline: bool = False,
+    enable_grouped_compile: bool = False,
+    group_compile_size: int = 2,
 ):
     autotuner, _, _ = _build_autotuner(
         M=M,
@@ -136,7 +138,14 @@ def get_best_config(
         cache_input_tensors=cache_input_tensors,
         topk=topk,
     )
-    autotuner_result, _measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout, use_pipeline=use_pipeline)
+    autotuner_result, _measurement = autotuner.run(
+        warmup=warmup,
+        rep=rep,
+        timeout=timeout,
+        use_pipeline=use_pipeline,
+        enable_grouped_compile=enable_grouped_compile,
+        group_compile_size=group_compile_size,
+    )
     return autotuner_result
 
 
@@ -222,6 +231,8 @@ def run_autotune_with_measurements(
     cache_input_tensors: bool = True,
     topk: int = 20,
     use_pipeline: bool = False,
+    enable_grouped_compile: bool = False,
+    group_compile_size: int = 2,
 ) -> tuple[Any | None, dict[str, Any]]:
     autotuner, configs, _ = _build_autotuner(
         M=M,
@@ -250,10 +261,16 @@ def run_autotune_with_measurements(
         "timeout": timeout,
         "cache_input_tensors": cache_input_tensors,
         "use_pipeline": use_pipeline,
+        "enable_grouped_compile": enable_grouped_compile,
+        "group_compile_size": group_compile_size,
         "cpu_count_env": os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1"),
         "end_to_end_s": None,
         "compilation_s": None,
         "benchmark_s": None,
+        "grouped_compile_active": None,
+        "num_compile_units_submitted": None,
+        "avg_group_size": None,
+        "grouped_compile_reason": "",
         "best_latency_ms": None,
         "ref_latency_ms": None,
         "best_tflops": None,
@@ -266,7 +283,14 @@ def run_autotune_with_measurements(
     run_measurement = None
     started = time.perf_counter()
     try:
-        result, run_measurement = autotuner.run(warmup=warmup, rep=rep, timeout=timeout, use_pipeline=use_pipeline)
+        result, run_measurement = autotuner.run(
+            warmup=warmup,
+            rep=rep,
+            timeout=timeout,
+            use_pipeline=use_pipeline,
+            enable_grouped_compile=enable_grouped_compile,
+            group_compile_size=group_compile_size,
+        )
     except Exception as ex:
         metrics["status"] = "failed"
         metrics["error"] = f"{type(ex).__name__}: {ex}"
@@ -276,6 +300,10 @@ def run_autotune_with_measurements(
         metrics["end_to_end_s"] = run_measurement.get("total_s")
         metrics["compilation_s"] = run_measurement.get("compilation_s")
         metrics["benchmark_s"] = run_measurement.get("benchmark_s")
+        metrics["grouped_compile_active"] = run_measurement.get("grouped_compile_active")
+        metrics["num_compile_units_submitted"] = run_measurement.get("num_compile_units_submitted")
+        metrics["avg_group_size"] = run_measurement.get("avg_group_size")
+        metrics["grouped_compile_reason"] = run_measurement.get("grouped_compile_reason", "")
 
     if result is not None:
         total_flops = 2 * M * N * K

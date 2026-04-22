@@ -65,6 +65,8 @@ def run_single_case(
     skip_check: bool,
     cache_input_tensors: bool,
     use_pipeline: bool,
+    enable_grouped_compile: bool,
+    group_compile_size: int,
 ) -> dict[str, Any]:
     m, n, k = shape
 
@@ -86,6 +88,8 @@ def run_single_case(
             skip_check=skip_check,
             cache_input_tensors=cache_input_tensors,
             use_pipeline=use_pipeline,
+            enable_grouped_compile=enable_grouped_compile,
+            group_compile_size=group_compile_size,
         )
     finally:
         if previous_cpu_count is None:
@@ -124,6 +128,12 @@ def run_single_case(
         "skip_check": skip_check,
         "cache_input_tensors": cache_input_tensors,
         "use_pipeline": use_pipeline,
+        "enable_grouped_compile": enable_grouped_compile,
+        "group_compile_size": group_compile_size,
+        "grouped_compile_active": metrics.get("grouped_compile_active"),
+        "num_compile_units_submitted": metrics.get("num_compile_units_submitted"),
+        "avg_group_size": metrics.get("avg_group_size"),
+        "grouped_compile_reason": metrics.get("grouped_compile_reason", ""),
         "best_config": json.dumps(best_config, sort_keys=True) if best_config is not None else "",
     }
     return row
@@ -203,6 +213,17 @@ def parse_args() -> argparse.Namespace:
     pipeline_group.add_argument("--no-pipeline", dest="use_pipeline", action="store_false")
     parser.set_defaults(use_pipeline=False)
 
+    grouped_compile_group = parser.add_mutually_exclusive_group()
+    grouped_compile_group.add_argument("--grouped-compile", dest="enable_grouped_compile", action="store_true")
+    grouped_compile_group.add_argument("--no-grouped-compile", dest="enable_grouped_compile", action="store_false")
+    parser.set_defaults(enable_grouped_compile=False)
+    parser.add_argument(
+        "--group-compile-size",
+        type=int,
+        default=2,
+        help="Number of configs in one compile unit when grouped compile is enabled.",
+    )
+
     return parser.parse_args()
 
 
@@ -216,6 +237,8 @@ def main() -> int:
         raise ValueError("--rep must be > 0")
     if args.timeout <= 0:
         raise ValueError("--timeout must be > 0")
+    if args.group_compile_size <= 0:
+        raise ValueError("--group-compile-size must be > 0")
     if any(cpu <= 0 for cpu in args.cpu_count):
         raise ValueError("--cpu-count values must be > 0")
 
@@ -262,6 +285,12 @@ def main() -> int:
         "skip_check",
         "cache_input_tensors",
         "use_pipeline",
+        "enable_grouped_compile",
+        "group_compile_size",
+        "grouped_compile_active",
+        "num_compile_units_submitted",
+        "avg_group_size",
+        "grouped_compile_reason",
         "best_config",
     ]
 
@@ -294,6 +323,8 @@ def main() -> int:
                         skip_check=args.skip_check,
                         cache_input_tensors=args.cache_input_tensors,
                         use_pipeline=args.use_pipeline,
+                        enable_grouped_compile=args.enable_grouped_compile,
+                        group_compile_size=args.group_compile_size,
                     )
                     writer.writerow(row)
                     fp.flush()

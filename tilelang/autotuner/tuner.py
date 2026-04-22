@@ -314,7 +314,15 @@ class AutoTuner:
         result = AutotuneResult.load_from_disk(self.cache_dir / key, self.compile_args)
         return result
 
-    def run(self, warmup: int = 25, rep: int = 100, timeout: int = 30, use_pipeline: bool = False):
+    def run(
+        self,
+        warmup: int = 25,
+        rep: int = 100,
+        timeout: int = 30,
+        use_pipeline: bool = False,
+        enable_grouped_compile: bool = False,
+        group_compile_size: int = 2,
+    ):
         """Run the auto-tuning process.
 
         Args:
@@ -322,10 +330,15 @@ class AutoTuner:
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
             use_pipeline: Whether to pipeline benchmarking with compilation.
+            enable_grouped_compile: Whether to enable grouped compilation.
+            group_compile_size: Number of configurations in one compile unit.
 
         Returns:
             Tuple[AutotuneResult, dict[str, Any]]: The autotune artifact and timing measurements.
         """
+        if group_compile_size <= 0:
+            raise ValueError("group_compile_size must be > 0")
+
         _init_logger_handlers()
         run_start = time.perf_counter()
         measurement: dict[str, Any] = {
@@ -336,6 +349,13 @@ class AutoTuner:
             "num_configs_compiled": 0,
             "num_configs_benchmarked": 0,
             "use_pipeline": use_pipeline,
+            "enable_grouped_compile": enable_grouped_compile,
+            "group_compile_size": group_compile_size,
+            "grouped_compile_active": False,
+            "grouped_compile_reason": "",
+            "num_compile_units_submitted": 0,
+            "avg_group_size": 1.0,
+            "group_compile_backend": self.compile_args.execution_backend,
         }
 
         def _pack_return(result: AutotuneResult):
@@ -505,6 +525,21 @@ class AutoTuner:
         if len(config_args) == 0:
             raise ValueError("No configurations to tune, please check your `@autotune` decorator")
 
+        target_kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
+        execution_backend = str(self.compile_args.execution_backend)
+        grouped_compile_requested = enable_grouped_compile and group_compile_size > 1
+        grouped_compile_active = grouped_compile_requested and execution_backend == "cython" and target_kind == "cuda"
+        grouped_compile_reason = ""
+        if grouped_compile_requested and not grouped_compile_active:
+            grouped_compile_reason = (
+                f"grouped compile is only enabled for CUDA+cython in this phase "
+                f"(current target={target_kind}, execution_backend={execution_backend})"
+            )
+            logger.info("Grouped compile fallback to per-config mode: %s", grouped_compile_reason)
+
+        measurement["grouped_compile_active"] = grouped_compile_active
+        measurement["grouped_compile_reason"] = grouped_compile_reason
+
         # check if the tunable arguments has been set.
         # get the back config argument
         top_config, *rest = config_args
@@ -532,6 +567,8 @@ class AutoTuner:
                 measurement["compilation_s"] = time.perf_counter() - compilation_start
                 measurement["num_configs_submitted"] = 1
                 measurement["num_configs_compiled"] = 1
+                measurement["num_compile_units_submitted"] = 1
+                measurement["avg_group_size"] = 1.0
                 self._memory_cache[key] = autotuner_result
                 return _pack_return(autotuner_result)
         # get the cpu count
@@ -556,7 +593,7 @@ class AutoTuner:
 
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
-        future_to_index = {}
+        future_to_unit = {}
         ready_queue = deque()
 
         def cuda_device_wrapper(func, device):
@@ -566,31 +603,52 @@ class AutoTuner:
 
             return inner
 
-        compilation_start = time.perf_counter()
-        for i, config_arg in enumerate(config_args):
+        def get_compile_func():
             compile_func = self.jit_compile
-
             if torch.cuda.is_available():
                 device = torch.cuda.current_device()
-
                 compile_func = cuda_device_wrapper(self.jit_compile, device)
+            return compile_func
 
-            future = pool.submit(
-                compile_func,
-                **config_arg,
-            )
+        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
+            compile_func = get_compile_func()
+            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None]] = []
+            for idx, config_arg in unit_items:
+                try:
+                    jit_kernel = compile_func(**config_arg)
+                    unit_results.append((idx, config_arg, jit_kernel, None))
+                except Exception as e:
+                    unit_results.append((idx, config_arg, None, e))
+            return unit_results
+
+        compile_units: list[list[tuple[int, dict[str, Any]]]] = []
+        if grouped_compile_active:
+            for start in range(0, len(config_args), group_compile_size):
+                end = min(start + group_compile_size, len(config_args))
+                compile_units.append([(i, config_args[i]) for i in range(start, end)])
+        else:
+            for i, config_arg in enumerate(config_args):
+                compile_units.append([(i, config_arg)])
+
+        compilation_start = time.perf_counter()
+        for unit_items in compile_units:
+            future = pool.submit(compile_unit, unit_items)
             futures.append(future)
-            future_to_index[future] = i
+            future_to_unit[future] = unit_items
 
-        measurement["num_configs_submitted"] = len(futures)
+        measurement["num_configs_submitted"] = len(config_args)
+        measurement["num_compile_units_submitted"] = len(compile_units)
+        measurement["avg_group_size"] = float(len(config_args)) / len(compile_units) if len(compile_units) > 0 else 1.0
+
         ref_latency = None
+        compile_desc = "Compiling configurations (grouped)" if grouped_compile_active else "Compiling configurations"
 
         if use_pipeline:
             pending_futures = set(futures)
             compile_finished = False
             benchmark_started = False
             benchmark_start = 0.0
-            compile_progress = tqdm(total=len(futures), desc="Compiling configurations")
+            compile_progress = tqdm(total=len(config_args), desc=compile_desc)
             progress_bar = tqdm(total=len(config_args), desc="Bench configurations")
 
             try:
@@ -611,15 +669,23 @@ class AutoTuner:
                             )
 
                     for future in done:
-                        compile_progress.update(1)
-                        idx = future_to_index[future]
-                        config = config_args[idx]
+                        unit_items = future_to_unit[future]
                         try:
-                            jit_kernel = future.result()
+                            unit_results = future.result()
+                        except Exception as e:
+                            compile_progress.update(len(unit_items))
+                            unit_indexes = [idx for idx, _ in unit_items]
+                            logger.debug("Compilation unit failed for indexes %s with error: %s", unit_indexes, e)
+                            continue
+
+                        compile_progress.update(len(unit_results))
+                        for idx, config, jit_kernel, error in unit_results:
+                            if error is not None:
+                                logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
+                                continue
+                            assert jit_kernel is not None
                             ready_queue.append((jit_kernel, config, idx))
                             measurement["num_configs_compiled"] += 1
-                        except Exception as e:
-                            logger.debug(f"Compilation failed for config {config} at index {idx} with error: {e}")
 
                     if (not compile_finished) and (not pending_futures):
                         measurement["compilation_s"] = time.perf_counter() - compilation_start
@@ -635,7 +701,6 @@ class AutoTuner:
                         try:
                             # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
                             # Because tma init may behave strangely with one thread
-                            # latency, ref_latency = target_fn(jit_kernel)
                             latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
                         except TimeoutException:
                             logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
@@ -668,16 +733,26 @@ class AutoTuner:
                 pool.shutdown()
         else:
             results_with_configs = []
-            compile_progress = tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Compiling configurations")
+            compile_progress = tqdm(total=len(config_args), desc=compile_desc)
             try:
-                for future in compile_progress:
-                    idx = future_to_index[future]
-                    config = config_args[idx]
+                for future in concurrent.futures.as_completed(futures):
+                    unit_items = future_to_unit[future]
                     try:
-                        jit_kernel = future.result()
-                        results_with_configs.append((jit_kernel, config, idx))
+                        unit_results = future.result()
                     except Exception as e:
-                        logger.debug(f"Compilation failed for config {config} at index {idx} with error: {e}")
+                        compile_progress.update(len(unit_items))
+                        unit_indexes = [idx for idx, _ in unit_items]
+                        logger.debug("Compilation unit failed for indexes %s with error: %s", unit_indexes, e)
+                        continue
+
+                    compile_progress.update(len(unit_results))
+                    for idx, config, jit_kernel, error in unit_results:
+                        if error is not None:
+                            logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
+                            continue
+                        assert jit_kernel is not None
+                        results_with_configs.append((jit_kernel, config, idx))
+
                 measurement["compilation_s"] = time.perf_counter() - compilation_start
                 measurement["num_configs_compiled"] = len(results_with_configs)
 
