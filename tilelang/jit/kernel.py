@@ -29,6 +29,7 @@ from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
 import logging
 import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class JITKernel(Generic[_P, _T]):
     latency: float = None
     config: dict[str, Any] = None
     ref_latency: float = None
+    compile_measurement: dict[str, float] | None = None
 
     def __init__(
         self,
@@ -233,6 +235,8 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
             )
 
+        compile_start = time.perf_counter()
+
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "tvm_ffi"
         enable_device_compile = execution_backend == "tvm_ffi"
@@ -243,6 +247,7 @@ class JITKernel(Generic[_P, _T]):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
             pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
+        lower_start = time.perf_counter()
         with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
@@ -251,10 +256,18 @@ class JITKernel(Generic[_P, _T]):
                 enable_host_codegen=enable_host_codegen,
                 enable_device_compile=enable_device_compile,
             )
+        lower_elapsed = time.perf_counter() - lower_start
 
         self.artifact = artifact
+        compile_measurement: dict[str, float] = {
+            "jit.lower_call_s": lower_elapsed,
+        }
+        if artifact.compile_measurement:
+            for key, value in artifact.compile_measurement.items():
+                compile_measurement[f"lower.{key}"] = value
 
         # Create an adapter based on the specified execution backend.
+        adapter_create_start = time.perf_counter()
         if execution_backend == "tvm_ffi":
             # Use TVMFFIKernelAdapter for interoperability with PyTorch via DLPack.
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
@@ -331,6 +344,16 @@ class JITKernel(Generic[_P, _T]):
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
+
+        adapter_compile_measurement = getattr(adapter, "compile_measurement", None)
+        if isinstance(adapter_compile_measurement, dict):
+            for key, value in adapter_compile_measurement.items():
+                if isinstance(value, (int, float)):
+                    compile_measurement[f"adapter.{key}"] = float(value)
+
+        compile_measurement["jit.adapter_create_s"] = time.perf_counter() - adapter_create_start
+        compile_measurement["jit.total_s"] = time.perf_counter() - compile_start
+        self.compile_measurement = compile_measurement
 
         return adapter
 

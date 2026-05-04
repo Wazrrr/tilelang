@@ -3,6 +3,7 @@
 from __future__ import annotations
 import ctypes
 import logging
+import time
 import torch
 
 from typing import Callable, Any
@@ -71,6 +72,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
     buffer_device_map: dict[tir.Var, tuple[int, torch.device]] | None = None
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
+    compile_measurement: dict[str, float] | None = None
 
     def __init__(
         self,
@@ -94,6 +96,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
             func_or_mod: TIR function or module to be compiled
             verbose: Enable verbose logging
         """
+        adapter_start = time.perf_counter()
+        self.compile_measurement = {}
+
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
         self.device_kernel_source = device_kernel_source
@@ -126,19 +131,37 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
+        wrap_start = time.perf_counter()
         self.host_kernel_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
+        self.compile_measurement["cython.wrapper_wrap_s"] = time.perf_counter() - wrap_start
 
+        lib_code_start = time.perf_counter()
         self.lib_generator.update_lib_code(self.host_kernel_source)
+        self.compile_measurement["cython.update_lib_code_s"] = time.perf_counter() - lib_code_start
+
+        compile_lib_start = time.perf_counter()
         self.lib_generator.compile_lib()
+        self.compile_measurement["cython.compile_lib_call_s"] = time.perf_counter() - compile_lib_start
+        libgen_measurement = getattr(self.lib_generator, "compile_measurement", None)
+        if isinstance(libgen_measurement, dict):
+            for key, value in libgen_measurement.items():
+                if isinstance(value, (int, float)):
+                    self.compile_measurement[f"cython.{key}"] = float(value)
+
+        load_lib_start = time.perf_counter()
         self.lib = self.lib_generator.load_lib()
+        self.compile_measurement["cython.load_lib_s"] = time.perf_counter() - load_lib_start
 
         self.lib.get_last_error.restype = ctypes.c_char_p
+        lib_init_start = time.perf_counter()
         result = self.lib.init()
+        self.compile_measurement["cython.lib_init_s"] = time.perf_counter() - lib_init_start
         if result != 0:
             error_msg = self.lib.get_last_error().decode("utf-8")
             error_msg += f"\n{self.lib_code}"
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
+        wrapper_bind_start = time.perf_counter()
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
@@ -147,6 +170,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_static_contiguous_list(self.static_contiguous_list)
         self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
         self.cython_wrapper.set_ptr_map(self.ptr_map)
+        self.compile_measurement["cython.wrapper_bind_s"] = time.perf_counter() - wrapper_bind_start
+        self.compile_measurement["cython.total_s"] = time.perf_counter() - adapter_start
         self._post_init()
 
     @classmethod
@@ -163,7 +188,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
+        adapter_start = time.perf_counter()
         adapter = cls.__new__(cls)
+        adapter.compile_measurement = {}
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.host_kernel_source = host_kernel_source
@@ -193,14 +220,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator = LibraryGenerator(adapter.target, verbose=verbose)
         adapter.lib_generator.assign_pass_configs(pass_configs)
         adapter.lib_generator.assign_compile_flags(compile_flags)
+        load_lib_start = time.perf_counter()
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+        adapter.compile_measurement["cython.load_lib_s"] = time.perf_counter() - load_lib_start
 
         adapter.lib.get_last_error.restype = ctypes.c_char_p
+        lib_init_start = time.perf_counter()
         result = adapter.lib.init()
+        adapter.compile_measurement["cython.lib_init_s"] = time.perf_counter() - lib_init_start
         if result != 0:
             error_msg = adapter.lib.get_last_error().decode("utf-8")
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
+        wrapper_bind_start = time.perf_counter()
         adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib)
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
@@ -209,6 +241,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.cython_wrapper.set_static_contiguous_list(adapter.static_contiguous_list)
         adapter.cython_wrapper.set_buffer_device_map(adapter.buffer_device_map)
         adapter.cython_wrapper.set_ptr_map(adapter.ptr_map)
+        adapter.compile_measurement["cython.wrapper_bind_s"] = time.perf_counter() - wrapper_bind_start
+        adapter.compile_measurement["cython.total_s"] = time.perf_counter() - adapter_start
 
         adapter._post_init()
         return adapter

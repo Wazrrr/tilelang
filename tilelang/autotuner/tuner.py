@@ -356,9 +356,32 @@ class AutoTuner:
             "num_compile_units_submitted": 0,
             "avg_group_size": 1.0,
             "group_compile_backend": self.compile_args.execution_backend,
+            "compile_stage_totals_s": {},
+            "compile_stage_avg_ms": {},
         }
 
+        compile_stage_totals: dict[str, float] = {}
+        compile_stage_counts: dict[str, int] = {}
+
+        def _accumulate_compile_stage_measurement(stage_measurement: dict[str, Any] | None) -> None:
+            if not isinstance(stage_measurement, dict):
+                return
+            for stage_name, stage_value in stage_measurement.items():
+                if not isinstance(stage_value, (int, float)):
+                    continue
+                compile_stage_totals[stage_name] = compile_stage_totals.get(stage_name, 0.0) + float(stage_value)
+                compile_stage_counts[stage_name] = compile_stage_counts.get(stage_name, 0) + 1
+
+        def _finalize_compile_stage_measurement() -> None:
+            if not compile_stage_totals:
+                return
+            measurement["compile_stage_totals_s"] = dict(sorted(compile_stage_totals.items(), key=lambda kv: kv[0]))
+            measurement["compile_stage_avg_ms"] = {
+                k: (compile_stage_totals[k] / compile_stage_counts[k]) * 1e3 for k in sorted(compile_stage_totals.keys())
+            }
+
         def _pack_return(result: AutotuneResult):
+            _finalize_compile_stage_measurement()
             measurement["total_s"] = time.perf_counter() - run_start
             return result, measurement
 
@@ -418,7 +441,26 @@ class AutoTuner:
 
         def _compile(**config_arg) -> tilelang.JITKernel:
             compile_args = self.compile_args
-            return compile_args.compile_program(self.fn(**config_arg))
+            compile_stage_measurement: dict[str, float] = {}
+
+            compile_total_start = time.perf_counter()
+            build_program_start = time.perf_counter()
+            program = self.fn(**config_arg)
+            compile_stage_measurement["compile.build_program_s"] = time.perf_counter() - build_program_start
+
+            compile_program_start = time.perf_counter()
+            jit_kernel = compile_args.compile_program(program)
+            compile_stage_measurement["compile.compile_program_s"] = time.perf_counter() - compile_program_start
+            compile_stage_measurement["compile.total_s"] = time.perf_counter() - compile_total_start
+
+            kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
+            if isinstance(kernel_compile_measurement, dict):
+                for stage_name, stage_value in kernel_compile_measurement.items():
+                    if isinstance(stage_value, (int, float)):
+                        compile_stage_measurement[f"kernel.{stage_name}"] = float(stage_value)
+
+            jit_kernel.compile_measurement = compile_stage_measurement
+            return jit_kernel
 
         if self.jit_compile is None:
             self.jit_compile = _compile
@@ -528,7 +570,7 @@ class AutoTuner:
         target_kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
         execution_backend = str(self.compile_args.execution_backend)
         grouped_compile_requested = enable_grouped_compile and group_compile_size > 1
-        grouped_compile_active = grouped_compile_requested and execution_backend == "cython" and target_kind == "cuda"
+        grouped_compile_active = grouped_compile_requested and target_kind == "cuda"
         grouped_compile_reason = ""
         if grouped_compile_requested and not grouped_compile_active:
             grouped_compile_reason = (
@@ -563,6 +605,7 @@ class AutoTuner:
                 # compile the kernel with the provided parameters
                 compilation_start = time.perf_counter()
                 jit_kernel = self.jit_compile()
+                _accumulate_compile_stage_measurement(getattr(jit_kernel, "compile_measurement", None))
                 autotuner_result = AutotuneResult(libcode=jit_kernel.get_kernel_source(), func=jit_kernel.prim_func, kernel=jit_kernel)
                 measurement["compilation_s"] = time.perf_counter() - compilation_start
                 measurement["num_configs_submitted"] = 1
@@ -612,13 +655,22 @@ class AutoTuner:
 
         def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
             compile_func = get_compile_func()
-            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None]] = []
+            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None, dict[str, float]]] = []
             for idx, config_arg in unit_items:
+                config_compile_start = time.perf_counter()
                 try:
                     jit_kernel = compile_func(**config_arg)
-                    unit_results.append((idx, config_arg, jit_kernel, None))
+                    compile_stage_measurement = {}
+                    kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
+                    if isinstance(kernel_compile_measurement, dict):
+                        compile_stage_measurement.update(kernel_compile_measurement)
+                    compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
+                    unit_results.append((idx, config_arg, jit_kernel, None, compile_stage_measurement))
                 except Exception as e:
-                    unit_results.append((idx, config_arg, None, e))
+                    compile_stage_measurement = {
+                        "compile_unit.config_total_s": time.perf_counter() - config_compile_start,
+                    }
+                    unit_results.append((idx, config_arg, None, e, compile_stage_measurement))
             return unit_results
 
         compile_units: list[list[tuple[int, dict[str, Any]]]] = []
@@ -679,7 +731,8 @@ class AutoTuner:
                             continue
 
                         compile_progress.update(len(unit_results))
-                        for idx, config, jit_kernel, error in unit_results:
+                        for idx, config, jit_kernel, error, compile_stage_measurement in unit_results:
+                            _accumulate_compile_stage_measurement(compile_stage_measurement)
                             if error is not None:
                                 logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
                                 continue
@@ -746,7 +799,8 @@ class AutoTuner:
                         continue
 
                     compile_progress.update(len(unit_results))
-                    for idx, config, jit_kernel, error in unit_results:
+                    for idx, config, jit_kernel, error, compile_stage_measurement in unit_results:
+                        _accumulate_compile_stage_measurement(compile_stage_measurement)
                         if error is not None:
                             logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
                             continue

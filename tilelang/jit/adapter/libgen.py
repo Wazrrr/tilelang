@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from typing import Any
 
 from tvm.target import Target
@@ -25,6 +26,7 @@ class LibraryGenerator:
     lib_code: str | None = None
     pass_configs: dict[str, Any] | None = None
     compile_flags: list[str] | None = None
+    compile_measurement: dict[str, float] | None = None
 
     def __init__(self, target: Target, verbose: bool = False):
         self.target = target
@@ -50,12 +52,17 @@ class LibraryGenerator:
         return ctypes.CDLL(lib_path)
 
     def compile_lib(self, timeout: float = None):
+        total_start = time.perf_counter()
+        self.compile_measurement = {}
         target = self.target
         verbose = self.verbose
+        command_setup_start = time.perf_counter()
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
+            tmpfile_start = time.perf_counter()
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
+            self.compile_measurement["libgen.tempfile_create_s"] = time.perf_counter() - tmpfile_start
             target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
@@ -92,7 +99,9 @@ class LibraryGenerator:
         elif is_hip_target(target):
             from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
 
+            tmpfile_start = time.perf_counter()
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
+            self.compile_measurement["libgen.tempfile_create_s"] = time.perf_counter() - tmpfile_start
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
             arch = get_rocm_arch(rocm_path)
@@ -110,7 +119,9 @@ class LibraryGenerator:
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
 
+            tmpfile_start = time.perf_counter()
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
+            self.compile_measurement["libgen.tempfile_create_s"] = time.perf_counter() - tmpfile_start
             libpath = src.name.replace(".cpp", ".so")
 
             command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
@@ -128,22 +139,35 @@ class LibraryGenerator:
             command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
 
         command += ["-o", libpath]
+        self.compile_measurement["libgen.command_setup_s"] = time.perf_counter() - command_setup_start
 
+        source_write_start = time.perf_counter()
         src.write(self.lib_code)
         src.flush()
+        self.compile_measurement["libgen.source_write_s"] = time.perf_counter() - source_write_start
 
+        subprocess_start = time.perf_counter()
         try:
             if verbose:
                 print(f"compile_lib compilation command: {' '.join(command)}")
             ret = subprocess.run(command, timeout=timeout)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
+        subprocess_elapsed = time.perf_counter() - subprocess_start
+        self.compile_measurement["libgen.compiler_subprocess_s"] = subprocess_elapsed
+        if is_cuda_target(target):
+            self.compile_measurement["libgen.cuda.nvcc_subprocess_s"] = subprocess_elapsed
+        elif is_hip_target(target):
+            self.compile_measurement["libgen.hip.hipcc_subprocess_s"] = subprocess_elapsed
+        elif is_cpu_target(target):
+            self.compile_measurement["libgen.cpu.cxx_subprocess_s"] = subprocess_elapsed
 
         if ret.returncode != 0:
             raise RuntimeError(f"Compilation Failed! {command}\n {self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath
+        self.compile_measurement["libgen.total_s"] = time.perf_counter() - total_start
 
     def remove_lib(self):
         if self.libpath:

@@ -9,7 +9,9 @@ On non-CUDA builds, the stream/device fall back to 0/CPU semantics.
 from __future__ import annotations
 
 from typing import Callable, Any
+import os
 import sys
+import time
 
 import torch
 from tilelang import tvm
@@ -196,11 +198,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 expected_dtype_strs.append(None)
                 is_buffer_param.append(False)
 
+        # Print per-call timing for a small number of calls by default.
+        # This helps diagnose host overhead (tensor prep/allocation) vs kernel runtime.
+        timing_print_limit = max(0, int(os.environ.get("TL_TVM_FFI_TIMING_PRINT_LIMIT", "1")))
+        timing_call_count = 0
+
         def func(*inputs: torch.Tensor | Any):
+            nonlocal timing_call_count
             # Validate input count strictly
             expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
+
+            need_timing_print = timing_call_count < timing_print_limit
+            if need_timing_print:
+                prepare_start = time.perf_counter()
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
@@ -245,7 +257,28 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            executable(*tensor_list)
+            if need_timing_print:
+                prepare_end = time.perf_counter()
+                sync_device = next((t.device for t in tensor_list if isinstance(t, torch.Tensor) and t.is_cuda), None)
+                if sync_device is not None:
+                    torch.cuda.synchronize(sync_device)
+                kernel_start = time.perf_counter()
+                executable(*tensor_list)
+                if sync_device is not None:
+                    torch.cuda.synchronize(sync_device)
+                kernel_end = time.perf_counter()
+
+                timing_call_count += 1
+                print(
+                    "[TVMFFI][timing] "
+                    f"call={timing_call_count} "
+                    f"prepare_ms={(prepare_end - prepare_start) * 1e3:.3f} "
+                    f"kernel_ms={(kernel_end - kernel_start) * 1e3:.3f} "
+                    f"total_ms={(kernel_end - prepare_start) * 1e3:.3f}",
+                    flush=True,
+                )
+            else:
+                executable(*tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:

@@ -162,3 +162,4 @@ class CompiledArtifact:
     params: list[KernelParam]  # List of parameters (tensors/scalars) used by the kernel
     kernel_source: str  # Raw source code of the generated kernel
     rt_mod: tvm.runtime.Module | None = None  # Runtime module for execution, may be lazily initialized
+    compile_measurement: dict[str, float] | None = None  # Optional compile-stage timing metrics

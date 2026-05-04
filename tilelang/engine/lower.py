@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Callable
+import time
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -236,13 +237,19 @@ def lower(
     own device codegen implementation in jit.
     """
 
+    stage: dict[str, float] = {}
+    total_start = time.perf_counter()
+
     mod = func_or_mod
     params = None
+    prepare_start = time.perf_counter()
     if isinstance(func_or_mod, tir.PrimFunc):
         func = func_or_mod
         params = extrac_params(func) if not runtime_only else None
         mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    stage["prepare_input_module_s"] = time.perf_counter() - prepare_start
 
+    target_start = time.perf_counter()
     if isinstance(target, str):
         target = determine_target(target)
 
@@ -250,27 +257,50 @@ def lower(
 
     target_host = tvm.target.Target.canon_target(target_host)
     target = tvm.target.Target(target, target_host)
+    stage["normalize_target_s"] = time.perf_counter() - target_start
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
     # Before lowering, do semantic check
+    semantic_check_start = time.perf_counter()
     PreLowerSemanticCheck(mod)
+    stage["pre_lower_semantic_check_s"] = time.perf_counter() - semantic_check_start
 
     # Phase 1: Lower and legalize the IR
+    lower_legalize_start = time.perf_counter()
     mod = LowerAndLegalize(mod, target)
+    stage["lower_and_legalize_s"] = time.perf_counter() - lower_legalize_start
 
     # Phase 2: Optimize the IR for the target
+    optimize_start = time.perf_counter()
     mod = OptimizeForTarget(mod, target)
+    stage["optimize_for_target_s"] = time.perf_counter() - optimize_start
 
+    split_start = time.perf_counter()
     host_mod = tir.transform.Filter(_is_host_call)(mod)
+    stage["split_host_mod_s"] = time.perf_counter() - split_start
+    split_start = time.perf_counter()
     device_mod = tir.transform.Filter(_is_device_call)(mod)
+    stage["split_device_mod_s"] = time.perf_counter() - split_start
 
+    device_codegen_start = time.perf_counter()
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
+    stage["device_codegen_s"] = time.perf_counter() - device_codegen_start
+
+    inspect_source_start = time.perf_counter()
+    kernel_source = codegen_mod.inspect_source()
+    stage["inspect_source_s"] = time.perf_counter() - inspect_source_start
 
     if enable_host_codegen:
+        host_codegen_start = time.perf_counter()
         host_mod = host_codegen(host_mod, target_host, target=target)
+        stage["host_codegen_s"] = time.perf_counter() - host_codegen_start
+        import_module_start = time.perf_counter()
         host_mod.import_module(codegen_mod)
-        return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source(), rt_mod=host_mod)
+        stage["host_import_device_module_s"] = time.perf_counter() - import_module_start
+        stage["total_s"] = time.perf_counter() - total_start
+        return CompiledArtifact(host_mod, device_mod, params, kernel_source, rt_mod=host_mod, compile_measurement=stage)
 
-    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source())
+    stage["total_s"] = time.perf_counter() - total_start
+    return CompiledArtifact(host_mod, device_mod, params, kernel_source, compile_measurement=stage)

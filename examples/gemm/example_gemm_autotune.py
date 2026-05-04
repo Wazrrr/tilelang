@@ -267,6 +267,8 @@ def run_autotune_with_measurements(
         "end_to_end_s": None,
         "compilation_s": None,
         "benchmark_s": None,
+        "compile_stage_totals_s": {},
+        "compile_stage_avg_ms": {},
         "grouped_compile_active": None,
         "num_compile_units_submitted": None,
         "avg_group_size": None,
@@ -300,6 +302,8 @@ def run_autotune_with_measurements(
         metrics["end_to_end_s"] = run_measurement.get("total_s")
         metrics["compilation_s"] = run_measurement.get("compilation_s")
         metrics["benchmark_s"] = run_measurement.get("benchmark_s")
+        metrics["compile_stage_totals_s"] = run_measurement.get("compile_stage_totals_s", {})
+        metrics["compile_stage_avg_ms"] = run_measurement.get("compile_stage_avg_ms", {})
         metrics["grouped_compile_active"] = run_measurement.get("grouped_compile_active")
         metrics["num_compile_units_submitted"] = run_measurement.get("num_compile_units_submitted")
         metrics["avg_group_size"] = run_measurement.get("avg_group_size")

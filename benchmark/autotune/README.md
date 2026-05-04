@@ -95,6 +95,8 @@ python benchmark/autotune/run_gemm_autotune_e2e.py \
 - `end_to_end_s`
 - `compilation_s`: compile stage time from futures submission to compile collection
 - `benchmark_s`: benchmark stage time spent in the benchmark loop
+- `compile_stage_totals_s`: JSON map of summed compile stage timings across compiled configs
+- `compile_stage_avg_ms`: JSON map of per-stage average time in ms per config
 - `enable_grouped_compile`, `group_compile_size`
 - `grouped_compile_active`: whether grouped mode is actually active for this run
 - `num_compile_units_submitted`, `avg_group_size`
