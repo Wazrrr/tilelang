@@ -1,0 +1,9 @@
+{
+  "lower_and_legalize_s": 0.012497320072725415,
+  "normalize_target_s": 0.00011924793943762779,
+  "optimize_for_target_s": 0.030658485018648207,
+  "pre_lower_semantic_check_s": 0.0010543880052864552,
+  "prepare_input_module_s": 0.00017780403140932322,
+  "split_device_mod_s": 4.024000372737646e-05,
+  "split_host_mod_s": 0.00014796003233641386
+}

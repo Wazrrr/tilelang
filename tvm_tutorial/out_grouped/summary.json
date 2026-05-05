@@ -1,0 +1,111 @@
+{
+  "compile_device": false,
+  "grouped": {
+    "dispatch_trace": {
+      "rows": [
+        {
+          "host_entry_symbol": "tutorial_vec_add",
+          "imports": 1,
+          "name": "kernel_a",
+          "resolved_symbols": {
+            "tutorial_vec_add_kernel": {
+              "error": "",
+              "resolved": true
+            },
+            "tutorial_vec_sub_kernel": {
+              "error": "",
+              "resolved": true
+            }
+          }
+        },
+        {
+          "host_entry_symbol": "tutorial_vec_sub",
+          "imports": 1,
+          "name": "kernel_b",
+          "resolved_symbols": {
+            "tutorial_vec_add_kernel": {
+              "error": "",
+              "resolved": true
+            },
+            "tutorial_vec_sub_kernel": {
+              "error": "",
+              "resolved": true
+            }
+          }
+        }
+      ],
+      "trace_file": "tvm_tutorial/out_grouped/grouped.dispatch_trace.json"
+    },
+    "grouped_device_source_len": 1062,
+    "grouped_host_summaries": [
+      {
+        "host_source_len": 47617,
+        "imports": 1,
+        "name": "kernel_a"
+      },
+      {
+        "host_source_len": 47617,
+        "imports": 1,
+        "name": "kernel_b"
+      }
+    ],
+    "merged_device_symbol_count": 2,
+    "merged_device_symbols": [
+      "tutorial_vec_add_kernel",
+      "tutorial_vec_sub_kernel"
+    ]
+  },
+  "n": 1024,
+  "notes": [
+    "This tutorial demonstrates grouped compile style for multiple kernels.",
+    "Each kernel is lowered independently, then device IRModules are merged into one tvm.IRModule.",
+    "Grouped device codegen is executed once; host modules are still emitted per-kernel and import the shared device module."
+  ],
+  "pass_configs": {},
+  "per_kernel": [
+    {
+      "device_source_len": 688,
+      "device_symbols": [
+        "tutorial_vec_add_kernel"
+      ],
+      "host_source_len": 47617,
+      "host_symbols": [
+        "tutorial_vec_add"
+      ],
+      "lower_stage_s": {
+        "lower_and_legalize_s": 0.012497320072725415,
+        "normalize_target_s": 0.00011924793943762779,
+        "optimize_for_target_s": 0.030658485018648207,
+        "pre_lower_semantic_check_s": 0.0010543880052864552,
+        "prepare_input_module_s": 0.00017780403140932322,
+        "split_device_mod_s": 4.024000372737646e-05,
+        "split_host_mod_s": 0.00014796003233641386
+      },
+      "name": "kernel_a",
+      "primfunc_symbol": "tutorial_vec_add"
+    },
+    {
+      "device_source_len": 688,
+      "device_symbols": [
+        "tutorial_vec_sub_kernel"
+      ],
+      "host_source_len": 47617,
+      "host_symbols": [
+        "tutorial_vec_sub"
+      ],
+      "lower_stage_s": {
+        "lower_and_legalize_s": 0.009665919002145529,
+        "normalize_target_s": 5.2458024583756924e-05,
+        "optimize_for_target_s": 0.028776104911230505,
+        "pre_lower_semantic_check_s": 0.0003784620203077793,
+        "prepare_input_module_s": 0.00010540697257965803,
+        "split_device_mod_s": 2.4016015231609344e-05,
+        "split_host_mod_s": 7.813610136508942e-05
+      },
+      "name": "kernel_b",
+      "primfunc_symbol": "tutorial_vec_sub"
+    }
+  ],
+  "target": "cuda -keys=cuda,gpu -arch=sm_90 -max_num_threads=1024 -thread_warp_size=32",
+  "target_host": null
+}

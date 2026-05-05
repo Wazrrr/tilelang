@@ -1,0 +1,16 @@
+# from tvm.script import tir as T
+
+@T.prim_func
+def tutorial_vec_sub(x_handle: T.handle, y_handle: T.handle, out_handle: T.handle):
+    x = T.match_buffer(x_handle, (1024,), strides=(1,))
+    y = T.match_buffer(y_handle, (1024,), strides=(1,))
+    out = T.match_buffer(out_handle, (1024,), strides=(1,))
+    # with T.block("root"):
+    bx = T.launch_thread("blockIdx.x", 1024)
+    tx = T.launch_thread("threadIdx.x", 128)
+    ty = T.launch_thread("threadIdx.y", 1)
+    tz = T.launch_thread("threadIdx.z", 1)
+    with T.block("tilelang_root"):
+        T.reads(x[bx], y[bx])
+        T.writes(out[bx])
+        out[bx] = x[bx] - y[bx]

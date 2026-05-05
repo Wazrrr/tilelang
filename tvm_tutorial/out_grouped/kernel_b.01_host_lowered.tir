@@ -1,0 +1,99 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def tutorial_vec_sub(self_handle: T.handle, args: T.handle, num_args: T.int32, result: T.handle("void", "global")) -> T.int32:
+        T.func_attr({"calling_conv": 1, "target": T.target({"keys": ["cpu"], "kind": "c", "tag": ""}), "thread_extent": {}, "tir.is_entry_func": True, "tl.has_tma": T.bool(False), "tl.readonly_param_indices": [0, 1, 2], "tma_descriptor_args": {}})
+        assert num_args == 3, "tutorial_vec_sub: num_args should be 3"
+        assert not T.isnullptr(args), "tutorial_vec_sub: args pointer is NULL"
+        x_handle_type_index: T.int32 = T.tvm_struct_get(args, 0, 13, "int32")
+        assert x_handle_type_index == 0 or x_handle_type_index == 4 or x_handle_type_index == 7 or 64 <= x_handle_type_index, "kernel tutorial_vec_sub input x expected pointer or tensor handle"
+        y_handle_type_index: T.int32 = T.tvm_struct_get(args, 1, 13, "int32")
+        assert y_handle_type_index == 0 or y_handle_type_index == 4 or y_handle_type_index == 7 or 64 <= y_handle_type_index, "kernel tutorial_vec_sub input y expected pointer or tensor handle"
+        out_handle_type_index: T.int32 = T.tvm_struct_get(args, 2, 13, "int32")
+        assert out_handle_type_index == 0 or out_handle_type_index == 4 or out_handle_type_index == 7 or 64 <= out_handle_type_index, "kernel tutorial_vec_sub input out expected pointer or tensor handle"
+        x_handle: T.handle = T.Select(x_handle_type_index == 70, T.handle_add_byte_offset(T.tvm_struct_get(args, 0, 15, "handle"), 24), T.tvm_struct_get(args, 0, 15, "handle"))
+        y_handle: T.handle = T.Select(y_handle_type_index == 70, T.handle_add_byte_offset(T.tvm_struct_get(args, 1, 15, "handle"), 24), T.tvm_struct_get(args, 1, 15, "handle"))
+        out_handle: T.handle = T.Select(out_handle_type_index == 70, T.handle_add_byte_offset(T.tvm_struct_get(args, 2, 15, "handle"), 24), T.tvm_struct_get(args, 2, 15, "handle"))
+        tutorial_vec_sub_x_is_null: T.bool = T.isnullptr(x_handle)
+        assert not tutorial_vec_sub_x_is_null, "tutorial_vec_sub.x is expected to have non-NULL pointer"
+        tutorial_vec_sub_y_is_null: T.bool = T.isnullptr(y_handle)
+        assert not tutorial_vec_sub_y_is_null, "tutorial_vec_sub.y is expected to have non-NULL pointer"
+        tutorial_vec_sub_out_is_null: T.bool = T.isnullptr(out_handle)
+        assert not tutorial_vec_sub_out_is_null, "tutorial_vec_sub.out is expected to have non-NULL pointer"
+        tutorial_vec_sub_x_shape: T.handle("int64", "global") = T.tvm_struct_get(x_handle, 0, 2, "handle")
+        tutorial_vec_sub_x_shape_1 = T.decl_buffer((1,), "int64", data=tutorial_vec_sub_x_shape)
+        tutorial_vec_sub_y_shape: T.handle("int64", "global") = T.tvm_struct_get(y_handle, 0, 2, "handle")
+        tutorial_vec_sub_y_shape_1 = T.decl_buffer((1,), "int64", data=tutorial_vec_sub_y_shape)
+        tutorial_vec_sub_out_shape: T.handle("int64", "global") = T.tvm_struct_get(out_handle, 0, 2, "handle")
+        tutorial_vec_sub_out_shape_1 = T.decl_buffer((1,), "int64", data=tutorial_vec_sub_out_shape)
+        if T.tvm_struct_get(x_handle, 0, 4, "int32") != 1:
+            T.call_packed("__tvm_error_ndim_mismatch", "tutorial_vec_sub", "x", T.int64(1), T.Cast("int64", T.tvm_struct_get(x_handle, 0, 4, "int32")))
+        tutorial_vec_sub_x_strides: T.handle("int64", "global") = T.tvm_struct_get(x_handle, 0, 3, "handle")
+        tutorial_vec_sub_x_strides_1 = T.decl_buffer((1,), "int64", data=tutorial_vec_sub_x_strides)
+        dev_id: T.int32 = T.tvm_struct_get(x_handle, 0, 9, "int32")
+        x: T.handle("float32", "global") = T.tvm_struct_get(x_handle, 0, 1, "handle")
+        T.attr(x, "storage_alignment", 64)
+        if T.tvm_struct_get(y_handle, 0, 4, "int32") != 1:
+            T.call_packed("__tvm_error_ndim_mismatch", "tutorial_vec_sub", "y", T.int64(1), T.Cast("int64", T.tvm_struct_get(y_handle, 0, 4, "int32")))
+        tutorial_vec_sub_y_strides: T.handle("int64", "global") = T.tvm_struct_get(y_handle, 0, 3, "handle")
+        tutorial_vec_sub_y_strides_1 = T.decl_buffer((1,), "int64", data=tutorial_vec_sub_y_strides)
+        y: T.handle("float32", "global") = T.tvm_struct_get(y_handle, 0, 1, "handle")
+        T.attr(y, "storage_alignment", 64)
+        if T.tvm_struct_get(out_handle, 0, 4, "int32") != 1:
+            T.call_packed("__tvm_error_ndim_mismatch", "tutorial_vec_sub", "out", T.int64(1), T.Cast("int64", T.tvm_struct_get(out_handle, 0, 4, "int32")))
+        tutorial_vec_sub_out_strides: T.handle("int64", "global") = T.tvm_struct_get(out_handle, 0, 3, "handle")
+        tutorial_vec_sub_out_strides_1 = T.decl_buffer((1,), "int64", data=tutorial_vec_sub_out_strides)
+        out: T.handle("float32", "global") = T.tvm_struct_get(out_handle, 0, 1, "handle")
+        T.attr(out, "storage_alignment", 64)
+        T.attr("default", "device_id", dev_id)
+        T.attr("default", "device_type", 2)
+        if T.tvm_struct_get(x_handle, 0, 5, "uint8") != T.uint8(2) or T.tvm_struct_get(x_handle, 0, 6, "uint8") != T.uint8(32) or T.tvm_struct_get(x_handle, 0, 7, "uint16") != T.uint16(1):
+            T.call_packed("__tvm_error_dtype_mismatch", "tutorial_vec_sub", "x", T.Cast("int64", T.tvm_struct_get(x_handle, 0, 5, "uint8")), T.Cast("int64", T.tvm_struct_get(x_handle, 0, 6, "uint8")), T.Cast("int64", T.tvm_struct_get(x_handle, 0, 7, "uint16")), T.int64(2), T.int64(32), T.int64(1))
+        if T.Cast("int32", tutorial_vec_sub_x_shape_1[0]) != 1024:
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "x", "shape[0]", T.int64(1024), T.Cast("int64", T.Cast("int32", tutorial_vec_sub_x_shape_1[0])))
+        if T.if_then_else(T.isnullptr(tutorial_vec_sub_x_strides), 1, T.Cast("int32", tutorial_vec_sub_x_strides_1[0])) != 1:
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "x", "strides[0]", T.int64(1), T.Cast("int64", T.if_then_else(T.isnullptr(tutorial_vec_sub_x_strides), 1, T.Cast("int32", tutorial_vec_sub_x_strides_1[0]))))
+        if T.uint64(0) != T.tvm_struct_get(x_handle, 0, 8, "uint64"):
+            T.call_packed("__tvm_error_byte_offset_mismatch", "tutorial_vec_sub", "x", T.int64(0), T.Cast("int64", T.tvm_struct_get(x_handle, 0, 8, "uint64")))
+        if T.tvm_struct_get(x_handle, 0, 10, "int32") != 2:
+            T.call_packed("__tvm_error_device_type_mismatch", "tutorial_vec_sub", "x", T.int64(2), T.Cast("int64", T.tvm_struct_get(x_handle, 0, 10, "int32")))
+        if T.isnullptr(x):
+            T.call_packed("__tvm_error_null_ptr", "tutorial_vec_sub", "x", "data pointer")
+        if T.tvm_struct_get(y_handle, 0, 5, "uint8") != T.uint8(2) or T.tvm_struct_get(y_handle, 0, 6, "uint8") != T.uint8(32) or T.tvm_struct_get(y_handle, 0, 7, "uint16") != T.uint16(1):
+            T.call_packed("__tvm_error_dtype_mismatch", "tutorial_vec_sub", "y", T.Cast("int64", T.tvm_struct_get(y_handle, 0, 5, "uint8")), T.Cast("int64", T.tvm_struct_get(y_handle, 0, 6, "uint8")), T.Cast("int64", T.tvm_struct_get(y_handle, 0, 7, "uint16")), T.int64(2), T.int64(32), T.int64(1))
+        if T.Cast("int32", tutorial_vec_sub_y_shape_1[0]) != 1024:
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "y", "shape[0]", T.int64(1024), T.Cast("int64", T.Cast("int32", tutorial_vec_sub_y_shape_1[0])))
+        if T.if_then_else(T.isnullptr(tutorial_vec_sub_y_strides), 1, T.Cast("int32", tutorial_vec_sub_y_strides_1[0])) != 1:
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "y", "strides[0]", T.int64(1), T.Cast("int64", T.if_then_else(T.isnullptr(tutorial_vec_sub_y_strides), 1, T.Cast("int32", tutorial_vec_sub_y_strides_1[0]))))
+        if T.uint64(0) != T.tvm_struct_get(y_handle, 0, 8, "uint64"):
+            T.call_packed("__tvm_error_byte_offset_mismatch", "tutorial_vec_sub", "y", T.int64(0), T.Cast("int64", T.tvm_struct_get(y_handle, 0, 8, "uint64")))
+        if T.tvm_struct_get(y_handle, 0, 9, "int32") != T.tvm_struct_get(x_handle, 0, 9, "int32"):
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "y", "device_id", T.Cast("int64", T.tvm_struct_get(x_handle, 0, 9, "int32")), T.Cast("int64", T.tvm_struct_get(y_handle, 0, 9, "int32")))
+        if T.tvm_struct_get(y_handle, 0, 10, "int32") != 2:
+            T.call_packed("__tvm_error_device_type_mismatch", "tutorial_vec_sub", "y", T.int64(2), T.Cast("int64", T.tvm_struct_get(y_handle, 0, 10, "int32")))
+        if T.isnullptr(y):
+            T.call_packed("__tvm_error_null_ptr", "tutorial_vec_sub", "y", "data pointer")
+        if T.tvm_struct_get(out_handle, 0, 5, "uint8") != T.uint8(2) or T.tvm_struct_get(out_handle, 0, 6, "uint8") != T.uint8(32) or T.tvm_struct_get(out_handle, 0, 7, "uint16") != T.uint16(1):
+            T.call_packed("__tvm_error_dtype_mismatch", "tutorial_vec_sub", "out", T.Cast("int64", T.tvm_struct_get(out_handle, 0, 5, "uint8")), T.Cast("int64", T.tvm_struct_get(out_handle, 0, 6, "uint8")), T.Cast("int64", T.tvm_struct_get(out_handle, 0, 7, "uint16")), T.int64(2), T.int64(32), T.int64(1))
+        if T.Cast("int32", tutorial_vec_sub_out_shape_1[0]) != 1024:
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "out", "shape[0]", T.int64(1024), T.Cast("int64", T.Cast("int32", tutorial_vec_sub_out_shape_1[0])))
+        if T.if_then_else(T.isnullptr(tutorial_vec_sub_out_strides), 1, T.Cast("int32", tutorial_vec_sub_out_strides_1[0])) != 1:
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "out", "strides[0]", T.int64(1), T.Cast("int64", T.if_then_else(T.isnullptr(tutorial_vec_sub_out_strides), 1, T.Cast("int32", tutorial_vec_sub_out_strides_1[0]))))
+        if T.uint64(0) != T.tvm_struct_get(out_handle, 0, 8, "uint64"):
+            T.call_packed("__tvm_error_byte_offset_mismatch", "tutorial_vec_sub", "out", T.int64(0), T.Cast("int64", T.tvm_struct_get(out_handle, 0, 8, "uint64")))
+        if T.tvm_struct_get(out_handle, 0, 9, "int32") != T.tvm_struct_get(x_handle, 0, 9, "int32"):
+            T.call_packed("__tvm_error_expect_eq", "tutorial_vec_sub", "out", "device_id", T.Cast("int64", T.tvm_struct_get(x_handle, 0, 9, "int32")), T.Cast("int64", T.tvm_struct_get(out_handle, 0, 9, "int32")))
+        if T.tvm_struct_get(out_handle, 0, 10, "int32") != 2:
+            T.call_packed("__tvm_error_device_type_mismatch", "tutorial_vec_sub", "out", T.int64(2), T.Cast("int64", T.tvm_struct_get(out_handle, 0, 10, "int32")))
+        if T.isnullptr(out):
+            T.call_packed("__tvm_error_null_ptr", "tutorial_vec_sub", "out", "data pointer")
+        x_1 = T.decl_buffer((1024,), data=x, strides=(1,))
+        y_1 = T.decl_buffer((1024,), data=y, strides=(1,))
+        out_1 = T.decl_buffer((1024,), data=out, strides=(1,))
+        T.call_packed("__tvm_set_device", 2, dev_id)
+        with T.attr(0, "compute_scope", "tutorial_vec_sub_compute_"):
+            T.call_packed("tutorial_vec_sub_kernel", out, x, y, 1024, 128, 1, 1)
+        return 0

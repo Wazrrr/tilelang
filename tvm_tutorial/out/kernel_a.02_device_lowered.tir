@@ -1,0 +1,19 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def tutorial_vec_add_kernel(out: T.handle("float32", "global"), x: T.handle("float32", "global"), y: T.handle("float32", "global")):
+        T.func_attr({"calling_conv": 2, "target": T.target({"arch": "sm_90", "keys": ["cuda", "gpu"], "kind": "cuda", "max_num_threads": 1024, "tag": "", "thread_warp_size": 32}), "thread_extent": {"blockIdx.x": 1024, "threadIdx.x": 128, "threadIdx.y": 1, "threadIdx.z": 1}, "tir.is_global_func": T.bool(True), "tir.kernel_launch_params": ["blockIdx.x", "threadIdx.x", "threadIdx.y", "threadIdx.z"], "tir.noalias": True, "tl.non_restrict_params": [], "tl.readonly_param_indices": [1, 2]})
+        y_1 = T.decl_buffer((1024,), data=y)
+        x_1 = T.decl_buffer((1024,), data=x)
+        out_1 = T.decl_buffer((1024,), data=out)
+        bx = T.launch_thread("blockIdx.x", 1024)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        out_2 = T.Buffer((1024,), data=out)
+        x_2 = T.Buffer((1024,), data=x)
+        y_2 = T.Buffer((1024,), data=y)
+        out_2[bx] = x_2[bx] + y_2[bx]

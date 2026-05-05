@@ -1,0 +1,38 @@
+{
+  "merged_device_symbols": [
+    "tutorial_vec_add_kernel",
+    "tutorial_vec_sub_kernel"
+  ],
+  "rows": [
+    {
+      "host_entry_symbol": "tutorial_vec_add",
+      "imports": 1,
+      "name": "kernel_a",
+      "resolved_symbols": {
+        "tutorial_vec_add_kernel": {
+          "error": "",
+          "resolved": true
+        },
+        "tutorial_vec_sub_kernel": {
+          "error": "",
+          "resolved": true
+        }
+      }
+    },
+    {
+      "host_entry_symbol": "tutorial_vec_sub",
+      "imports": 1,
+      "name": "kernel_b",
+      "resolved_symbols": {
+        "tutorial_vec_add_kernel": {
+          "error": "",
+          "resolved": true
+        },
+        "tutorial_vec_sub_kernel": {
+          "error": "",
+          "resolved": true
+        }
+      }
+    }
+  ]
+}

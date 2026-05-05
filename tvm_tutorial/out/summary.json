@@ -1,0 +1,77 @@
+{
+  "compile_device": false,
+  "grouped": {
+    "grouped_device_source_len": 1062,
+    "grouped_host_summaries": [
+      {
+        "host_source_len": 47617,
+        "imports": 1,
+        "name": "kernel_a"
+      },
+      {
+        "host_source_len": 47617,
+        "imports": 1,
+        "name": "kernel_b"
+      }
+    ],
+    "merged_device_symbol_count": 2,
+    "merged_device_symbols": [
+      "tutorial_vec_add_kernel",
+      "tutorial_vec_sub_kernel"
+    ]
+  },
+  "n": 1024,
+  "notes": [
+    "kernel_a and kernel_b were elaborated independently into PrimFunc.",
+    "Each kernel was lowered to host/device IR with lower_to_host_device_ir under PassContext.",
+    "The grouped path merges device IRModule functions and compiles device code once.",
+    "Host modules are still generated per kernel and import the shared grouped device module."
+  ],
+  "pass_configs": {},
+  "per_kernel": [
+    {
+      "device_source_len": 688,
+      "device_symbols": [
+        "tutorial_vec_add_kernel"
+      ],
+      "host_source_len": 47617,
+      "host_symbols": [
+        "tutorial_vec_add"
+      ],
+      "lower_stage_s": {
+        "lower_and_legalize_s": 0.01551299192942679,
+        "normalize_target_s": 0.00016912096180021763,
+        "optimize_for_target_s": 0.030828980961814523,
+        "pre_lower_semantic_check_s": 0.0013621250400319695,
+        "prepare_input_module_s": 0.0002607980277389288,
+        "split_device_mod_s": 2.8031994588673115e-05,
+        "split_host_mod_s": 0.00033177307341247797
+      },
+      "name": "kernel_a",
+      "primfunc_symbol": "tutorial_vec_add"
+    },
+    {
+      "device_source_len": 688,
+      "device_symbols": [
+        "tutorial_vec_sub_kernel"
+      ],
+      "host_source_len": 47617,
+      "host_symbols": [
+        "tutorial_vec_sub"
+      ],
+      "lower_stage_s": {
+        "lower_and_legalize_s": 0.009749353979714215,
+        "normalize_target_s": 0.00012829096522182226,
+        "optimize_for_target_s": 0.02881063090171665,
+        "pre_lower_semantic_check_s": 0.00047233200166374445,
+        "prepare_input_module_s": 0.00014392402954399586,
+        "split_device_mod_s": 2.4946988560259342e-05,
+        "split_host_mod_s": 6.468698848038912e-05
+      },
+      "name": "kernel_b",
+      "primfunc_symbol": "tutorial_vec_sub"
+    }
+  ],
+  "target": "cuda -keys=cuda,gpu -arch=sm_90 -max_num_threads=1024 -thread_warp_size=32",
+  "target_host": null
+}

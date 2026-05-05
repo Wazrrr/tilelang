@@ -1,0 +1,33 @@
+{
+  "compile_device": true,
+  "kernel": {
+    "device_source_len": 688,
+    "device_symbols": [
+      "tutorial_vec_add_kernel"
+    ],
+    "host_source_len": 47617,
+    "host_symbols": [
+      "tutorial_vec_add"
+    ],
+    "lower_stage_s": {
+      "lower_and_legalize_s": 0.012969739036634564,
+      "normalize_target_s": 0.00015603203792124987,
+      "optimize_for_target_s": 0.03243302705232054,
+      "pre_lower_semantic_check_s": 0.0015604760264977813,
+      "prepare_input_module_s": 0.00024317100178450346,
+      "split_device_mod_s": 2.337503246963024e-05,
+      "split_host_mod_s": 0.00020174903329461813
+    },
+    "name": "kernel_add",
+    "primfunc_symbol": "tutorial_vec_add"
+  },
+  "kernel_op": "add",
+  "n": 1024,
+  "notes": [
+    "This tutorial runs the complete pipeline for one kernel.",
+    "Artifacts include PrimFunc, lowered host/device IR, device codegen output, and host codegen output."
+  ],
+  "pass_configs": {},
+  "target": "cuda -keys=cuda,gpu -arch=sm_90 -max_num_threads=1024 -thread_warp_size=32",
+  "target_host": null
+}
