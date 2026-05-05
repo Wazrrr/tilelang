@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import tilelang
-from tilelang import tvm as tvm
 from tilelang import env
 from tilelang.jit import JITImpl
 from tilelang.jit.kernel import JITKernel
@@ -39,6 +38,7 @@ import time
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
+from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.utils.target import determine_target
@@ -143,6 +143,7 @@ class AutoTuner:
         self.jit_input_tensors = None
         self.ref_input_tensors = None
         self.jit_compile = None
+        self.jit_elaborate = None
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
@@ -462,8 +463,16 @@ class AutoTuner:
             jit_kernel.compile_measurement = compile_stage_measurement
             return jit_kernel
 
+        def _elaborate(**config_arg) -> PrimFunc:
+            program = self.fn(**config_arg)
+            if not isinstance(program, PrimFunc):
+                raise TypeError(f"Expected PrimFunc from elaboration, but got {type(program)}")
+            return program
+
         if self.jit_compile is None:
             self.jit_compile = _compile
+        if self.jit_elaborate is None:
+            self.jit_elaborate = _elaborate
 
         def target_fn(jit_kernel: tilelang.JITKernel):
             # Unpack the context
@@ -570,17 +579,20 @@ class AutoTuner:
         target_kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
         execution_backend = str(self.compile_args.execution_backend)
         grouped_compile_requested = enable_grouped_compile and group_compile_size > 1
-        grouped_compile_active = grouped_compile_requested and target_kind == "cuda"
+        grouped_compile_active = grouped_compile_requested and target_kind == "cuda" and execution_backend == "tvm_ffi"
         grouped_compile_reason = ""
         if grouped_compile_requested and not grouped_compile_active:
             grouped_compile_reason = (
-                f"grouped compile is only enabled for CUDA+cython in this phase "
-                f"(current target={target_kind}, execution_backend={execution_backend})"
+                f"grouped compilation is currently implemented for CUDA+tvm_ffi only; "
+                f"fallback to per-config mode (target={target_kind}, execution_backend={execution_backend})"
             )
-            logger.info("Grouped compile fallback to per-config mode: %s", grouped_compile_reason)
+            logger.info("%s", grouped_compile_reason)
 
         measurement["grouped_compile_active"] = grouped_compile_active
         measurement["grouped_compile_reason"] = grouped_compile_reason
+        measurement["grouped_compile_mode"] = (
+            "backend_grouped" if grouped_compile_active else "disabled"
+        )
 
         # check if the tunable arguments has been set.
         # get the back config argument
@@ -653,7 +665,20 @@ class AutoTuner:
                 compile_func = cuda_device_wrapper(self.jit_compile, device)
             return compile_func
 
+        def get_elaborate_func():
+            elaborate_func = self.jit_elaborate
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                elaborate_func = cuda_device_wrapper(self.jit_elaborate, device)
+            return elaborate_func
+
         def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
+            if grouped_compile_active:
+                return compile_grouped_unit_tvm_ffi(
+                    unit_items=unit_items,
+                    compile_args=self.compile_args,
+                    elaborate_func=get_elaborate_func(),
+                )
             compile_func = get_compile_func()
             unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None, dict[str, float]]] = []
             for idx, config_arg in unit_items:
@@ -939,6 +964,11 @@ class AutoTuneImpl(Generic[_P, _T]):
         norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
+            def jit_elaborate(**config_arg):
+                merged = dict(kwargs)
+                merged.update(config_arg)
+                return self.jit_impl.get_tir(*args, **merged)
+
             if mode == "lazy":
 
                 def jit_compile(**config_arg):
@@ -946,6 +976,7 @@ class AutoTuneImpl(Generic[_P, _T]):
 
                 autotuner = self.get_tunner()
                 autotuner.jit_compile = jit_compile
+                autotuner.jit_elaborate = jit_elaborate
                 autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
             else:
 
@@ -956,6 +987,7 @@ class AutoTuneImpl(Generic[_P, _T]):
 
                 autotuner = self.get_tunner()
                 autotuner.jit_compile = jit_compile
+                autotuner.jit_elaborate = jit_elaborate
                 autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
 
             artifact, _measurement = autotuner.run()

@@ -222,23 +222,15 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     return device_mod
 
 
-def lower(
+def lower_to_host_device_ir(
     func_or_mod: tir.PrimFunc | tvm.IRModule,
     target: str | Target = "auto",
     target_host: str | Target | None = None,
-    runtime_only=False,
-    enable_host_codegen=False,
-    enable_device_compile=False,
-) -> CompiledArtifact:
-    """
-    enable_host_codegen: whether to enable host codegen, default is False, as we have our
-    own host codegen implementation in jit.
-    enable_device_compile: whether to enable device codegen, default is False, as we have our
-    own device codegen implementation in jit.
-    """
+    runtime_only: bool = False,
+) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target, dict[str, float]]:
+    """Lower input TIR to split host/device IRModules without backend codegen."""
 
     stage: dict[str, float] = {}
-    total_start = time.perf_counter()
 
     mod = func_or_mod
     params = None
@@ -283,6 +275,32 @@ def lower(
     split_start = time.perf_counter()
     device_mod = tir.transform.Filter(_is_device_call)(mod)
     stage["split_device_mod_s"] = time.perf_counter() - split_start
+
+    return host_mod, device_mod, params, target, target_host, stage
+
+
+def lower(
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    runtime_only=False,
+    enable_host_codegen=False,
+    enable_device_compile=False,
+) -> CompiledArtifact:
+    """
+    enable_host_codegen: whether to enable host codegen, default is False, as we have our
+    own host codegen implementation in jit.
+    enable_device_compile: whether to enable device codegen, default is False, as we have our
+    own device codegen implementation in jit.
+    """
+
+    total_start = time.perf_counter()
+    host_mod, device_mod, params, target, target_host, stage = lower_to_host_device_ir(
+        func_or_mod=func_or_mod,
+        target=target,
+        target_host=target_host,
+        runtime_only=runtime_only,
+    )
 
     device_codegen_start = time.perf_counter()
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
