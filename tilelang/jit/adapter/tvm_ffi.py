@@ -63,6 +63,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     rt_mod: tvm.runtime.Module | None = None
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tir.Var, tuple[int, int, int]] | None = None
+    compile_measurement: dict[str, float] | None = None
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
@@ -109,6 +110,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.compile_flags = compile_flags
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.kernel_global_source = self.device_kernel_source
+        self.compile_measurement = {}
 
         self._post_init()
 
@@ -174,10 +176,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             param_shapes.append(native_shape)
 
         if self.executable is None:
+            executable_create_start = time.perf_counter()
             self.executable = runtime.Executable(self.rt_mod)
+            self.compile_measurement["runtime_executable_create_s"] = time.perf_counter() - executable_create_start
             if COMPILE_ARGS:
                 # Precompile jit module with extra arguments
+                executable_jit_start = time.perf_counter()
                 self.executable.jit(**COMPILE_ARGS)
+                self.compile_measurement["runtime_executable_jit_s"] = time.perf_counter() - executable_jit_start
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
         executable = self.executable
@@ -201,6 +207,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Print per-call timing for a small number of calls by default.
         # This helps diagnose host overhead (tensor prep/allocation) vs kernel runtime.
         timing_print_limit = max(0, int(os.environ.get("TL_TVM_FFI_TIMING_PRINT_LIMIT", "1")))
+        timing_print_detail = os.environ.get("TL_TVM_FFI_TIMING_DETAIL", "1").lower() not in {"0", "false", "off", "no"}
         timing_call_count = 0
 
         def func(*inputs: torch.Tensor | Any):
@@ -212,7 +219,11 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
             need_timing_print = timing_call_count < timing_print_limit
             if need_timing_print:
+                call_start = time.perf_counter()
                 prepare_start = time.perf_counter()
+                shape_resolve_s = 0.0
+                output_alloc_s = 0.0
+                input_bind_s = 0.0
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
@@ -229,6 +240,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     shape = []
                     # Now working with native Python list, no FFI calls needed
                     for s in param_shapes[i]:
+                        if need_timing_print:
+                            shape_resolve_start = time.perf_counter()
                         if isinstance(s, tir.Var):
                             for key in dynamic_symbolic_map:
                                 if str(s) == str(key):
@@ -241,6 +254,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                                         shape.append(tensor_list[ref_tensor_idx].stride()[ref_shape_idx] * stride_scale)
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
+                        if need_timing_print:
+                            shape_resolve_s += time.perf_counter() - shape_resolve_start
 
                     if out_device is None:
                         out_device = current_device_functor()
@@ -251,32 +266,66 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                             f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                             f"Expected shape: {shape}"
                         )
+                    if need_timing_print:
+                        alloc_start = time.perf_counter()
                     tensor = torch.empty(*shape, dtype=dtype, device=out_device)
+                    if need_timing_print:
+                        output_alloc_s += time.perf_counter() - alloc_start
                 else:
+                    if need_timing_print:
+                        input_bind_start = time.perf_counter()
                     tensor = inputs[ins_idx]
                     ins_idx += 1
+                    if need_timing_print:
+                        input_bind_s += time.perf_counter() - input_bind_start
                 tensor_list.append(tensor)
 
             if need_timing_print:
                 prepare_end = time.perf_counter()
                 sync_device = next((t.device for t in tensor_list if isinstance(t, torch.Tensor) and t.is_cuda), None)
+                pre_sync_s = 0.0
                 if sync_device is not None:
+                    pre_sync_start = time.perf_counter()
                     torch.cuda.synchronize(sync_device)
-                kernel_start = time.perf_counter()
+                    pre_sync_s = time.perf_counter() - pre_sync_start
+                call_enqueue_start = time.perf_counter()
                 executable(*tensor_list)
+                call_enqueue_end = time.perf_counter()
+                post_sync_s = 0.0
                 if sync_device is not None:
+                    post_sync_start = time.perf_counter()
                     torch.cuda.synchronize(sync_device)
+                    post_sync_s = time.perf_counter() - post_sync_start
                 kernel_end = time.perf_counter()
+                enqueue_s = call_enqueue_end - call_enqueue_start
+                kernel_s = pre_sync_s + enqueue_s + post_sync_s
+                total_s = kernel_end - call_start
 
                 timing_call_count += 1
-                print(
-                    "[TVMFFI][timing] "
-                    f"call={timing_call_count} "
-                    f"prepare_ms={(prepare_end - prepare_start) * 1e3:.3f} "
-                    f"kernel_ms={(kernel_end - kernel_start) * 1e3:.3f} "
-                    f"total_ms={(kernel_end - prepare_start) * 1e3:.3f}",
-                    flush=True,
-                )
+                if timing_print_detail:
+                    print(
+                        "[TVMFFI][timing] "
+                        f"call={timing_call_count} "
+                        f"prepare_ms={(prepare_end - prepare_start) * 1e3:.3f} "
+                        f"(shape_resolve_ms={shape_resolve_s * 1e3:.3f}, "
+                        f"output_alloc_ms={output_alloc_s * 1e3:.3f}, "
+                        f"input_bind_ms={input_bind_s * 1e3:.3f}) "
+                        f"pre_sync_ms={pre_sync_s * 1e3:.3f} "
+                        f"call_enqueue_ms={enqueue_s * 1e3:.3f} "
+                        f"post_sync_ms={post_sync_s * 1e3:.3f} "
+                        f"kernel_ms={kernel_s * 1e3:.3f} "
+                        f"total_ms={total_s * 1e3:.3f}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[TVMFFI][timing] "
+                        f"call={timing_call_count} "
+                        f"prepare_ms={(prepare_end - prepare_start) * 1e3:.3f} "
+                        f"kernel_ms={kernel_s * 1e3:.3f} "
+                        f"total_ms={total_s * 1e3:.3f}",
+                        flush=True,
+                    )
             else:
                 executable(*tensor_list)
 

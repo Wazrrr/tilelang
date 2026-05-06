@@ -63,6 +63,19 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Passed to TL_TVM_FFI_TIMING_PRINT_LIMIT.",
     )
+    timing_detail_group = parser.add_mutually_exclusive_group()
+    timing_detail_group.add_argument(
+        "--timing-detail",
+        dest="timing_detail",
+        action="store_true",
+        help="Enable detailed TVM FFI timing breakdown (prepare/alloc/sync/enqueue).",
+    )
+    timing_detail_group.add_argument(
+        "--no-timing-detail",
+        dest="timing_detail",
+        action="store_false",
+    )
+    parser.set_defaults(timing_detail=True)
     parser.add_argument(
         "--cuda-visible-devices",
         type=str,
@@ -128,6 +141,7 @@ def main() -> int:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     os.environ["TILELANG_AUTO_TUNING_CPU_COUNTS"] = str(args.cpu_count)
     os.environ["TL_TVM_FFI_TIMING_PRINT_LIMIT"] = str(args.timing_print_limit)
+    os.environ["TL_TVM_FFI_TIMING_DETAIL"] = "1" if args.timing_detail else "0"
     if args.disable_cache:
         os.environ["TILELANG_DISABLE_CACHE"] = "1"
         os.environ["TILELANG_AUTO_TUNING_DISABLE_CACHE"] = "1"
@@ -170,7 +184,8 @@ def main() -> int:
         "Environment: "
         f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')} "
         f"TILELANG_AUTO_TUNING_CPU_COUNTS={os.environ.get('TILELANG_AUTO_TUNING_CPU_COUNTS')} "
-        f"TL_TVM_FFI_TIMING_PRINT_LIMIT={os.environ.get('TL_TVM_FFI_TIMING_PRINT_LIMIT')}"
+        f"TL_TVM_FFI_TIMING_PRINT_LIMIT={os.environ.get('TL_TVM_FFI_TIMING_PRINT_LIMIT')} "
+        f"TL_TVM_FFI_TIMING_DETAIL={os.environ.get('TL_TVM_FFI_TIMING_DETAIL')}"
     )
     print("Expect per-call debug lines from tvm_ffi adapter: [TVMFFI][timing] ...")
 

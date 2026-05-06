@@ -8,6 +8,8 @@ This benchmark evaluates GEMM autotuning end-to-end in TileLang and records per-
   - `end_to_end_s`
   - `compilation_s`
   - `benchmark_s`
+- TIR equivalence checker: `benchmark/autotune/run_gemm_grouped_tir_equivalence.py`
+- Simple dump_ir checker (vector_add): `benchmark/autotune/run_vector_add_grouped_tir_dump.py`
 
 ## Current Default Setup
 
@@ -84,6 +86,63 @@ python benchmark/autotune/run_gemm_autotune_e2e.py \
   --grouped-compile \
   --group-compile-size 2
 ```
+
+## Grouped vs Normal TIR Equivalence
+
+This experiment compares **pre-codegen device TIR** for each GEMM config between:
+
+- normal path lowering (`lower_to_host_device_ir`)
+- grouped path using `compile_grouped_unit_tvm_ffi(...)` and checking each returned `jit_kernel.artifact.device_mod`
+
+The key signal is `same_device_tir_before_codegen` in CSV:
+
+- `True`: pre-codegen device TIR is equivalent after canonicalizing grouped suffix names.
+- `False`: potential behavior/perf risk; mismatched device TIR scripts are dumped for inspection.
+
+Run:
+
+```bash
+python benchmark/autotune/run_gemm_grouped_tir_equivalence.py \
+  --shape 4096x4096x4096 \
+  --with-roller \
+  --topk 20 \
+  --max-configs 20 \
+  --group-compile-size 4 \
+  --csv benchmark/autotune/results/gemm_grouped_tir_equivalence.csv
+```
+
+Output files:
+
+- CSV rows: `benchmark/autotune/results/gemm_grouped_tir_equivalence.csv`
+- mismatches (if any): `benchmark/autotune/results/gemm_grouped_tir_mismatch/*.tir`
+
+## Manual DumpIR Check (VectorAdd)
+
+This script uses a simple 1D `vector_add` kernel and compares pre-codegen device TIR between:
+
+- normal per-config lowering
+- grouped path through `compile_grouped_unit_tvm_ffi(...)`
+
+It also enables `tl.enable_dump_ir` for both paths so you can inspect pass-by-pass IR dumps directly.
+
+Run:
+
+```bash
+python benchmark/autotune/run_vector_add_grouped_tir_dump.py \
+  --N 4096 \
+  --group-compile-size 2 \
+  --csv benchmark/autotune/results/vector_add_grouped_tir_dump.csv \
+  --dump-root benchmark/autotune/results/vector_add_tir_dump
+```
+
+Key outputs:
+
+- CSV summary: `benchmark/autotune/results/vector_add_grouped_tir_dump.csv`
+- normal dump_ir tree: `benchmark/autotune/results/vector_add_tir_dump/normal/`
+- grouped dump_ir tree: `benchmark/autotune/results/vector_add_tir_dump/grouped/`
+- mismatched pre-codegen TIR files: `benchmark/autotune/results/vector_add_tir_dump/mismatch/`
+- normal device codegen source per config: `.../normal/cfg_*/device_kernel_source.cu`
+- grouped device codegen source per compile unit: `.../grouped/unit_*/device_kernel_source_grouped.cu`
 
 ## CSV Columns
 
