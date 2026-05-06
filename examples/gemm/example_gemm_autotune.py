@@ -233,6 +233,7 @@ def run_autotune_with_measurements(
     use_pipeline: bool = False,
     enable_grouped_compile: bool = False,
     group_compile_size: int = 2,
+    detailed_measurements: bool = False,
 ) -> tuple[Any | None, dict[str, Any]]:
     autotuner, configs, _ = _build_autotuner(
         M=M,
@@ -263,6 +264,7 @@ def run_autotune_with_measurements(
         "use_pipeline": use_pipeline,
         "enable_grouped_compile": enable_grouped_compile,
         "group_compile_size": group_compile_size,
+        "detailed_measurements": detailed_measurements,
         "cpu_count_env": os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1"),
         "end_to_end_s": None,
         "compilation_s": None,
@@ -292,6 +294,7 @@ def run_autotune_with_measurements(
             use_pipeline=use_pipeline,
             enable_grouped_compile=enable_grouped_compile,
             group_compile_size=group_compile_size,
+            collect_detailed_measurements=detailed_measurements,
         )
     except Exception as ex:
         metrics["status"] = "failed"
@@ -302,8 +305,9 @@ def run_autotune_with_measurements(
         metrics["end_to_end_s"] = run_measurement.get("total_s")
         metrics["compilation_s"] = run_measurement.get("compilation_s")
         metrics["benchmark_s"] = run_measurement.get("benchmark_s")
-        metrics["compile_stage_totals_s"] = run_measurement.get("compile_stage_totals_s", {})
-        metrics["compile_stage_avg_ms"] = run_measurement.get("compile_stage_avg_ms", {})
+        if detailed_measurements:
+            metrics["compile_stage_totals_s"] = run_measurement.get("compile_stage_totals_s", {})
+            metrics["compile_stage_avg_ms"] = run_measurement.get("compile_stage_avg_ms", {})
         metrics["grouped_compile_active"] = run_measurement.get("grouped_compile_active")
         metrics["num_compile_units_submitted"] = run_measurement.get("num_compile_units_submitted")
         metrics["avg_group_size"] = run_measurement.get("avg_group_size")

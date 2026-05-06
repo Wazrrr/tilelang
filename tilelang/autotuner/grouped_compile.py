@@ -19,13 +19,14 @@ from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
 
-CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None, dict[str, float]]
+CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None, dict[str, float] | None]
 
 
 def compile_grouped_unit_tvm_ffi(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,
     elaborate_func: Callable[..., PrimFunc],
+    collect_compile_stage_measurements: bool = True,
 ) -> list[CompileUnitResult]:
     """Compile one grouped unit for CUDA+tvm_ffi backend.
 
@@ -48,13 +49,14 @@ def compile_grouped_unit_tvm_ffi(
 
     for idx, config_arg in unit_items:
         config_compile_start = time.perf_counter()
-        compile_stage_measurement: dict[str, float] = {}
+        compile_stage_measurement: dict[str, float] | None = {} if collect_compile_stage_measurements else None
         try:
             build_program_start = time.perf_counter()
             program = elaborate_func(**config_arg)
             if not isinstance(program, PrimFunc):
                 raise TypeError(f"Expected PrimFunc from elaboration, but got {type(program)}")
-            compile_stage_measurement["compile.build_program_s"] = time.perf_counter() - build_program_start
+            if compile_stage_measurement is not None:
+                compile_stage_measurement["compile.build_program_s"] = time.perf_counter() - build_program_start
 
             original_symbol = str(program.attrs["global_symbol"])
             unique_symbol = f"{original_symbol}_gc_{idx}"
@@ -67,10 +69,11 @@ def compile_grouped_unit_tvm_ffi(
                     target=compile_args.target,
                     target_host=compile_args.target_host,
                 )
-            compile_stage_measurement["compile.lower_to_host_device_s"] = time.perf_counter() - lower_start
-            for stage_name, stage_value in lower_stage.items():
-                if isinstance(stage_value, (int, float)):
-                    compile_stage_measurement[f"lower.{stage_name}"] = float(stage_value)
+            if compile_stage_measurement is not None:
+                compile_stage_measurement["compile.lower_to_host_device_s"] = time.perf_counter() - lower_start
+                for stage_name, stage_value in lower_stage.items():
+                    if isinstance(stage_value, (int, float)):
+                        compile_stage_measurement[f"lower.{stage_name}"] = float(stage_value)
 
             lowered_items.append(
                 {
@@ -87,7 +90,8 @@ def compile_grouped_unit_tvm_ffi(
                 }
             )
         except Exception as e:
-            compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
+            if compile_stage_measurement is not None:
+                compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
             unit_results.append((idx, config_arg, None, e, compile_stage_measurement))
 
     if not lowered_items:
@@ -130,11 +134,13 @@ def compile_grouped_unit_tvm_ffi(
                 host_codegen_start = time.perf_counter()
                 with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), item["target"]:
                     grouped_host_rt_mod = host_codegen(item["host_mod"], item["target_host"], target=item["target"])
-                compile_stage_measurement["compile.group.host_codegen_s"] = time.perf_counter() - host_codegen_start
+                if compile_stage_measurement is not None:
+                    compile_stage_measurement["compile.group.host_codegen_s"] = time.perf_counter() - host_codegen_start
 
                 import_module_start = time.perf_counter()
                 grouped_host_rt_mod.import_module(grouped_device_rt_mod)
-                compile_stage_measurement["compile.group.host_import_device_module_s"] = time.perf_counter() - import_module_start
+                if compile_stage_measurement is not None:
+                    compile_stage_measurement["compile.group.host_import_device_module_s"] = time.perf_counter() - import_module_start
 
                 artifact = CompiledArtifact(
                     host_mod=grouped_host_rt_mod,
@@ -157,8 +163,9 @@ def compile_grouped_unit_tvm_ffi(
                     verbose=compile_args.verbose,
                     pass_configs=pass_configs,
                 )
-                compile_stage_measurement["compile.group.adapter_create_s"] = time.perf_counter() - adapter_create_start
-                compile_stage_measurement["compile.group.device_codegen_share_s"] = grouped_device_codegen_share_s
+                if compile_stage_measurement is not None:
+                    compile_stage_measurement["compile.group.adapter_create_s"] = time.perf_counter() - adapter_create_start
+                    compile_stage_measurement["compile.group.device_codegen_share_s"] = grouped_device_codegen_share_s
 
                 jit_kernel = JITKernel(
                     func=item["program"],
@@ -173,17 +180,20 @@ def compile_grouped_unit_tvm_ffi(
                 jit_kernel.artifact = artifact
                 jit_kernel.adapter = adapter
                 jit_kernel.torch_function = adapter.func
-                compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
+                if compile_stage_measurement is not None:
+                    compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
                 jit_kernel.compile_measurement = compile_stage_measurement
 
                 unit_results.append((idx, config_arg, jit_kernel, None, compile_stage_measurement))
             except Exception as e:
-                compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
+                if compile_stage_measurement is not None:
+                    compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
                 unit_results.append((idx, config_arg, None, e, compile_stage_measurement))
     except Exception as e:
         for item in lowered_items:
             compile_stage_measurement = item["compile_stage_measurement"]
-            compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - item["config_compile_start"]
+            if compile_stage_measurement is not None:
+                compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - item["config_compile_start"]
             unit_results.append((item["idx"], item["config_arg"], None, e, compile_stage_measurement))
 
     return unit_results

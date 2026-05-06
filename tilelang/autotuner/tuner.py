@@ -323,6 +323,7 @@ class AutoTuner:
         use_pipeline: bool = False,
         enable_grouped_compile: bool = False,
         group_compile_size: int = 2,
+        collect_detailed_measurements: bool = True,
     ):
         """Run the auto-tuning process.
 
@@ -333,6 +334,7 @@ class AutoTuner:
             use_pipeline: Whether to pipeline benchmarking with compilation.
             enable_grouped_compile: Whether to enable grouped compilation.
             group_compile_size: Number of configurations in one compile unit.
+            collect_detailed_measurements: Whether to collect per-stage compile measurements.
 
         Returns:
             Tuple[AutotuneResult, dict[str, Any]]: The autotune artifact and timing measurements.
@@ -357,6 +359,7 @@ class AutoTuner:
             "num_compile_units_submitted": 0,
             "avg_group_size": 1.0,
             "group_compile_backend": self.compile_args.execution_backend,
+            "collect_detailed_measurements": collect_detailed_measurements,
             "compile_stage_totals_s": {},
             "compile_stage_avg_ms": {},
         }
@@ -365,6 +368,8 @@ class AutoTuner:
         compile_stage_counts: dict[str, int] = {}
 
         def _accumulate_compile_stage_measurement(stage_measurement: dict[str, Any] | None) -> None:
+            if not collect_detailed_measurements:
+                return
             if not isinstance(stage_measurement, dict):
                 return
             for stage_name, stage_value in stage_measurement.items():
@@ -374,6 +379,8 @@ class AutoTuner:
                 compile_stage_counts[stage_name] = compile_stage_counts.get(stage_name, 0) + 1
 
         def _finalize_compile_stage_measurement() -> None:
+            if not collect_detailed_measurements:
+                return
             if not compile_stage_totals:
                 return
             measurement["compile_stage_totals_s"] = dict(sorted(compile_stage_totals.items(), key=lambda kv: kv[0]))
@@ -442,23 +449,27 @@ class AutoTuner:
 
         def _compile(**config_arg) -> tilelang.JITKernel:
             compile_args = self.compile_args
-            compile_stage_measurement: dict[str, float] = {}
+            if collect_detailed_measurements:
+                compile_stage_measurement: dict[str, float] | None = {}
+                compile_total_start = time.perf_counter()
+                build_program_start = time.perf_counter()
+                program = self.fn(**config_arg)
+                compile_stage_measurement["compile.build_program_s"] = time.perf_counter() - build_program_start
 
-            compile_total_start = time.perf_counter()
-            build_program_start = time.perf_counter()
-            program = self.fn(**config_arg)
-            compile_stage_measurement["compile.build_program_s"] = time.perf_counter() - build_program_start
+                compile_program_start = time.perf_counter()
+                jit_kernel = compile_args.compile_program(program)
+                compile_stage_measurement["compile.compile_program_s"] = time.perf_counter() - compile_program_start
+                compile_stage_measurement["compile.total_s"] = time.perf_counter() - compile_total_start
 
-            compile_program_start = time.perf_counter()
-            jit_kernel = compile_args.compile_program(program)
-            compile_stage_measurement["compile.compile_program_s"] = time.perf_counter() - compile_program_start
-            compile_stage_measurement["compile.total_s"] = time.perf_counter() - compile_total_start
-
-            kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
-            if isinstance(kernel_compile_measurement, dict):
-                for stage_name, stage_value in kernel_compile_measurement.items():
-                    if isinstance(stage_value, (int, float)):
-                        compile_stage_measurement[f"kernel.{stage_name}"] = float(stage_value)
+                kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
+                if isinstance(kernel_compile_measurement, dict):
+                    for stage_name, stage_value in kernel_compile_measurement.items():
+                        if isinstance(stage_value, (int, float)):
+                            compile_stage_measurement[f"kernel.{stage_name}"] = float(stage_value)
+            else:
+                program = self.fn(**config_arg)
+                jit_kernel = compile_args.compile_program(program)
+                compile_stage_measurement = None
 
             jit_kernel.compile_measurement = compile_stage_measurement
             return jit_kernel
@@ -678,23 +689,27 @@ class AutoTuner:
                     unit_items=unit_items,
                     compile_args=self.compile_args,
                     elaborate_func=get_elaborate_func(),
+                    collect_compile_stage_measurements=collect_detailed_measurements,
                 )
             compile_func = get_compile_func()
-            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None, dict[str, float]]] = []
+            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None, dict[str, float] | None]] = []
             for idx, config_arg in unit_items:
                 config_compile_start = time.perf_counter()
                 try:
                     jit_kernel = compile_func(**config_arg)
-                    compile_stage_measurement = {}
+                    compile_stage_measurement: dict[str, float] | None = {} if collect_detailed_measurements else None
                     kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
-                    if isinstance(kernel_compile_measurement, dict):
+                    if isinstance(kernel_compile_measurement, dict) and compile_stage_measurement is not None:
                         compile_stage_measurement.update(kernel_compile_measurement)
-                    compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
+                    if compile_stage_measurement is not None:
+                        compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
                     unit_results.append((idx, config_arg, jit_kernel, None, compile_stage_measurement))
                 except Exception as e:
-                    compile_stage_measurement = {
-                        "compile_unit.config_total_s": time.perf_counter() - config_compile_start,
-                    }
+                    compile_stage_measurement = (
+                        {"compile_unit.config_total_s": time.perf_counter() - config_compile_start}
+                        if collect_detailed_measurements
+                        else None
+                    )
                     unit_results.append((idx, config_arg, None, e, compile_stage_measurement))
             return unit_results
 
