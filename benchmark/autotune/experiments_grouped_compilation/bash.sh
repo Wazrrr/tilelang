@@ -12,7 +12,7 @@ mkdir -p "${RESULT_DIR}"
 
 COMMON_ARGS=(
   --cpu-count 16
-  --runs 3
+  --runs 1
   --without-roller
   --warmup 3
   --rep 20
