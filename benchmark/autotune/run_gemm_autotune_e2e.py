@@ -67,6 +67,7 @@ def run_single_case(
     use_pipeline: bool,
     enable_grouped_compile: bool,
     group_compile_size: int,
+    detailed_measurements: bool,
 ) -> dict[str, Any]:
     m, n, k = shape
 
@@ -90,6 +91,7 @@ def run_single_case(
             use_pipeline=use_pipeline,
             enable_grouped_compile=enable_grouped_compile,
             group_compile_size=group_compile_size,
+            detailed_measurements=detailed_measurements,
         )
     finally:
         if previous_cpu_count is None:
@@ -113,8 +115,6 @@ def run_single_case(
         "end_to_end_s": metrics.get("end_to_end_s"),
         "compilation_s": metrics.get("compilation_s"),
         "benchmark_s": metrics.get("benchmark_s"),
-        "compile_stage_totals_s": json.dumps(metrics.get("compile_stage_totals_s", {}), sort_keys=True),
-        "compile_stage_avg_ms": json.dumps(metrics.get("compile_stage_avg_ms", {}), sort_keys=True),
         "best_latency_ms": metrics.get("best_latency_ms"),
         "best_tflops": metrics.get("best_tflops"),
         "ref_latency_ms": metrics.get("ref_latency_ms"),
@@ -138,6 +138,9 @@ def run_single_case(
         "grouped_compile_reason": metrics.get("grouped_compile_reason", ""),
         "best_config": json.dumps(best_config, sort_keys=True) if best_config is not None else "",
     }
+    if detailed_measurements:
+        row["compile_stage_totals_s"] = json.dumps(metrics.get("compile_stage_totals_s", {}), sort_keys=True)
+        row["compile_stage_avg_ms"] = json.dumps(metrics.get("compile_stage_avg_ms", {}), sort_keys=True)
     return row
 
 
@@ -226,6 +229,11 @@ def parse_args() -> argparse.Namespace:
         help="Number of configs in one compile unit when grouped compile is enabled.",
     )
 
+    detailed_group = parser.add_mutually_exclusive_group()
+    detailed_group.add_argument("--detailed-measurements", dest="detailed_measurements", action="store_true")
+    detailed_group.add_argument("--no-detailed-measurements", dest="detailed_measurements", action="store_false")
+    parser.set_defaults(detailed_measurements=False)
+
     return parser.parse_args()
 
 
@@ -272,8 +280,6 @@ def main() -> int:
         "end_to_end_s",
         "compilation_s",
         "benchmark_s",
-        "compile_stage_totals_s",
-        "compile_stage_avg_ms",
         "best_latency_ms",
         "best_tflops",
         "ref_latency_ms",
@@ -297,6 +303,9 @@ def main() -> int:
         "grouped_compile_reason",
         "best_config",
     ]
+    if args.detailed_measurements:
+        fieldnames.insert(fieldnames.index("best_latency_ms"), "compile_stage_totals_s")
+        fieldnames.insert(fieldnames.index("best_latency_ms"), "compile_stage_avg_ms")
 
     total_cases = len(shape_cases) * len(cpu_counts) * args.runs
     print(f"Writing CSV to: {args.csv}")
@@ -329,6 +338,7 @@ def main() -> int:
                         use_pipeline=args.use_pipeline,
                         enable_grouped_compile=args.enable_grouped_compile,
                         group_compile_size=args.group_compile_size,
+                        detailed_measurements=args.detailed_measurements,
                     )
                     writer.writerow(row)
                     fp.flush()
