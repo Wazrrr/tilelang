@@ -25,11 +25,10 @@ except ImportError:  # Python < 3.10
 from tqdm.auto import tqdm
 import logging
 import concurrent.futures
-from collections import deque
+import queue
 import torch
 import os
 import sys
-import signal
 import json
 import hashlib
 import threading
@@ -47,22 +46,6 @@ from tilelang import __version__
 
 class TimeoutException(Exception):
     pass
-
-
-def timeout_handler(signum, frame):
-    raise TimeoutException("Operation timed out")
-
-
-def run_with_timeout(func, timeout, *args, **kwargs):
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(timeout)
-    try:
-        result = func(*args, **kwargs)
-    except Exception as e:
-        raise e
-    finally:
-        signal.alarm(0)
-    return result
 
 
 # Configure logging for the autotuner module
@@ -114,6 +97,13 @@ def _normalize_value(value, sort_dict_items: bool = False):
             return tuple(sorted(items))
         return {k: v for k, v in items}
     return value
+
+
+@dataclass
+class _BenchmarkWorkerState:
+    jit_input_tensors: Any = None
+    ref_input_tensors: Any = None
+    ref_latency_cache: float | None = None
 
 
 class AutoTuner:
@@ -315,6 +305,381 @@ class AutoTuner:
         result = AutotuneResult.load_from_disk(self.cache_dir / key, self.compile_args)
         return result
 
+    # Compile-related helpers
+    def _default_compile(
+        self,
+        collect_detailed_measurements: bool,
+        **config_arg,
+    ) -> tilelang.JITKernel:
+        compile_args = self.compile_args
+        if collect_detailed_measurements:
+            compile_stage_measurement: dict[str, float] | None = {}
+            compile_total_start = time.perf_counter()
+            build_program_start = time.perf_counter()
+            program = self.fn(**config_arg)
+            compile_stage_measurement["compile.build_program_s"] = time.perf_counter() - build_program_start
+
+            compile_program_start = time.perf_counter()
+            jit_kernel = compile_args.compile_program(program)
+            compile_stage_measurement["compile.compile_program_s"] = time.perf_counter() - compile_program_start
+            compile_stage_measurement["compile.total_s"] = time.perf_counter() - compile_total_start
+
+            kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
+            if isinstance(kernel_compile_measurement, dict):
+                for stage_name, stage_value in kernel_compile_measurement.items():
+                    if isinstance(stage_value, (int, float)):
+                        compile_stage_measurement[f"kernel.{stage_name}"] = float(stage_value)
+        else:
+            program = self.fn(**config_arg)
+            jit_kernel = compile_args.compile_program(program)
+            compile_stage_measurement = None
+
+        jit_kernel.compile_measurement = compile_stage_measurement
+        return jit_kernel
+
+    def _default_elaborate(self, **config_arg) -> PrimFunc:
+        program = self.fn(**config_arg)
+        if not isinstance(program, PrimFunc):
+            raise TypeError(f"Expected PrimFunc from elaboration, but got {type(program)}")
+        return program
+
+    def _ensure_jit_functions(
+        self,
+        collect_detailed_measurements: bool,
+    ) -> tuple[Callable[..., tilelang.JITKernel], Callable[..., PrimFunc]]:
+        compile_func = self.jit_compile
+        elaborate_func = self.jit_elaborate
+        if compile_func is None:
+            compile_func = partial(self._default_compile, collect_detailed_measurements)
+        if elaborate_func is None:
+            elaborate_func = self._default_elaborate
+        return compile_func, elaborate_func
+
+    def _resolve_grouped_compile_mode(
+        self,
+        enable_grouped_compile: bool,
+        group_compile_size: int,
+    ) -> tuple[str, str, bool, str]:
+        target_kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
+        execution_backend = str(self.compile_args.execution_backend)
+        grouped_compile_requested = enable_grouped_compile and group_compile_size > 1
+        grouped_compile_active = grouped_compile_requested and target_kind == "cuda" and execution_backend == "tvm_ffi"
+        grouped_compile_reason = ""
+        if grouped_compile_requested and not grouped_compile_active:
+            grouped_compile_reason = (
+                f"grouped compilation is currently implemented for CUDA+tvm_ffi only; "
+                f"fallback to per-config mode (target={target_kind}, execution_backend={execution_backend})"
+            )
+            logger.info("%s", grouped_compile_reason)
+        return target_kind, execution_backend, grouped_compile_active, grouped_compile_reason
+
+    def _resolve_num_compile_workers(self) -> int:
+        available_cpu_count = get_available_cpu_count()
+        cpu_utilizations = float(env.TILELANG_AUTO_TUNING_CPU_UTILITIES)
+        cpu_counts = int(env.TILELANG_AUTO_TUNING_CPU_COUNTS)
+        max_cpu_count = int(env.TILELANG_AUTO_TUNING_MAX_CPU_COUNT)
+        if cpu_counts > 0:
+            num_workers = min(cpu_counts, available_cpu_count)
+            logger.info(f"Auto-tuning with {cpu_counts} CPU counts, {available_cpu_count} CPUs available, {num_workers} CPUs will be used")
+        else:
+            num_workers = max(1, int(available_cpu_count * cpu_utilizations))
+            logger.info(
+                f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used"
+            )
+
+        if max_cpu_count > 0 and num_workers > max_cpu_count:
+            logger.warning(
+                f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used, but the max CPU count is {max_cpu_count}, so we will use {max_cpu_count} CPUs"
+            )
+            num_workers = max_cpu_count
+        return num_workers
+
+    def _prepare_compile_execution(
+        self,
+        config_args: list[dict[str, Any]],
+        grouped_compile_active: bool,
+        group_compile_size: int,
+        collect_detailed_measurements: bool,
+        compile_func: Callable[..., tilelang.JITKernel],
+        elaborate_func: Callable[..., PrimFunc],
+    ) -> tuple[
+        concurrent.futures.ThreadPoolExecutor,
+        list[concurrent.futures.Future],
+        dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]],
+        float,
+        str,
+        list[list[tuple[int, dict[str, Any]]]],
+    ]:
+        num_workers = self._resolve_num_compile_workers()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
+        futures: list[concurrent.futures.Future] = []
+        future_to_unit: dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]] = {}
+
+        def cuda_device_wrapper(func: Callable[..., Any], device: int):
+            def inner(**config_arg):
+                torch.cuda.set_device(device)
+                return func(**config_arg)
+
+            return inner
+
+        def get_compile_func():
+            compile_impl = compile_func
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                compile_impl = cuda_device_wrapper(compile_func, device)
+            return compile_impl
+
+        def get_elaborate_func():
+            elaborate_impl = elaborate_func
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                elaborate_impl = cuda_device_wrapper(elaborate_func, device)
+            return elaborate_impl
+
+        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
+            if grouped_compile_active:
+                return compile_grouped_unit_tvm_ffi(
+                    unit_items=unit_items,
+                    compile_args=self.compile_args,
+                    elaborate_func=get_elaborate_func(),
+                    collect_compile_stage_measurements=collect_detailed_measurements,
+                )
+            compile_impl = get_compile_func()
+            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None, dict[str, float] | None]] = []
+            for idx, config_arg in unit_items:
+                config_compile_start = time.perf_counter()
+                try:
+                    jit_kernel = compile_impl(**config_arg)
+                    compile_stage_measurement: dict[str, float] | None = {} if collect_detailed_measurements else None
+                    kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
+                    if isinstance(kernel_compile_measurement, dict) and compile_stage_measurement is not None:
+                        compile_stage_measurement.update(kernel_compile_measurement)
+                    if compile_stage_measurement is not None:
+                        compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
+                    unit_results.append((idx, config_arg, jit_kernel, None, compile_stage_measurement))
+                except Exception as e:
+                    compile_stage_measurement = (
+                        {"compile_unit.config_total_s": time.perf_counter() - config_compile_start}
+                        if collect_detailed_measurements
+                        else None
+                    )
+                    unit_results.append((idx, config_arg, None, e, compile_stage_measurement))
+            return unit_results
+
+        compile_units: list[list[tuple[int, dict[str, Any]]]] = []
+        if grouped_compile_active:
+            for start in range(0, len(config_args), group_compile_size):
+                end = min(start + group_compile_size, len(config_args))
+                compile_units.append([(i, config_args[i]) for i in range(start, end)])
+        else:
+            for i, config_arg in enumerate(config_args):
+                compile_units.append([(i, config_arg)])
+
+        compilation_start = time.perf_counter()
+        for unit_items in compile_units:
+            future = pool.submit(compile_unit, unit_items)
+            futures.append(future)
+            future_to_unit[future] = unit_items
+
+        compile_desc = "Compiling configurations (grouped)" if grouped_compile_active else "Compiling configurations"
+        return pool, futures, future_to_unit, compilation_start, compile_desc, compile_units
+
+    # Benchmark-related helpers
+    def _benchmark_worker_loop(
+        self,
+        worker_device: int,
+        worker_queue: queue.SimpleQueue,
+        result_queue: queue.SimpleQueue,
+        start_event: threading.Event,
+        target_kind: str,
+        benchmark_target: Callable[..., tuple[float, float | None]],
+        timeout: int,
+        worker_state: _BenchmarkWorkerState,
+    ) -> None:
+        if torch.cuda.is_available() and target_kind == "cuda":
+            try:
+                torch.cuda.set_device(worker_device)
+            except Exception:
+                logger.warning("Failed to bind benchmark worker to cuda:%s", worker_device)
+                logger.debug("Error: %s", traceback.format_exc())
+
+        start_event.wait()
+        while True:
+            item = worker_queue.get()
+            if item is None:
+                break
+            jit_kernel, config, idx = item
+            try:
+                started = time.perf_counter()
+                latency, worker_ref_latency = benchmark_target(
+                    jit_kernel=jit_kernel,
+                    benchmark_state=worker_state,
+                )
+                elapsed = time.perf_counter() - started
+                if timeout > 0 and elapsed > timeout:
+                    raise TimeoutException("Benchmark timed out")
+                result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
+            except TimeoutException:
+                result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
+            except Exception:
+                result_queue.put((idx, config, jit_kernel, None, None, "error", traceback.format_exc()))
+
+    def _benchmark_target(
+        self,
+        jit_kernel: tilelang.JITKernel,
+        warmup: int,
+        rep: int,
+        benchmark_state: _BenchmarkWorkerState,
+    ) -> tuple[float, float | None]:
+        profile_args = self.profile_args
+        supply_type = profile_args.supply_type
+        skip_check = profile_args.skip_check
+        manual_check_prog = profile_args.manual_check_prog
+        cache_input_tensors = profile_args.cache_input_tensors
+        ref_prog = profile_args.ref_prog
+        supply_prog = profile_args.supply_prog
+        rtol = profile_args.rtol
+        atol = profile_args.atol
+        max_mismatched_ratio = profile_args.max_mismatched_ratio
+        backend = profile_args.backend
+
+        profiler = jit_kernel.get_profiler(tensor_supply_type=supply_type)
+
+        def get_input_tensors_supply(with_output: bool):
+            def func():
+                if supply_prog is not None:
+                    return supply_prog(profiler._get_params(with_output=with_output))
+                else:
+                    return profiler._get_inputs(with_output=with_output)
+
+            return func
+
+        jit_input_tensors_supply = get_input_tensors_supply(with_output=False)
+        ref_input_tensors_supply = get_input_tensors_supply(with_output=False)
+
+        jit_input_tensors_cache = benchmark_state.jit_input_tensors
+        ref_input_tensors_cache = benchmark_state.ref_input_tensors
+        ref_latency_cache = benchmark_state.ref_latency_cache
+
+        if cache_input_tensors:
+            params = profiler._get_params(with_output=False)
+            if jit_input_tensors_cache is None:
+                jit_input_tensors_cache = jit_input_tensors_supply()
+            else:
+                assert len(params) == len(jit_input_tensors_cache), "len(params) != len(jit_input_tensors_cache)"
+                for p, c in zip(params, jit_input_tensors_cache):
+                    if not isinstance(c, torch.Tensor):
+                        continue
+
+                    def shape_equal(a, b):
+                        return all(a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape))
+
+                    if p.dtype != c.dtype or not shape_equal(p, c):
+                        logger.warning(
+                            "\nIncompatible input tensor properties detected between cached tensors and "
+                            "tensors regenerated for the current configuration trial. "
+                            "This can happen if different tuning configurations require different input shapes/dtypes "
+                            "and input tensor caching is enabled.\n"
+                            "To ensure fresh, compatible inputs are generated for every trial "
+                            "you can disable caching by setting:\n"
+                            "  `cache_input_tensors=False`\n"
+                            "within your `.set_compile_args(...)` call.\n"
+                        )
+                        jit_input_tensors_cache = jit_input_tensors_supply()
+                        break
+        else:
+            jit_input_tensors_cache = jit_input_tensors_supply()
+
+        if (not skip_check) and (ref_prog is not None):
+            if manual_check_prog is not None:
+                profiler.manual_assert_close(ref_prog, input_tensors=jit_input_tensors_cache, manual_check_prog=manual_check_prog)
+            else:
+                profiler.assert_allclose(
+                    ref_prog, input_tensors=jit_input_tensors_cache, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
+                )
+        latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=jit_input_tensors_cache, backend=backend)
+
+        if ref_latency_cache is None and ref_prog is not None:
+            ref_input_tensors_cache = ref_input_tensors_supply()
+            ref_latency_cache = profiler.do_bench(
+                ref_prog,
+                n_warmup=warmup,
+                n_repeat=rep,
+                input_tensors=ref_input_tensors_cache,
+                backend=backend,
+            )
+
+        benchmark_state.jit_input_tensors = jit_input_tensors_cache
+        benchmark_state.ref_input_tensors = ref_input_tensors_cache
+        benchmark_state.ref_latency_cache = ref_latency_cache
+
+        return latency, ref_latency_cache
+
+    def _resolve_benchmark_devices(
+        self,
+        benchmark_multi_gpu: bool,
+        benchmark_devices: list[int] | None,
+        target_kind: str,
+    ) -> tuple[bool, list[int]]:
+        current_device = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        single_device = [current_device]
+
+        if not benchmark_multi_gpu:
+            return False, single_device
+
+        if target_kind != "cuda":
+            logger.warning(
+                "Multi-GPU benchmark requested but target is '%s'. Falling back to single-device benchmark on cuda:%s.",
+                target_kind,
+                current_device,
+            )
+            return False, single_device
+
+        if not torch.cuda.is_available():
+            logger.warning("Multi-GPU benchmark requested but CUDA is unavailable. Falling back to single-device benchmark.")
+            return False, single_device
+
+        visible_device_count = torch.cuda.device_count()
+        if visible_device_count <= 0:
+            logger.warning("Multi-GPU benchmark requested but no visible CUDA devices found. Falling back to single-device benchmark.")
+            return False, single_device
+
+        requested_devices: list[int] = []
+        if benchmark_devices:
+            requested_devices = list(dict.fromkeys(int(device) for device in benchmark_devices))
+        else:
+            raw_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            parsed_visible_devices = [token.strip() for token in raw_visible_devices.split(",") if token.strip()]
+            if parsed_visible_devices:
+                requested_devices = list(range(len(parsed_visible_devices)))
+            else:
+                requested_devices = single_device
+
+        valid_devices: list[int] = []
+        invalid_devices: list[int] = []
+        for device in requested_devices:
+            if 0 <= device < visible_device_count:
+                valid_devices.append(device)
+            else:
+                invalid_devices.append(device)
+
+        valid_devices = list(dict.fromkeys(valid_devices))
+        if invalid_devices:
+            logger.warning(
+                "Ignoring invalid benchmark device ids %s. Visible CUDA device ordinals are [0, %d].",
+                invalid_devices,
+                max(0, visible_device_count - 1),
+            )
+
+        if not valid_devices:
+            logger.warning(
+                "No valid benchmark devices resolved for multi-GPU benchmark. Falling back to single-device benchmark on cuda:%s.",
+                current_device,
+            )
+            return False, single_device
+
+        return len(valid_devices) > 1, valid_devices
+
     def run(
         self,
         warmup: int = 25,
@@ -324,6 +689,8 @@ class AutoTuner:
         enable_grouped_compile: bool = False,
         group_compile_size: int = 2,
         collect_detailed_measurements: bool = True,
+        benchmark_devices: list[int] | None = None,
+        benchmark_multi_gpu: bool = False,
     ):
         """Run the auto-tuning process.
 
@@ -335,6 +702,9 @@ class AutoTuner:
             enable_grouped_compile: Whether to enable grouped compilation.
             group_compile_size: Number of configurations in one compile unit.
             collect_detailed_measurements: Whether to collect per-stage compile measurements.
+            benchmark_devices: CUDA device ordinals used for benchmark workers when
+                benchmark_multi_gpu=True.
+            benchmark_multi_gpu: Whether to benchmark configurations across multiple CUDA GPUs.
 
         Returns:
             Tuple[AutotuneResult, dict[str, Any]]: The autotune artifact and timing measurements.
@@ -362,6 +732,11 @@ class AutoTuner:
             "collect_detailed_measurements": collect_detailed_measurements,
             "compile_stage_totals_s": {},
             "compile_stage_avg_ms": {},
+            "benchmark_multi_gpu_requested": benchmark_multi_gpu,
+            "benchmark_multi_gpu_active": False,
+            "benchmark_device_count": 1,
+            "benchmark_devices": json.dumps([]),
+            "benchmark_shard_policy": "static",
         }
 
         compile_stage_totals: dict[str, float] = {}
@@ -447,130 +822,11 @@ class AutoTuner:
         best_config: dict[str, Any] | None = None
         best_kernel: tilelang.JITKernel | None = None
 
-        def _compile(**config_arg) -> tilelang.JITKernel:
-            compile_args = self.compile_args
-            if collect_detailed_measurements:
-                compile_stage_measurement: dict[str, float] | None = {}
-                compile_total_start = time.perf_counter()
-                build_program_start = time.perf_counter()
-                program = self.fn(**config_arg)
-                compile_stage_measurement["compile.build_program_s"] = time.perf_counter() - build_program_start
-
-                compile_program_start = time.perf_counter()
-                jit_kernel = compile_args.compile_program(program)
-                compile_stage_measurement["compile.compile_program_s"] = time.perf_counter() - compile_program_start
-                compile_stage_measurement["compile.total_s"] = time.perf_counter() - compile_total_start
-
-                kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
-                if isinstance(kernel_compile_measurement, dict):
-                    for stage_name, stage_value in kernel_compile_measurement.items():
-                        if isinstance(stage_value, (int, float)):
-                            compile_stage_measurement[f"kernel.{stage_name}"] = float(stage_value)
-            else:
-                program = self.fn(**config_arg)
-                jit_kernel = compile_args.compile_program(program)
-                compile_stage_measurement = None
-
-            jit_kernel.compile_measurement = compile_stage_measurement
-            return jit_kernel
-
-        def _elaborate(**config_arg) -> PrimFunc:
-            program = self.fn(**config_arg)
-            if not isinstance(program, PrimFunc):
-                raise TypeError(f"Expected PrimFunc from elaboration, but got {type(program)}")
-            return program
-
-        if self.jit_compile is None:
-            self.jit_compile = _compile
-        if self.jit_elaborate is None:
-            self.jit_elaborate = _elaborate
-
-        def target_fn(jit_kernel: tilelang.JITKernel):
-            # Unpack the context
-            profile_args = self.profile_args
-            supply_type = profile_args.supply_type
-            skip_check = profile_args.skip_check
-            manual_check_prog = profile_args.manual_check_prog
-            cache_input_tensors = profile_args.cache_input_tensors
-            ref_prog = profile_args.ref_prog
-            supply_prog = profile_args.supply_prog
-            rtol = profile_args.rtol
-            atol = profile_args.atol
-            max_mismatched_ratio = profile_args.max_mismatched_ratio
-            backend = profile_args.backend
-
-            profiler = jit_kernel.get_profiler(tensor_supply_type=supply_type)
-
-            # Factory functions for generating input tensors.
-            # This encapsulates the logic of using either a custom supply program (`supply_prog`)
-            # or the default profiler input generation (`profiler._get_inputs`).
-            def get_input_tensors_supply(with_output: bool):
-                def func():
-                    if supply_prog is not None:
-                        return supply_prog(profiler._get_params(with_output=with_output))
-                    else:
-                        return profiler._get_inputs(with_output=with_output)
-
-                return func
-
-            jit_input_tensors_supply = get_input_tensors_supply(with_output=False)
-            ref_input_tensors_supply = get_input_tensors_supply(with_output=False)
-
-            if cache_input_tensors:
-                params = profiler._get_params(with_output=False)
-                if self.jit_input_tensors is None:
-                    self.jit_input_tensors = jit_input_tensors_supply()
-                else:
-                    # check if the cached tensors are compatible with the current configuration
-                    assert len(params) == len(self.jit_input_tensors), "len(params) != len(self.jit_input_tensors)"
-                    for p, c in zip(params, self.jit_input_tensors):
-                        if not isinstance(c, torch.Tensor):
-                            # skip non-tensor inputs checking
-                            continue
-
-                        # Check tensor compatibility using generator expression
-                        def shape_equal(a, b):
-                            return all(
-                                a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape)
-                            )
-
-                        if p.dtype != c.dtype or not shape_equal(p, c):
-                            logger.warning(
-                                "\nIncompatible input tensor properties detected between cached tensors and "
-                                "tensors regenerated for the current configuration trial. "
-                                "This can happen if different tuning configurations require different input shapes/dtypes "
-                                "and input tensor caching is enabled.\n"
-                                "To ensure fresh, compatible inputs are generated for every trial "
-                                "you can disable caching by setting:\n"
-                                "  `cache_input_tensors=False`\n"
-                                "within your `.set_compile_args(...)` call.\n"
-                            )
-                            # otherwise, regenerate the input tensors for safety
-                            self.jit_input_tensors = jit_input_tensors_supply()
-                            break
-            else:
-                self.jit_input_tensors = jit_input_tensors_supply()
-
-            if (not skip_check) and (ref_prog is not None):
-                if manual_check_prog is not None:
-                    profiler.manual_assert_close(ref_prog, input_tensors=self.jit_input_tensors, manual_check_prog=manual_check_prog)
-                else:
-                    profiler.assert_allclose(
-                        ref_prog, input_tensors=self.jit_input_tensors, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
-                    )
-            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors, backend=backend)
-
-            if self.ref_latency_cache is None and ref_prog is not None:
-                self.ref_input_tensors = ref_input_tensors_supply()
-                self.ref_latency_cache = profiler.do_bench(
-                    ref_prog,
-                    n_warmup=warmup,
-                    n_repeat=rep,
-                    input_tensors=self.ref_input_tensors,
-                    backend=backend,
-                )
-
-            return latency, self.ref_latency_cache
+        compile_func, elaborate_func = self._ensure_jit_functions(
+            collect_detailed_measurements=collect_detailed_measurements,
+        )
+        self.jit_compile = compile_func
+        self.jit_elaborate = elaborate_func
 
         config_args = []
         for config in self.configs:
@@ -587,23 +843,25 @@ class AutoTuner:
         if len(config_args) == 0:
             raise ValueError("No configurations to tune, please check your `@autotune` decorator")
 
-        target_kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
-        execution_backend = str(self.compile_args.execution_backend)
-        grouped_compile_requested = enable_grouped_compile and group_compile_size > 1
-        grouped_compile_active = grouped_compile_requested and target_kind == "cuda" and execution_backend == "tvm_ffi"
-        grouped_compile_reason = ""
-        if grouped_compile_requested and not grouped_compile_active:
-            grouped_compile_reason = (
-                f"grouped compilation is currently implemented for CUDA+tvm_ffi only; "
-                f"fallback to per-config mode (target={target_kind}, execution_backend={execution_backend})"
-            )
-            logger.info("%s", grouped_compile_reason)
+        target_kind, _, grouped_compile_active, grouped_compile_reason = self._resolve_grouped_compile_mode(
+            enable_grouped_compile=enable_grouped_compile,
+            group_compile_size=group_compile_size,
+        )
 
         measurement["grouped_compile_active"] = grouped_compile_active
         measurement["grouped_compile_reason"] = grouped_compile_reason
         measurement["grouped_compile_mode"] = (
             "backend_grouped" if grouped_compile_active else "disabled"
         )
+
+        benchmark_multi_gpu_active, benchmark_device_list = self._resolve_benchmark_devices(
+            benchmark_multi_gpu=benchmark_multi_gpu,
+            benchmark_devices=benchmark_devices,
+            target_kind=target_kind,
+        )
+        measurement["benchmark_multi_gpu_active"] = benchmark_multi_gpu_active
+        measurement["benchmark_device_count"] = len(benchmark_device_list)
+        measurement["benchmark_devices"] = json.dumps(benchmark_device_list)
 
         # check if the tunable arguments has been set.
         # get the back config argument
@@ -637,198 +895,141 @@ class AutoTuner:
                 measurement["avg_group_size"] = 1.0
                 self._memory_cache[key] = autotuner_result
                 return _pack_return(autotuner_result)
-        # get the cpu count
-        available_cpu_count = get_available_cpu_count()
-        cpu_utilizations = float(env.TILELANG_AUTO_TUNING_CPU_UTILITIES)
-        cpu_counts = int(env.TILELANG_AUTO_TUNING_CPU_COUNTS)
-        max_cpu_count = int(env.TILELANG_AUTO_TUNING_MAX_CPU_COUNT)
-        if cpu_counts > 0:
-            num_workers = min(cpu_counts, available_cpu_count)
-            logger.info(f"Auto-tuning with {cpu_counts} CPU counts, {available_cpu_count} CPUs available, {num_workers} CPUs will be used")
-        else:
-            num_workers = max(1, int(available_cpu_count * cpu_utilizations))
-            logger.info(
-                f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used"
-            )
 
-        if max_cpu_count > 0 and num_workers > max_cpu_count:
-            logger.warning(
-                f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used, but the max CPU count is {max_cpu_count}, so we will use {max_cpu_count} CPUs"
-            )
-            num_workers = max_cpu_count
-
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
-        futures = []
-        future_to_unit = {}
-        ready_queue = deque()
-
-        def cuda_device_wrapper(func, device):
-            def inner(**config_arg):
-                torch.cuda.set_device(device)
-                return func(**config_arg)
-
-            return inner
-
-        def get_compile_func():
-            compile_func = self.jit_compile
-            if torch.cuda.is_available():
-                device = torch.cuda.current_device()
-                compile_func = cuda_device_wrapper(self.jit_compile, device)
-            return compile_func
-
-        def get_elaborate_func():
-            elaborate_func = self.jit_elaborate
-            if torch.cuda.is_available():
-                device = torch.cuda.current_device()
-                elaborate_func = cuda_device_wrapper(self.jit_elaborate, device)
-            return elaborate_func
-
-        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
-            if grouped_compile_active:
-                return compile_grouped_unit_tvm_ffi(
-                    unit_items=unit_items,
-                    compile_args=self.compile_args,
-                    elaborate_func=get_elaborate_func(),
-                    collect_compile_stage_measurements=collect_detailed_measurements,
-                )
-            compile_func = get_compile_func()
-            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None, dict[str, float] | None]] = []
-            for idx, config_arg in unit_items:
-                config_compile_start = time.perf_counter()
-                try:
-                    jit_kernel = compile_func(**config_arg)
-                    compile_stage_measurement: dict[str, float] | None = {} if collect_detailed_measurements else None
-                    kernel_compile_measurement = getattr(jit_kernel, "compile_measurement", None)
-                    if isinstance(kernel_compile_measurement, dict) and compile_stage_measurement is not None:
-                        compile_stage_measurement.update(kernel_compile_measurement)
-                    if compile_stage_measurement is not None:
-                        compile_stage_measurement["compile_unit.config_total_s"] = time.perf_counter() - config_compile_start
-                    unit_results.append((idx, config_arg, jit_kernel, None, compile_stage_measurement))
-                except Exception as e:
-                    compile_stage_measurement = (
-                        {"compile_unit.config_total_s": time.perf_counter() - config_compile_start}
-                        if collect_detailed_measurements
-                        else None
-                    )
-                    unit_results.append((idx, config_arg, None, e, compile_stage_measurement))
-            return unit_results
-
-        compile_units: list[list[tuple[int, dict[str, Any]]]] = []
-        if grouped_compile_active:
-            for start in range(0, len(config_args), group_compile_size):
-                end = min(start + group_compile_size, len(config_args))
-                compile_units.append([(i, config_args[i]) for i in range(start, end)])
-        else:
-            for i, config_arg in enumerate(config_args):
-                compile_units.append([(i, config_arg)])
-
-        compilation_start = time.perf_counter()
-        for unit_items in compile_units:
-            future = pool.submit(compile_unit, unit_items)
-            futures.append(future)
-            future_to_unit[future] = unit_items
+        (
+            pool,
+            futures,
+            future_to_unit,
+            compilation_start,
+            compile_desc,
+            compile_units,
+        ) = self._prepare_compile_execution(
+            config_args=config_args,
+            grouped_compile_active=grouped_compile_active,
+            group_compile_size=group_compile_size,
+            collect_detailed_measurements=collect_detailed_measurements,
+            compile_func=compile_func,
+            elaborate_func=elaborate_func,
+        )
 
         measurement["num_configs_submitted"] = len(config_args)
         measurement["num_compile_units_submitted"] = len(compile_units)
         measurement["avg_group_size"] = float(len(config_args)) / len(compile_units) if len(compile_units) > 0 else 1.0
 
         ref_latency = None
-        compile_desc = "Compiling configurations (grouped)" if grouped_compile_active else "Compiling configurations"
+        main_thread_benchmark_state = _BenchmarkWorkerState(
+            jit_input_tensors=self.jit_input_tensors,
+            ref_input_tensors=self.ref_input_tensors,
+            ref_latency_cache=self.ref_latency_cache,
+        )
+
+        def _record_benchmark_result(latency: float, config: dict[str, Any], jit_kernel: tilelang.JITKernel, idx: int, progress_bar):
+            nonlocal best_latency, best_config, best_kernel
+            if latency < best_latency:
+                best_latency = latency
+                best_config = config
+                best_kernel = jit_kernel
+
+            progress_bar.set_postfix({"best_latency": best_latency})
+            tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
+        benchmark_worker_devices = benchmark_device_list if benchmark_multi_gpu_active else [benchmark_device_list[0]]
+        benchmark_task_queues = [queue.SimpleQueue() for _ in benchmark_worker_devices]
+        benchmark_result_queue: queue.SimpleQueue = queue.SimpleQueue()
+        benchmark_start_event = threading.Event()
+        benchmark_threads: list[threading.Thread] = []
+        benchmark_expected_results = 0
+        benchmark_processed_results = 0
+        benchmark_started = False
+        benchmark_start = 0.0
 
         if use_pipeline:
-            pending_futures = set(futures)
-            compile_finished = False
-            benchmark_started = False
-            benchmark_start = 0.0
-            compile_progress = tqdm(total=len(config_args), desc=compile_desc)
-            progress_bar = tqdm(total=len(config_args), desc="Bench configurations")
+            benchmark_start_event.set()
 
-            try:
-                while pending_futures or ready_queue:
-                    done = set()
-                    if pending_futures:
-                        # Block only when no compiled kernel is available for benchmarking.
-                        if ready_queue:
-                            done, pending_futures = concurrent.futures.wait(
-                                pending_futures,
-                                timeout=0,
-                                return_when=concurrent.futures.FIRST_COMPLETED,
-                            )
-                        else:
-                            done, pending_futures = concurrent.futures.wait(
-                                pending_futures,
-                                return_when=concurrent.futures.FIRST_COMPLETED,
-                            )
+        if timeout > 0:
+            logger.warning(
+                "Benchmark timeout uses elapsed-time checks in benchmark workers "
+                "because signal-based timeouts are only available on the main thread."
+            )
+        benchmark_target = partial(
+            self._benchmark_target,
+            warmup=warmup,
+            rep=rep,
+        )
 
-                    for future in done:
-                        unit_items = future_to_unit[future]
-                        try:
-                            unit_results = future.result()
-                        except Exception as e:
-                            compile_progress.update(len(unit_items))
-                            unit_indexes = [idx for idx, _ in unit_items]
-                            logger.debug("Compilation unit failed for indexes %s with error: %s", unit_indexes, e)
-                            continue
+        def _enqueue_benchmark_task(jit_kernel: tilelang.JITKernel, config: dict[str, Any], idx: int):
+            nonlocal benchmark_expected_results, benchmark_started, benchmark_start
+            queue_idx = idx % len(benchmark_task_queues)
+            benchmark_task_queues[queue_idx].put((jit_kernel, config, idx))
+            benchmark_expected_results += 1
+            if use_pipeline and (not benchmark_started):
+                benchmark_started = True
+                benchmark_start = time.perf_counter()
 
-                        compile_progress.update(len(unit_results))
-                        for idx, config, jit_kernel, error, compile_stage_measurement in unit_results:
-                            _accumulate_compile_stage_measurement(compile_stage_measurement)
-                            if error is not None:
-                                logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
-                                continue
-                            assert jit_kernel is not None
-                            ready_queue.append((jit_kernel, config, idx))
-                            measurement["num_configs_compiled"] += 1
+        def _process_benchmark_result(result_item, progress_bar):
+            nonlocal benchmark_processed_results, ref_latency
+            idx, config, jit_kernel, latency, worker_ref_latency, status, error_text = result_item
+            benchmark_processed_results += 1
+            measurement["num_configs_benchmarked"] += 1
+            progress_bar.update(1)
 
-                    if (not compile_finished) and (not pending_futures):
-                        measurement["compilation_s"] = time.perf_counter() - compilation_start
-                        compile_finished = True
+            if status == "timeout":
+                logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
+                return
+            if status == "error":
+                logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
+                if error_text:
+                    logger.debug(f"Error: {error_text}")
+                return
 
-                    if ready_queue:
-                        if not benchmark_started:
-                            benchmark_started = True
-                            benchmark_start = time.perf_counter()
-                        jit_kernel, config, idx = ready_queue.popleft()
-                        measurement["num_configs_benchmarked"] += 1
-                        progress_bar.update(1)
-                        try:
-                            # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
-                            # Because tma init may behave strangely with one thread
-                            latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
-                        except TimeoutException:
-                            logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
-                            continue
-                        except Exception:
-                            logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
-                            logger.debug(f"Error: {traceback.format_exc()}")
-                            continue
+            if worker_ref_latency is not None:
+                ref_latency = worker_ref_latency
+            assert latency is not None
+            _record_benchmark_result(latency=latency, config=config, jit_kernel=jit_kernel, idx=idx, progress_bar=progress_bar)
 
-                        if latency < best_latency:
-                            best_latency = latency
-                            best_config = config
-                            best_kernel = jit_kernel
+        def _drain_benchmark_results(progress_bar, block: bool):
+            while benchmark_processed_results < benchmark_expected_results:
+                try:
+                    if block:
+                        result_item = benchmark_result_queue.get(timeout=0.1)
+                    else:
+                        result_item = benchmark_result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                _process_benchmark_result(result_item, progress_bar)
 
-                        progress_bar.set_postfix({"best_latency": best_latency})
-                        tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
+        # Start benchmark worker threads
+        for worker_idx, worker_device in enumerate(benchmark_worker_devices):
+            worker_state = _BenchmarkWorkerState() if benchmark_multi_gpu_active else main_thread_benchmark_state
+            worker_thread = threading.Thread(
+                target=self._benchmark_worker_loop,
+                args=(
+                    worker_device,
+                    benchmark_task_queues[worker_idx],
+                    benchmark_result_queue,
+                    benchmark_start_event,
+                    target_kind,
+                    benchmark_target,
+                    timeout,
+                    worker_state,
+                ),
+                daemon=False,
+            )
+            worker_thread.start()
+            benchmark_threads.append(worker_thread)
 
-                if not compile_finished:
-                    measurement["compilation_s"] = time.perf_counter() - compilation_start
+        compile_finished = False
+        compile_progress = tqdm(total=len(config_args), desc=compile_desc)
+        progress_bar = tqdm(total=len(config_args), desc="Bench configurations")
+        pending_futures = set(futures)
 
-                if benchmark_started:
-                    measurement["benchmark_s"] = time.perf_counter() - benchmark_start
+        try:
+            while pending_futures:
+                done, pending_futures = concurrent.futures.wait(
+                    pending_futures,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
 
-                # Avoid misleading unfinished progress bars when compile failures happen.
-                progress_bar.total = max(progress_bar.n, measurement["num_configs_benchmarked"])
-                progress_bar.refresh()
-            finally:
-                compile_progress.close()
-                progress_bar.close()
-                pool.shutdown()
-        else:
-            results_with_configs = []
-            compile_progress = tqdm(total=len(config_args), desc=compile_desc)
-            try:
-                for future in concurrent.futures.as_completed(futures):
+                for future in done:
                     unit_items = future_to_unit[future]
                     try:
                         unit_results = future.result()
@@ -845,39 +1046,46 @@ class AutoTuner:
                             logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
                             continue
                         assert jit_kernel is not None
-                        results_with_configs.append((jit_kernel, config, idx))
+                        measurement["num_configs_compiled"] += 1
+                        _enqueue_benchmark_task(jit_kernel=jit_kernel, config=config, idx=idx)
 
-                measurement["compilation_s"] = time.perf_counter() - compilation_start
-                measurement["num_configs_compiled"] = len(results_with_configs)
+                _drain_benchmark_results(progress_bar=progress_bar, block=False)
 
+            measurement["compilation_s"] = time.perf_counter() - compilation_start
+            compile_finished = True
+
+            if (not use_pipeline) and benchmark_expected_results > 0:
+                benchmark_started = True
                 benchmark_start = time.perf_counter()
-                measurement["num_configs_benchmarked"] = len(results_with_configs)
-                progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
-                for i in progress_bar:
-                    jit_kernel, config, idx = results_with_configs[i]
-                    try:
-                        latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
-                    except TimeoutException:
-                        logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
-                        continue
-                    except Exception:
-                        logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
-                        logger.debug(f"Error: {traceback.format_exc()}")
-                        continue
 
-                    if latency < best_latency:
-                        best_latency = latency
-                        best_config = config
-                        best_kernel = jit_kernel
+            benchmark_start_event.set()
+            for worker_queue in benchmark_task_queues:
+                worker_queue.put(None)
 
-                    progress_bar.set_postfix({"best_latency": best_latency})
-                    tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
-                if len(results_with_configs) > 0:
-                    measurement["benchmark_s"] = time.perf_counter() - benchmark_start
-                progress_bar.close()
-            finally:
-                compile_progress.close()
-                pool.shutdown()
+            while benchmark_processed_results < benchmark_expected_results:
+                _drain_benchmark_results(progress_bar=progress_bar, block=True)
+
+            if benchmark_started:
+                measurement["benchmark_s"] = time.perf_counter() - benchmark_start
+
+            # Avoid misleading unfinished progress bars when compile failures happen.
+            progress_bar.total = max(progress_bar.n, measurement["num_configs_benchmarked"])
+            progress_bar.refresh()
+        finally:
+            benchmark_start_event.set()
+            for worker_queue in benchmark_task_queues:
+                worker_queue.put(None)
+            for worker_thread in benchmark_threads:
+                worker_thread.join()
+            if not compile_finished:
+                measurement["compilation_s"] = time.perf_counter() - compilation_start
+            compile_progress.close()
+            progress_bar.close()
+            pool.shutdown()
+
+        self.jit_input_tensors = main_thread_benchmark_state.jit_input_tensors
+        self.ref_input_tensors = main_thread_benchmark_state.ref_input_tensors
+        self.ref_latency_cache = main_thread_benchmark_state.ref_latency_cache
 
         if best_kernel is None:
             error_msg = "Auto-tuning failed: No configuration successfully compiled and passed benchmarking/validation."

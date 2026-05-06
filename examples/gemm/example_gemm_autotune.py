@@ -126,6 +126,8 @@ def get_best_config(
     use_pipeline: bool = False,
     enable_grouped_compile: bool = False,
     group_compile_size: int = 2,
+    benchmark_multi_gpu: bool = False,
+    benchmark_devices: list[int] | None = None,
 ):
     autotuner, _, _ = _build_autotuner(
         M=M,
@@ -145,6 +147,8 @@ def get_best_config(
         use_pipeline=use_pipeline,
         enable_grouped_compile=enable_grouped_compile,
         group_compile_size=group_compile_size,
+        benchmark_multi_gpu=benchmark_multi_gpu,
+        benchmark_devices=benchmark_devices,
     )
     return autotuner_result
 
@@ -234,6 +238,8 @@ def run_autotune_with_measurements(
     enable_grouped_compile: bool = False,
     group_compile_size: int = 2,
     detailed_measurements: bool = False,
+    benchmark_multi_gpu: bool = False,
+    benchmark_devices: list[int] | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     autotuner, configs, _ = _build_autotuner(
         M=M,
@@ -265,6 +271,11 @@ def run_autotune_with_measurements(
         "enable_grouped_compile": enable_grouped_compile,
         "group_compile_size": group_compile_size,
         "detailed_measurements": detailed_measurements,
+        "benchmark_multi_gpu_requested": benchmark_multi_gpu,
+        "benchmark_multi_gpu_active": False,
+        "benchmark_device_count": 1,
+        "benchmark_devices": "[]",
+        "benchmark_shard_policy": "static",
         "cpu_count_env": os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1"),
         "end_to_end_s": None,
         "compilation_s": None,
@@ -295,6 +306,8 @@ def run_autotune_with_measurements(
             enable_grouped_compile=enable_grouped_compile,
             group_compile_size=group_compile_size,
             collect_detailed_measurements=detailed_measurements,
+            benchmark_multi_gpu=benchmark_multi_gpu,
+            benchmark_devices=benchmark_devices,
         )
     except Exception as ex:
         metrics["status"] = "failed"
@@ -312,6 +325,11 @@ def run_autotune_with_measurements(
         metrics["num_compile_units_submitted"] = run_measurement.get("num_compile_units_submitted")
         metrics["avg_group_size"] = run_measurement.get("avg_group_size")
         metrics["grouped_compile_reason"] = run_measurement.get("grouped_compile_reason", "")
+        metrics["benchmark_multi_gpu_requested"] = run_measurement.get("benchmark_multi_gpu_requested", benchmark_multi_gpu)
+        metrics["benchmark_multi_gpu_active"] = run_measurement.get("benchmark_multi_gpu_active", False)
+        metrics["benchmark_device_count"] = run_measurement.get("benchmark_device_count", 1)
+        metrics["benchmark_devices"] = run_measurement.get("benchmark_devices", "[]")
+        metrics["benchmark_shard_policy"] = run_measurement.get("benchmark_shard_policy", "static")
 
     if result is not None:
         total_flops = 2 * M * N * K

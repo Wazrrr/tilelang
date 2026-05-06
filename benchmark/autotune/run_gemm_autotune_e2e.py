@@ -68,6 +68,8 @@ def run_single_case(
     enable_grouped_compile: bool,
     group_compile_size: int,
     detailed_measurements: bool,
+    benchmark_multi_gpu: bool,
+    benchmark_devices: list[int],
 ) -> dict[str, Any]:
     m, n, k = shape
 
@@ -92,6 +94,8 @@ def run_single_case(
             enable_grouped_compile=enable_grouped_compile,
             group_compile_size=group_compile_size,
             detailed_measurements=detailed_measurements,
+            benchmark_multi_gpu=benchmark_multi_gpu,
+            benchmark_devices=benchmark_devices,
         )
     finally:
         if previous_cpu_count is None:
@@ -136,6 +140,11 @@ def run_single_case(
         "num_compile_units_submitted": metrics.get("num_compile_units_submitted"),
         "avg_group_size": metrics.get("avg_group_size"),
         "grouped_compile_reason": metrics.get("grouped_compile_reason", ""),
+        "benchmark_multi_gpu_requested": metrics.get("benchmark_multi_gpu_requested", benchmark_multi_gpu),
+        "benchmark_multi_gpu_active": metrics.get("benchmark_multi_gpu_active"),
+        "benchmark_device_count": metrics.get("benchmark_device_count"),
+        "benchmark_devices": metrics.get("benchmark_devices", "[]"),
+        "benchmark_shard_policy": metrics.get("benchmark_shard_policy", "static"),
         "best_config": json.dumps(best_config, sort_keys=True) if best_config is not None else "",
     }
     if detailed_measurements:
@@ -234,6 +243,18 @@ def parse_args() -> argparse.Namespace:
     detailed_group.add_argument("--no-detailed-measurements", dest="detailed_measurements", action="store_false")
     parser.set_defaults(detailed_measurements=False)
 
+    benchmark_multi_gpu_group = parser.add_mutually_exclusive_group()
+    benchmark_multi_gpu_group.add_argument("--benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_true")
+    benchmark_multi_gpu_group.add_argument("--no-benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_false")
+    parser.set_defaults(benchmark_multi_gpu=False)
+    parser.add_argument(
+        "--benchmark-devices",
+        action="append",
+        type=int,
+        default=[],
+        help="Repeatable CUDA device ordinals for benchmark workers (e.g. --benchmark-devices 0 --benchmark-devices 1).",
+    )
+
     return parser.parse_args()
 
 
@@ -251,6 +272,8 @@ def main() -> int:
         raise ValueError("--group-compile-size must be > 0")
     if any(cpu <= 0 for cpu in args.cpu_count):
         raise ValueError("--cpu-count values must be > 0")
+    if any(device < 0 for device in args.benchmark_devices):
+        raise ValueError("--benchmark-devices values must be >= 0")
 
     if args.shape:
         shape_cases = [(f"custom_{idx + 1}", parse_shape(shape_text)) for idx, shape_text in enumerate(args.shape)]
@@ -301,6 +324,11 @@ def main() -> int:
         "num_compile_units_submitted",
         "avg_group_size",
         "grouped_compile_reason",
+        "benchmark_multi_gpu_requested",
+        "benchmark_multi_gpu_active",
+        "benchmark_device_count",
+        "benchmark_devices",
+        "benchmark_shard_policy",
         "best_config",
     ]
     if args.detailed_measurements:
@@ -339,6 +367,8 @@ def main() -> int:
                         enable_grouped_compile=args.enable_grouped_compile,
                         group_compile_size=args.group_compile_size,
                         detailed_measurements=args.detailed_measurements,
+                        benchmark_multi_gpu=args.benchmark_multi_gpu,
+                        benchmark_devices=args.benchmark_devices,
                     )
                     writer.writerow(row)
                     fp.flush()
