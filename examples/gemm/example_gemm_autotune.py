@@ -9,6 +9,8 @@ from tilelang.autotuner import AutoTuner
 from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.arch import CDNA
+from tilelang.carver.arch import auto_infer_current_arch
+from tilelang.carver.config_selector import select_configs, validate_selector_name
 from tilelang.carver.roller.rasterization import NoRasterization
 import torch
 
@@ -22,32 +24,67 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(M, N, K, with_roller=False, topk=20):
-    """
-    Generate a list of kernel tuning configuration dictionaries for a tiled matrix-multiply.
+def _default_selector_telemetry(
+    *, selector_name: str, selector_input_count: int, selector_output_count: int, selector_pool_k: int | None
+) -> dict[str, Any]:
+    return {
+        "selector_name": selector_name,
+        "selector_input_count": selector_input_count,
+        "selector_output_count": selector_output_count,
+        "selector_pool_k": selector_pool_k,
+        "selector_time_ms": 0.0,
+        "selector_fallback_used": False,
+    }
 
-    When with_roller is True this queries the MatmulTemplate roller to produce up to `topk` recommended
-    configurations (device-specific TensorCore-friendly tilings). Each returned dict contains:
-      - block_M, block_N, block_K: tile sizes
-      - num_stages: pipeline staging (0 means no explicit staging)
-      - thread_num: total threads used for the block
-      - enable_rasteration: whether a rasterization/swizzle layout was recommended (note spelling)
 
-    When with_roller is False this returns the Cartesian product of a fixed set of candidate
-    parameters; the returned dicts use the backward-compatible key name "enable_rasteration" for that flag.
+def _baseline_configs() -> list[dict[str, Any]]:
+    block_M = [64, 128, 256]
+    block_N = [64, 128, 256]
+    block_K = [32, 64]
+    num_stages = [0, 1, 2, 3]
+    thread_num = [128, 256]
+    enable_rasterization = [True, False]
+    _configs = list(
+        itertools.product(
+            block_M,
+            block_N,
+            block_K,
+            num_stages,
+            thread_num,
+            enable_rasterization,
+        )
+    )
+    return [
+        {
+            "block_M": c[0],
+            "block_N": c[1],
+            "block_K": c[2],
+            "num_stages": c[3],
+            "thread_num": c[4],
+            "enable_rasteration": c[5],  # keep param name for backward-compat
+        }
+        for c in _configs
+    ]
 
-    Parameters:
-        M, N, K (int): GEMM dimensions used to generate valid tile sizes.
-        with_roller (bool): If True, use MatmulTemplate's roller to generate device-aware hints;
-            otherwise use a predefined candidate grid.
-        topk (int): Maximum number of roller hints to request when with_roller is True.
 
-    Returns:
-        List[dict]: A list of configuration dictionaries as described above.
+def _get_configs_with_metadata(
+    M: int,
+    N: int,
+    K: int,
+    *,
+    with_roller: bool,
+    topk: int,
+    config_selector: str,
+    selector_pool_k: int | None,
+    selector_debug: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if with_roller or config_selector != "none":
+        if topk <= 0:
+            raise ValueError("topk must be > 0 when with_roller is enabled or a config selector is requested")
+    if selector_pool_k is not None and selector_pool_k <= 0:
+        raise ValueError("selector_pool_k must be > 0 when provided")
+    validate_selector_name(config_selector)
 
-    Raises:
-        ValueError: if with_roller is True but the roller returns no hints.
-    """
     if with_roller:
         arch = CUDA("cuda") if torch.version.hip is None else CDNA("hip")
         carve_template = MatmulTemplate(
@@ -61,8 +98,13 @@ def get_configs(M, N, K, with_roller=False, topk=20):
 
         func = carve_template.equivalent_function()
         assert func is not None, "Function is None"
-        roller_hints = carve_template.recommend_hints(topk=topk)
-        if roller_hints is None:
+        roller_hints = carve_template.recommend_hints(
+            topk=topk,
+            selector=config_selector,
+            selector_pool_k=selector_pool_k,
+            selector_debug=selector_debug,
+        )
+        if not roller_hints:
             raise ValueError("No Roller Hints Found for TensorCore Scheduling")
         configs = []
         for hint in roller_hints:
@@ -78,35 +120,82 @@ def get_configs(M, N, K, with_roller=False, topk=20):
             config["thread_num"] = block_rows * block_cols * 32
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
-    else:
-        block_M = [64, 128, 256]
-        block_N = [64, 128, 256]
-        block_K = [32, 64]
-        num_stages = [0, 1, 2, 3]
-        thread_num = [128, 256]
-        enable_rasterization = [True, False]
-        _configs = list(
-            itertools.product(
-                block_M,
-                block_N,
-                block_K,
-                num_stages,
-                thread_num,
-                enable_rasterization,
-            )
+        telemetry = carve_template.get_last_selector_report() or _default_selector_telemetry(
+            selector_name="none",
+            selector_input_count=len(configs),
+            selector_output_count=len(configs),
+            selector_pool_k=selector_pool_k,
         )
+        return configs, telemetry
 
-        configs = [
-            {
-                "block_M": c[0],
-                "block_N": c[1],
-                "block_K": c[2],
-                "num_stages": c[3],
-                "thread_num": c[4],
-                "enable_rasteration": c[5],  # keep param name for backward-compat
-            }
-            for c in _configs
-        ]
+    configs = _baseline_configs()
+    arch = auto_infer_current_arch()
+    selected_configs, telemetry = select_configs(
+        configs,
+        topk=topk,
+        selector_name=config_selector,
+        arch=arch,
+        m=M,
+        n=N,
+        k=K,
+        in_dtype=T.float16,
+        accum_dtype=T.float32,
+        selector_pool_k=selector_pool_k,
+        selector_debug=selector_debug,
+        gemm_like=True,
+    )
+    return selected_configs, telemetry.to_dict()
+
+
+def get_configs(
+    M,
+    N,
+    K,
+    with_roller=False,
+    topk=20,
+    config_selector: str = "none",
+    selector_pool_k: int | None = None,
+    selector_debug: bool = False,
+):
+    """
+    Generate a list of kernel tuning configuration dictionaries for a tiled matrix-multiply.
+
+    When with_roller is True this queries the MatmulTemplate roller to produce up to `topk` recommended
+    configurations (device-specific TensorCore-friendly tilings). Each returned dict contains:
+      - block_M, block_N, block_K: tile sizes
+      - num_stages: pipeline staging (0 means no explicit staging)
+      - thread_num: total threads used for the block
+      - enable_rasteration: whether a rasterization/swizzle layout was recommended (note spelling)
+
+    When with_roller is False this returns the Cartesian product of a fixed set of candidate
+    parameters unless `config_selector` is enabled on Hopper, in which case it returns the selector's
+    top-k subset. Returned dicts use the backward-compatible key name "enable_rasteration".
+
+    Parameters:
+        M, N, K (int): GEMM dimensions used to generate valid tile sizes.
+        with_roller (bool): If True, use MatmulTemplate's roller to generate device-aware hints;
+            otherwise use a predefined candidate grid.
+        topk (int): Maximum number of selected candidates when selector mode is active.
+        config_selector (str): Selector name. Supported values: "none", "hopper_hybrid_v1".
+        selector_pool_k (Optional[int]): Optional Roller pool size when selector mode is active.
+        selector_debug (bool): Enable selector debug logging.
+
+    Returns:
+        List[dict]: A list of configuration dictionaries as described above.
+
+    Raises:
+        ValueError: if with_roller is True but the roller returns no hints.
+    """
+    configs, _ = _get_configs_with_metadata(
+        M,
+        N,
+        K,
+        with_roller=with_roller,
+        topk=topk,
+        config_selector=config_selector,
+        selector_pool_k=selector_pool_k,
+        selector_debug=selector_debug,
+    )
     return configs
 
 
@@ -123,13 +212,16 @@ def get_best_config(
     skip_check: bool = False,
     cache_input_tensors: bool = False,
     topk: int = 20,
+    config_selector: str = "none",
+    selector_pool_k: int | None = None,
+    selector_debug: bool = False,
     use_pipeline: bool = False,
     enable_grouped_compile: bool = False,
     group_compile_size: int = 2,
     benchmark_multi_gpu: bool = False,
     benchmark_devices: list[int] | None = None,
 ):
-    autotuner, _, _ = _build_autotuner(
+    autotuner, _, _, _ = _build_autotuner(
         M=M,
         N=N,
         K=K,
@@ -139,6 +231,9 @@ def get_best_config(
         skip_check=skip_check,
         cache_input_tensors=cache_input_tensors,
         topk=topk,
+        config_selector=config_selector,
+        selector_pool_k=selector_pool_k,
+        selector_debug=selector_debug,
     )
     autotuner_result, _measurement = autotuner.run(
         warmup=warmup,
@@ -163,6 +258,9 @@ def _build_autotuner(
     skip_check: bool,
     cache_input_tensors: bool,
     topk: int,
+    config_selector: str,
+    selector_pool_k: int | None,
+    selector_debug: bool,
 ):
     def kernel(
         block_M=None,
@@ -202,7 +300,16 @@ def _build_autotuner(
 
         return main
 
-    configs = get_configs(M, N, K, with_roller, topk=topk)
+    configs, selector_telemetry = _get_configs_with_metadata(
+        M,
+        N,
+        K,
+        with_roller=with_roller,
+        topk=topk,
+        config_selector=config_selector,
+        selector_pool_k=selector_pool_k,
+        selector_debug=selector_debug,
+    )
     autotuner = (
         AutoTuner.from_kernel(kernel=kernel, configs=configs)
         .set_compile_args(
@@ -218,7 +325,7 @@ def _build_autotuner(
             backend=profile_backend,
         )
     )
-    return autotuner, configs, kernel
+    return autotuner, configs, kernel, selector_telemetry
 
 
 def run_autotune_with_measurements(
@@ -234,6 +341,9 @@ def run_autotune_with_measurements(
     skip_check: bool = True,
     cache_input_tensors: bool = True,
     topk: int = 20,
+    config_selector: str = "none",
+    selector_pool_k: int | None = None,
+    selector_debug: bool = False,
     use_pipeline: bool = False,
     enable_grouped_compile: bool = False,
     group_compile_size: int = 2,
@@ -241,7 +351,7 @@ def run_autotune_with_measurements(
     benchmark_multi_gpu: bool = False,
     benchmark_devices: list[int] | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
-    autotuner, configs, _ = _build_autotuner(
+    autotuner, configs, _, selector_telemetry = _build_autotuner(
         M=M,
         N=N,
         K=K,
@@ -251,6 +361,9 @@ def run_autotune_with_measurements(
         skip_check=skip_check,
         cache_input_tensors=cache_input_tensors,
         topk=topk,
+        config_selector=config_selector,
+        selector_pool_k=selector_pool_k,
+        selector_debug=selector_debug,
     )
 
     metrics: dict[str, Any] = {
@@ -260,6 +373,12 @@ def run_autotune_with_measurements(
         "num_configs": len(configs),
         "with_roller": with_roller,
         "topk": topk,
+        "selector_name": selector_telemetry.get("selector_name", "none"),
+        "selector_input_count": selector_telemetry.get("selector_input_count", len(configs)),
+        "selector_output_count": selector_telemetry.get("selector_output_count", len(configs)),
+        "selector_pool_k": selector_telemetry.get("selector_pool_k"),
+        "selector_time_ms": selector_telemetry.get("selector_time_ms", 0.0),
+        "selector_fallback_used": selector_telemetry.get("selector_fallback_used", False),
         "skip_check": skip_check,
         "execution_backend": execution_backend,
         "profile_backend": profile_backend,

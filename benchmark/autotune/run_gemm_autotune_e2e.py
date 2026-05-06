@@ -57,6 +57,9 @@ def run_single_case(
     run_idx: int,
     with_roller: bool,
     topk: int,
+    config_selector: str,
+    selector_pool_k: int | None,
+    selector_debug: bool,
     warmup: int,
     rep: int,
     timeout: int,
@@ -83,6 +86,9 @@ def run_single_case(
             K=k,
             with_roller=with_roller,
             topk=topk,
+            config_selector=config_selector,
+            selector_pool_k=selector_pool_k,
+            selector_debug=selector_debug,
             warmup=warmup,
             rep=rep,
             timeout=timeout,
@@ -131,6 +137,12 @@ def run_single_case(
         "timeout": timeout,
         "with_roller": with_roller,
         "topk": topk,
+        "selector_name": metrics.get("selector_name", "none"),
+        "selector_input_count": metrics.get("selector_input_count"),
+        "selector_output_count": metrics.get("selector_output_count"),
+        "selector_pool_k": metrics.get("selector_pool_k"),
+        "selector_time_ms": metrics.get("selector_time_ms"),
+        "selector_fallback_used": metrics.get("selector_fallback_used"),
         "skip_check": skip_check,
         "cache_input_tensors": cache_input_tensors,
         "use_pipeline": use_pipeline,
@@ -201,6 +213,23 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Top-k configs when --with-roller is enabled.",
     )
+    parser.add_argument(
+        "--config-selector",
+        type=str,
+        default="none",
+        choices=["none", "hopper_hybrid_v1"],
+        help="Optional preselector applied before compile+benchmark.",
+    )
+    parser.add_argument(
+        "--selector-pool-k",
+        type=int,
+        default=None,
+        help="Optional Roller candidate pool size for selector mode (defaults to Hopper heuristic).",
+    )
+    selector_debug_group = parser.add_mutually_exclusive_group()
+    selector_debug_group.add_argument("--selector-debug", dest="selector_debug", action="store_true")
+    selector_debug_group.add_argument("--no-selector-debug", dest="selector_debug", action="store_false")
+    parser.set_defaults(selector_debug=False)
 
     roller_group = parser.add_mutually_exclusive_group()
     roller_group.add_argument("--with-roller", dest="with_roller", action="store_true")
@@ -270,6 +299,8 @@ def main() -> int:
         raise ValueError("--timeout must be > 0")
     if args.group_compile_size <= 0:
         raise ValueError("--group-compile-size must be > 0")
+    if args.selector_pool_k is not None and args.selector_pool_k <= 0:
+        raise ValueError("--selector-pool-k must be > 0 when provided")
     if any(cpu <= 0 for cpu in args.cpu_count):
         raise ValueError("--cpu-count values must be > 0")
     if any(device < 0 for device in args.benchmark_devices):
@@ -315,6 +346,12 @@ def main() -> int:
         "timeout",
         "with_roller",
         "topk",
+        "selector_name",
+        "selector_input_count",
+        "selector_output_count",
+        "selector_pool_k",
+        "selector_time_ms",
+        "selector_fallback_used",
         "skip_check",
         "cache_input_tensors",
         "use_pipeline",
@@ -356,6 +393,9 @@ def main() -> int:
                         run_idx=run_idx,
                         with_roller=args.with_roller,
                         topk=args.topk,
+                        config_selector=args.config_selector,
+                        selector_pool_k=args.selector_pool_k,
+                        selector_debug=args.selector_debug,
                         warmup=args.warmup,
                         rep=args.rep,
                         timeout=args.timeout,
