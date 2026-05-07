@@ -33,7 +33,7 @@ def compile_grouped_unit_tvm_ffi(
     2. Lower each PrimFunc into host/device IR modules.
     3. Merge all device IR into one IRModule and compile device code once.
     4. Build host runtime module per config and import shared device module.
-    5. Construct per-config JITKernel objects and attach compile measurements.
+    5. Construct per-config JITKernel objects that share the grouped device module.
     """
 
     pass_configs = dict(compile_args.pass_configs) if compile_args.pass_configs else {}
@@ -53,7 +53,7 @@ def compile_grouped_unit_tvm_ffi(
             program = program.with_attr("global_symbol", unique_symbol)
 
             with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), compile_args.target:
-                host_mod, device_mod, params, normalized_target, normalized_target_host, lower_stage = lower_to_host_device_ir(
+                host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
                     program,
                     target=compile_args.target,
                     target_host=compile_args.target_host,
@@ -69,7 +69,6 @@ def compile_grouped_unit_tvm_ffi(
                     "params": params,
                     "target": normalized_target,
                     "target_host": normalized_target_host,
-                    "config_compile_start": config_compile_start,
                 }
             )
         except Exception as e:
@@ -106,8 +105,6 @@ def compile_grouped_unit_tvm_ffi(
         for item in lowered_items:
             idx = item["idx"]
             config_arg = item["config_arg"]
-            config_compile_start = item["config_compile_start"]
-            compile_stage_measurement = item["compile_stage_measurement"]
             try:
                 with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), item["target"]:
                     grouped_host_rt_mod = host_codegen(item["host_mod"], item["target_host"], target=item["target"])
