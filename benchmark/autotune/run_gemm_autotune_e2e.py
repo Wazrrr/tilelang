@@ -358,10 +358,14 @@ def main() -> int:
                     )
                     writer.writerow(row)
                     fp.flush()
+                    end_to_end_s = row.get("end_to_end_s")
+                    end_to_end_s_text = f"{end_to_end_s:.3f}" if isinstance(end_to_end_s, (int, float)) else "NA"
+                    best_latency_ms = row.get("best_latency_ms")
+                    best_latency_ms_text = f"{best_latency_ms}" if best_latency_ms is not None else "NA"
                     print(
                         f"[{completed}/{total_cases}] status={row['status']} "
-                        f"end_to_end_s={row['end_to_end_s']:.3f} "
-                        f"best_latency_ms={row['best_latency_ms']}"
+                        f"end_to_end_s={end_to_end_s_text} "
+                        f"best_latency_ms={best_latency_ms_text}"
                     )
     return 0
 
