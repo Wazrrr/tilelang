@@ -18,16 +18,16 @@ for device in "${BENCHMARK_DEVICES[@]}"; do
 done
 
 COMMON_ARGS=(
-  --cpu-count 64
+  --cpu-count 2
   --runs 1
-  --without-roller
+  --with-roller
+  --topk 20
   --warmup 3
   --rep 20
   --timeout 180
   --skip-check
   --disable-cache
   --no-cache-input-tensors
-  --no-detailed-measurements
   --no-pipeline
   --no-grouped-compile
 )
@@ -51,7 +51,7 @@ CUDA_VISIBLE_DEVICES=2 python benchmark/autotune/run_gemm_autotune_e2e.py \
   --csv "${RESULT_DIR}/auto_baseline_single_gpu.csv"
 
 # Multi-GPU benchmark mode (same compile mode: no pipeline + no grouped compile)
-CUDA_VISIBLE_DEVICES=2,3 python benchmark/autotune/run_gemm_autotune_e2e.py \
+CUDA_VISIBLE_DEVICES=2,5 python benchmark/autotune/run_gemm_autotune_e2e.py \
   --execution-backend auto \
   "${COMMON_ARGS[@]}" \
   --benchmark-multi-gpu \
