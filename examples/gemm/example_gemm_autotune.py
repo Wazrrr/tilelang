@@ -2,12 +2,14 @@ import argparse
 import itertools
 import tilelang as tl
 import tilelang.language as T
-from tilelang.autotuner import AutoTuner
+from tilelang.autotuner import AutoTuner, set_autotune_inputs
 from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.arch import CDNA
 from tilelang.carver.roller.rasterization import NoRasterization
 import torch
+
+from autotune_experiment_utils import append_autotune_result, gemm_tflops, make_seeded_gemm_inputs
 
 
 def ref_program(A, B):
@@ -113,6 +115,7 @@ def get_best_config(
     K,
     with_roller: bool = False,
     profile_backend: str = "event",
+    cache_input_tensors: bool = False,
 ):
     def kernel(
         block_M=None,
@@ -162,6 +165,7 @@ def get_best_config(
             supply_type=tl.TensorSupplyType.Auto,
             ref_prog=ref_program,
             skip_check=False,
+            cache_input_tensors=cache_input_tensors,
             backend=profile_backend,
         )
     )
@@ -221,35 +225,57 @@ def main(
     use_autotune: bool = False,
     with_roller: bool = False,
     profile_backend: str = "event",
+    results_tsv: str | None = None,
+    seed: int = 0,
 ):
+    benchmark_inputs = None
     if use_autotune:
-        result = get_best_config(
-            M,
-            N,
-            K,
-            with_roller=with_roller,
-            profile_backend=profile_backend,
-        )
+        benchmark_inputs = make_seeded_gemm_inputs(M, N, K, torch.bfloat16, seed)
+        with set_autotune_inputs(benchmark_inputs):
+            result = get_best_config(
+                M,
+                N,
+                K,
+                with_roller=with_roller,
+                profile_backend=profile_backend,
+            )
         print(result.config)
         kernel = result.kernel
+        config = result.config
     else:
         config = get_heuristic_config()
         kernel = matmul(M, N, K, **config)
+        benchmark_inputs = make_seeded_gemm_inputs(M, N, K, torch.float16, seed)
 
     # benchmark
     profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
     tilelang_latency = profiler.do_bench(
         backend=profile_backend,
+        input_tensors=benchmark_inputs,
     )
     ref_latency = profiler.do_bench(
         ref_program,
         backend=profile_backend,
+        input_tensors=benchmark_inputs,
     )
-    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, input_tensors=benchmark_inputs, atol=1e-2, rtol=1e-2)
     print(f"TileLang latency: {tilelang_latency}")
     print(f"Ref latency: {ref_latency}")
-    print(f"TileLang TFlops: {2 * M * N * K / tilelang_latency * 1e-9}")
-    print(f"Ref TFlops: {2 * M * N * K / ref_latency * 1e-9}")
+    print(f"TileLang TFlops: {gemm_tflops(M, N, K, tilelang_latency)}")
+    print(f"Ref TFlops: {gemm_tflops(M, N, K, ref_latency)}")
+    append_autotune_result(
+        results_tsv,
+        example=__file__,
+        M=M,
+        N=N,
+        K=K,
+        use_autotune=use_autotune,
+        with_roller=with_roller,
+        profile_backend=profile_backend,
+        tilelang_config=config,
+        tilelang_latency=tilelang_latency,
+        ref_latency=ref_latency,
+    )
 
 
 def run_regression_perf(M: int = 4096, N: int = 4096, K: int = 4096):
@@ -267,6 +293,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_autotune", action="store_true", default=False, help="Whether to use autotune for matmul configs")
     parser.add_argument("--with_roller", action="store_true", default=False, help="Whether to enable BitBLAS roller for search space")
     parser.add_argument("--profile_backend", type=str, default="event", help="Profiler backend")
+    parser.add_argument("--results_tsv", type=str, default=None, help="Optional TSV path for benchmark result rows")
+    parser.add_argument("--seed", type=int, default=0, help="Seed used to generate benchmark input tensors")
     args = parser.parse_args()
     main(
         args.m,
@@ -275,4 +303,6 @@ if __name__ == "__main__":
         args.use_autotune,
         args.with_roller,
         args.profile_backend,
+        args.results_tsv,
+        args.seed,
     )
