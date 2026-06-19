@@ -18,6 +18,7 @@ from tilelang.carver.roller.rasterization import NoRasterization
 import torch
 
 from autotune_experiment_utils import append_autotune_result, gemm_tflops, make_seeded_gemm_inputs
+from static_gemm_analyzer import analyze_config_space, write_static_report
 
 
 def ref_program(A, B):
@@ -117,60 +118,7 @@ def get_configs(M, N, K, with_roller=False, topk=20):
     return configs
 
 
-def get_best_config(
-    M,
-    N,
-    K,
-    with_roller: bool = False,
-    profile_backend: str = "event",
-    execution_backend: str = "auto",
-    warmup: int = 3,
-    rep: int = 20,
-    timeout: int = 30,
-    skip_check: bool = False,
-    cache_input_tensors: bool = False,
-    topk: int = 20,
-    use_pipeline: bool = False,
-    enable_grouped_compile: bool = False,
-    group_compile_size: int = 2,
-    benchmark_multi_gpu: bool = False,
-    benchmark_devices: list[int] | None = None,
-):
-    autotuner, _, _ = _build_autotuner(
-        M=M,
-        N=N,
-        K=K,
-        with_roller=with_roller,
-        profile_backend=profile_backend,
-        execution_backend=execution_backend,
-        skip_check=skip_check,
-        cache_input_tensors=cache_input_tensors,
-        topk=topk,
-    )
-    autotuner_result = autotuner.run(
-        warmup=warmup,
-        rep=rep,
-        timeout=timeout,
-        use_pipeline=use_pipeline,
-        enable_grouped_compile=enable_grouped_compile,
-        group_compile_size=group_compile_size,
-        benchmark_multi_gpu=benchmark_multi_gpu,
-        benchmark_devices=benchmark_devices,
-    )
-    return autotuner_result
-
-
-def _build_autotuner(
-    M: int,
-    N: int,
-    K: int,
-    with_roller: bool,
-    profile_backend: str,
-    execution_backend: str,
-    skip_check: bool,
-    cache_input_tensors: bool,
-    topk: int,
-):
+def make_autotune_kernel_builder(M: int, N: int, K: int, dtype=T.bfloat16, accum_dtype=T.float32):
     def kernel(
         block_M=None,
         block_N=None,
@@ -179,9 +127,6 @@ def _build_autotuner(
         thread_num=None,
         enable_rasteration=None,
     ):
-        dtype = T.bfloat16
-        accum_dtype = T.float32
-
         @T.prim_func
         def main(
             A: T.Tensor((M, K), dtype),
@@ -209,7 +154,68 @@ def _build_autotuner(
 
         return main
 
-    configs = get_configs(M, N, K, with_roller, topk=topk)
+    return kernel
+
+
+def get_best_config(
+    M,
+    N,
+    K,
+    with_roller: bool = False,
+    profile_backend: str = "event",
+    execution_backend: str = "auto",
+    warmup: int = 3,
+    rep: int = 20,
+    timeout: int = 30,
+    skip_check: bool = False,
+    cache_input_tensors: bool = False,
+    topk: int = 20,
+    use_pipeline: bool = False,
+    enable_grouped_compile: bool = False,
+    group_compile_size: int = 2,
+    benchmark_multi_gpu: bool = False,
+    benchmark_devices: list[int] | None = None,
+    configs: list[dict] | None = None,
+):
+    autotuner, _, _ = _build_autotuner(
+        M=M,
+        N=N,
+        K=K,
+        with_roller=with_roller,
+        profile_backend=profile_backend,
+        execution_backend=execution_backend,
+        skip_check=skip_check,
+        cache_input_tensors=cache_input_tensors,
+        topk=topk,
+        configs=configs,
+    )
+    autotuner_result = autotuner.run(
+        warmup=warmup,
+        rep=rep,
+        timeout=timeout,
+        use_pipeline=use_pipeline,
+        enable_grouped_compile=enable_grouped_compile,
+        group_compile_size=group_compile_size,
+        benchmark_multi_gpu=benchmark_multi_gpu,
+        benchmark_devices=benchmark_devices,
+    )
+    return autotuner_result
+
+
+def _build_autotuner(
+    M: int,
+    N: int,
+    K: int,
+    with_roller: bool,
+    profile_backend: str,
+    execution_backend: str,
+    skip_check: bool,
+    cache_input_tensors: bool,
+    topk: int,
+    configs: list[dict] | None = None,
+):
+    kernel = make_autotune_kernel_builder(M, N, K)
+    configs = configs if configs is not None else get_configs(M, N, K, with_roller, topk=topk)
     autotuner = (
         AutoTuner.from_kernel(kernel=kernel, configs=configs)
         .set_compile_args(
@@ -288,11 +294,40 @@ def main(
     benchmark_devices: list[int] | None = None,
     results_tsv: str | None = None,
     seed: int = 0,
+    static_prune: bool = False,
+    static_topk: int | None = None,
+    static_report: str | None = None,
 ):
     benchmark_devices = benchmark_devices or []
 
     benchmark_inputs = None
     if use_autotune:
+        configs = None
+        if static_prune:
+            if torch.version.hip is not None:
+                raise RuntimeError("Static GEMM pruning is currently implemented for CUDA/Hopper targets only")
+            all_configs = get_configs(M, N, K, with_roller)
+            summary = analyze_config_space(
+                make_autotune_kernel_builder(M, N, K),
+                all_configs,
+                CUDA("cuda"),
+                M=M,
+                N=N,
+                K=K,
+                topk=static_topk,
+                target="auto",
+                execution_backend="tvm_ffi",
+                out_idx=[-1],
+            )
+            if static_report:
+                write_static_report(summary, static_report)
+            configs = summary.selected_configs()
+            if len(configs) == 0:
+                raise RuntimeError("Static GEMM analyzer rejected all configurations")
+            print(
+                "Static GEMM analyzer kept "
+                f"{len(summary.kept_reports)}/{summary.original_count} configs and selected {len(configs)} for autotune"
+            )
         benchmark_inputs = make_seeded_gemm_inputs(M, N, K, torch.bfloat16, seed)
         with set_autotune_inputs(benchmark_inputs):
             result = get_best_config(
@@ -306,6 +341,7 @@ def main(
                 group_compile_size=group_compile_size,
                 benchmark_multi_gpu=benchmark_multi_gpu,
                 benchmark_devices=benchmark_devices,
+                configs=configs,
             )
         print(result.config)
         kernel = result.kernel
@@ -372,6 +408,27 @@ if __name__ == "__main__":
     parser.add_argument("--benchmark_multi_gpu", action="store_true", default=False, help="Benchmark autotune configs across multiple GPUs")
     parser.add_argument("--results_tsv", type=str, default=None, help="Optional TSV path for benchmark result rows")
     parser.add_argument("--seed", type=int, default=0, help="Seed used to generate benchmark input tensors")
+    parser.add_argument(
+        "--static_prune",
+        "--static-prune",
+        action="store_true",
+        default=False,
+        help="Run compile-static GEMM resource pruning before autotune",
+    )
+    parser.add_argument(
+        "--static_topk",
+        "--static-topk",
+        type=int,
+        default=None,
+        help="Keep the top N static-ranked configs after conservative pruning",
+    )
+    parser.add_argument(
+        "--static_report",
+        "--static-report",
+        type=str,
+        default=None,
+        help="Optional JSON or TSV path for static GEMM analyzer reports",
+    )
 
     parser.add_argument(
         "--benchmark_devices",
@@ -396,4 +453,7 @@ if __name__ == "__main__":
         benchmark_devices=args.benchmark_devices,
         results_tsv=args.results_tsv,
         seed=args.seed,
+        static_prune=args.static_prune,
+        static_topk=args.static_topk,
+        static_report=args.static_report,
     )
