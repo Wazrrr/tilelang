@@ -1,5 +1,6 @@
 import argparse
 import itertools
+import time
 import tilelang as tl
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner, set_autotune_inputs
@@ -228,6 +229,7 @@ def main(
     results_tsv: str | None = None,
     seed: int = 0,
 ):
+    run_start = time.perf_counter()
     benchmark_inputs = None
     if use_autotune:
         benchmark_inputs = make_seeded_gemm_inputs(M, N, K, torch.bfloat16, seed)
@@ -275,6 +277,7 @@ def main(
         tilelang_config=config,
         tilelang_latency=tilelang_latency,
         ref_latency=ref_latency,
+        run_elapsed_s=time.perf_counter() - run_start,
     )
 
 

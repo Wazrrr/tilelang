@@ -5,7 +5,7 @@ RESULTS_TSV="${RESULTS_TSV:-autotune_experiment_results.tsv}"
 SEED="${SEED:-0}"
 
 COMMON_ENV=(
-  CUDA_VISIBLE_DEVICES=0,1
+  CUDA_VISIBLE_DEVICES=6,7
   TILELANG_DISABLE_CACHE=1
   TILELANG_AUTO_TUNING_DISABLE_CACHE=1
   TILELANG_AUTO_TUNING_CPU_UTILITIES=0.5
@@ -16,18 +16,23 @@ COMMON_ARGS=(
   --profile_backend event
   --results_tsv "${RESULTS_TSV}"
   --seed "${SEED}"
-  # --m 32768
-  # --n 4096
-  # --k 4096
+  --m 32768
+  --n 4096
+  --k 4096
 )
 
 run_experiment() {
   local name="$1"
   local example="$2"
+  local start_ns
   shift 2
 
   echo "===== ${name} ====="
-  env "${COMMON_ENV[@]}" python "${example}" "${COMMON_ARGS[@]}" "$@"
+  start_ns="$(date +%s%N)"
+  env "${COMMON_ENV[@]}" \
+    TILELANG_EXPERIMENT_NAME="${name}" \
+    TILELANG_EXPERIMENT_START_TIME_NS="${start_ns}" \
+    python "${example}" "${COMMON_ARGS[@]}" "$@"
 }
 
 run_experiment "normal_autotune" \

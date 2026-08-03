@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,8 @@ import torch
 
 RESULT_COLUMNS = [
     "timestamp_utc",
+    "experiment",
+    "run_elapsed_s",
     "example",
     "m",
     "n",
@@ -71,14 +75,21 @@ def append_autotune_result(
     group_compile_size: int | str = "",
     benchmark_multi_gpu: bool | str = "",
     benchmark_devices: list[int] | None = None,
+    experiment: str | None = None,
+    run_elapsed_s: float | None = None,
 ) -> None:
     if not results_tsv:
         return
 
+    now = datetime.now(timezone.utc)
     tilelang_tflops = gemm_tflops(M, N, K, tilelang_latency)
     ref_tflops = gemm_tflops(M, N, K, ref_latency)
     row = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "timestamp_utc": _format_timestamp_utc(now),
+        "experiment": (
+            experiment if experiment is not None else os.environ.get("TILELANG_EXPERIMENT_NAME", "")
+        ),
+        "run_elapsed_s": _format_elapsed_s(_resolve_run_elapsed_s(run_elapsed_s)),
         "example": Path(example).name,
         "m": M,
         "n": N,
@@ -98,6 +109,24 @@ def append_autotune_result(
         "ref_tflops": ref_tflops,
     }
     _append_tsv_row(Path(results_tsv), row)
+
+
+def _format_timestamp_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _resolve_run_elapsed_s(explicit_elapsed_s: float | None) -> float | None:
+    start_ns = os.environ.get("TILELANG_EXPERIMENT_START_TIME_NS")
+    if start_ns:
+        try:
+            return max(0.0, (time.time_ns() - int(start_ns)) / 1e9)
+        except ValueError:
+            pass
+    return explicit_elapsed_s
+
+
+def _format_elapsed_s(value: float | None) -> str:
+    return "" if value is None else f"{value:.3f}"
 
 
 def _append_tsv_row(path: Path, row: dict[str, Any]) -> None:

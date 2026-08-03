@@ -8,6 +8,7 @@ python3 examples/gemm/example_gemm_advanced_autotune.py --use_autotune --enable_
 
 import argparse
 import itertools
+import time
 import tilelang as tl
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner, set_autotune_inputs
@@ -298,6 +299,7 @@ def main(
     static_topk: int | None = None,
     static_report: str | None = None,
 ):
+    run_start = time.perf_counter()
     benchmark_devices = benchmark_devices or []
 
     benchmark_inputs = None
@@ -384,6 +386,7 @@ def main(
         tilelang_config=config,
         tilelang_latency=tilelang_latency,
         ref_latency=ref_latency,
+        run_elapsed_s=time.perf_counter() - run_start,
     )
 
 
