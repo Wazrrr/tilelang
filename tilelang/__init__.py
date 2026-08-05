@@ -208,7 +208,11 @@ if not env.is_light_import():
         tools,  # noqa: F401
     )
     from .language import dtypes  # noqa: F401
-    from .autotuner import autotune  # noqa: F401
+    from .autotuner import (  # noqa: F401
+        autotune,
+        AutotuneResourceFilterConfig,
+        AutotuneQualityFilterConfig,
+    )
     from .transform import PassConfigKey  # noqa: F401
     from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
     from .math import *  # noqa: F403

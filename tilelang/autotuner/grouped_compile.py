@@ -6,6 +6,7 @@ so tuner.py can stay focused on orchestration.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 from collections.abc import Callable
 
@@ -19,6 +20,22 @@ from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
+from tilelang.contrib.cuda_resource_info import pop_recorded as cuda_pop_recorded
+from tilelang.contrib.cuda_resource_info import reset_recorder as cuda_reset_recorder
+from tilelang.contrib import cuda_resource_info
+from tilelang.autotuner.resource_filter import (
+    AutotuneResourceFilterConfig,
+    AutotuneResourceFilterReject,
+    evaluate_post_compile_resource_filter,
+    evaluate_pre_compile_resource_filter,
+    extract_launch_resource_info,
+    query_cuda_device_limits,
+)
+from tilelang.autotuner.quality_filter import (
+    AutotuneQualityFilterConfig,
+    AutotuneQualityFilterReject,
+    evaluate_post_compile_quality_filter,
+)
 from tilelang.transform import PassConfigKey
 from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
 
@@ -29,6 +46,8 @@ def compile_grouped_unit_tvm_ffi(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,
     elaborate_func: Callable[..., PrimFunc],
+    resource_filter_config: AutotuneResourceFilterConfig | None = None,
+    quality_filter_config: AutotuneQualityFilterConfig | None = None,
 ) -> list[CompileUnitResult]:
     """Compile one grouped unit for CUDA+tvm_ffi backend.
 
@@ -40,7 +59,10 @@ def compile_grouped_unit_tvm_ffi(
     5. Construct per-config JITKernel objects that share the grouped device module.
     """
 
+    resource_filter_config = AutotuneResourceFilterConfig.from_value(resource_filter_config)
+    quality_filter_config = AutotuneQualityFilterConfig.from_value(quality_filter_config)
     pass_configs = dict(compile_args.pass_configs) if compile_args.pass_configs else {}
+    device_limits = query_cuda_device_limits(resource_filter_config.device_id) if resource_filter_config.enabled else None
     base_pass_instruments = []
     if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
         dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
@@ -84,6 +106,15 @@ def compile_grouped_unit_tvm_ffi(
                     target_host=compile_args.target_host,
                 )
 
+            launch_infos = extract_launch_resource_info(device_mod)
+            filter_decisions = []
+            if resource_filter_config.enabled and resource_filter_config.pre_compile:
+                decision = evaluate_pre_compile_resource_filter(launch_infos, device_limits)
+                filter_decisions.append(decision)
+                if not decision.keep:
+                    unit_results.append((idx, config_arg, None, AutotuneResourceFilterReject(decision)))
+                    continue
+
             lowered_items.append(
                 {
                     "idx": idx,
@@ -94,6 +125,9 @@ def compile_grouped_unit_tvm_ffi(
                     "params": params,
                     "target": normalized_target,
                     "target_host": normalized_target_host,
+                    "launch_infos": launch_infos,
+                    "filter_decisions": filter_decisions,
+                    "quality_decisions": [],
                 }
             )
         except Exception as e:
@@ -123,15 +157,26 @@ def compile_grouped_unit_tvm_ffi(
         reference_target = lowered_items[0]["target"]
         device_instruments, device_timing_inst = create_pass_instruments()
         grouped_config_indices = ",".join(str(item["idx"]) for item in lowered_items)
-        with (
-            report_pass_timing_on_exit(
-                device_timing_inst,
-                context=f"stage=grouped-device, configs=[{grouped_config_indices}]",
-            ),
-            tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
-            reference_target,
-        ):
-            grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
+        capture_cuda_resources = (
+            resource_filter_config.enabled
+            and resource_filter_config.post_compile
+        ) or quality_filter_config.needs_cuda_resource_usage()
+        if capture_cuda_resources:
+            cuda_reset_recorder()
+        capture_context = cuda_resource_info.capture_resource_usage() if capture_cuda_resources else contextlib.nullcontext()
+        try:
+            with (
+                capture_context,
+                report_pass_timing_on_exit(
+                    device_timing_inst,
+                    context=f"stage=grouped-device, configs=[{grouped_config_indices}]",
+                ),
+                tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
+                reference_target,
+            ):
+                grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
+        finally:
+            grouped_resource_usage = cuda_pop_recorded() if capture_cuda_resources else {}
 
         grouped_kernel_source = grouped_device_rt_mod.inspect_source()
 
@@ -139,6 +184,26 @@ def compile_grouped_unit_tvm_ffi(
             idx = item["idx"]
             config_arg = item["config_arg"]
             try:
+                if resource_filter_config.enabled and resource_filter_config.post_compile:
+                    decision = evaluate_post_compile_resource_filter(item["launch_infos"], grouped_resource_usage, device_limits)
+                    item["filter_decisions"].append(decision)
+                    if not decision.keep:
+                        unit_results.append((idx, config_arg, None, AutotuneResourceFilterReject(decision)))
+                        continue
+
+                if quality_filter_config.enabled:
+                    decision = evaluate_post_compile_quality_filter(
+                        launch_infos=item["launch_infos"],
+                        resource_usage=grouped_resource_usage,
+                        kernel_source=grouped_kernel_source,
+                        config=config_arg,
+                        quality_config=quality_filter_config,
+                    )
+                    item["quality_decisions"].append(decision)
+                    if not decision.keep:
+                        unit_results.append((idx, config_arg, None, AutotuneQualityFilterReject(decision)))
+                        continue
+
                 host_instruments, host_timing_inst = create_pass_instruments()
                 kernel_symbol = str(item["program"].attrs["global_symbol"])
                 with (
@@ -187,6 +252,12 @@ def compile_grouped_unit_tvm_ffi(
                 jit_kernel.artifact = artifact
                 jit_kernel.adapter = adapter
                 jit_kernel.torch_function = adapter.func
+                if grouped_resource_usage:
+                    jit_kernel._resource_usage = grouped_resource_usage
+                if item["filter_decisions"]:
+                    jit_kernel._resource_filter_decisions = item["filter_decisions"]
+                if item["quality_decisions"]:
+                    jit_kernel._quality_filter_decisions = item["quality_decisions"]
 
                 unit_results.append((idx, config_arg, jit_kernel, None))
             except Exception as e:

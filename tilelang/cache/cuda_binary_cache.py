@@ -123,6 +123,11 @@ class CUDABinaryCache:
         return os.path.join(cls._get_cache_root(), filename)
 
     @classmethod
+    def get_metadata_path(cls, key: str, name: str) -> str:
+        filename = f"{key}.{name}.json"
+        return os.path.join(cls._get_cache_root(), filename)
+
+    @classmethod
     def load(cls, key: str, compile_format: str) -> bytes | None:
         if not env.is_cache_enabled():
             return None
@@ -145,4 +150,29 @@ class CUDABinaryCache:
         temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.{compile_format}")
         with open(temp_path, "wb") as f:
             f.write(data)
+        os.replace(temp_path, path)
+
+    @classmethod
+    def load_metadata(cls, key: str, name: str) -> dict[str, Any] | None:
+        if not env.is_cache_enabled():
+            return None
+        path = cls.get_metadata_path(key, name)
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+
+    @classmethod
+    def save_metadata(cls, key: str, name: str, data: dict[str, Any]) -> None:
+        if not env.is_cache_enabled():
+            return
+        os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
+        os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
+        os.makedirs(cls._get_cache_root(), exist_ok=True)
+
+        path = cls.get_metadata_path(key, name)
+        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.{name}.json")
+        with open(temp_path, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
         os.replace(temp_path, path)

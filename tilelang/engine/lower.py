@@ -19,6 +19,8 @@ from tilelang.backend.device_codegen import resolve_device_codegen
 from tilelang.backend.host_codegen import apply_host_codegen_hooks, resolve_host_codegen
 from tilelang.backend.target import determine_target
 from tilelang.backend.pass_pipeline import resolve_pipeline
+from tilelang.contrib import cuda_resource_info
+from tilelang.contrib.resource_info import usage_from_json_dict, usage_to_json_dict
 
 
 def is_cpu_device_backend(target: Target):
@@ -141,6 +143,10 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options += tokens
 
     verbose = env.get_default_verbose()
+    capture_cuda_resources = bool(
+        cfg.get(cuda_resource_info.CUDA_RESOURCE_CAPTURE_CONFIG_KEY, False)
+        or cuda_resource_info.is_capture_enabled()
+    )
     if enable_fast_math:
         options.append("--use_fast_math")
     if ptxas_usage_level is not None:
@@ -148,6 +154,8 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     if verbose:
         options.append("--ptxas-options=--verbose")
         options.append("-w")  # Suppress warnings to make ptxas output more readable
+    if capture_cuda_resources and cuda_resource_info.cuda_ptxas_verbose_flag() not in options:
+        options.append(cuda_resource_info.cuda_ptxas_verbose_flag())
 
     from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 
@@ -161,15 +169,35 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     )
     cached_binary = CUDABinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
-        return bytearray(cached_binary)
+        if capture_cuda_resources:
+            cached_usage = CUDABinaryCache.load_metadata(cache_key, "resource_usage")
+            if cached_usage is not None:
+                cuda_resource_info.record_usage(usage_from_json_dict(cached_usage))
+                return bytearray(cached_binary)
+        else:
+            return bytearray(cached_binary)
 
-    ptx = nvcc.compile_cuda(
+    compile_kwargs = {
+        "options": options,
+        "verbose": verbose,
+    }
+    if capture_cuda_resources:
+        compile_kwargs["return_output"] = True
+    compile_result = nvcc.compile_cuda(
         code,
         compile_format,
         arch,
-        options=options,
-        verbose=verbose,
+        **compile_kwargs,
     )
+    if capture_cuda_resources:
+        ptx, compiler_output = compile_result
+        usage = cuda_resource_info.parse_ptxas_output(compiler_output)
+        if usage:
+            cuda_resource_info.record_usage(usage)
+            CUDABinaryCache.save_metadata(cache_key, "resource_usage", usage_to_json_dict(usage))
+    else:
+        ptx = compile_result
+
     CUDABinaryCache.save(cache_key, compile_format, ptx)
 
     return ptx

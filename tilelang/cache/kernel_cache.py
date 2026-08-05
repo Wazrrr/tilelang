@@ -26,7 +26,7 @@ from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.diagnostics import jit_phase
-from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
+from tilelang.contrib.resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 
 

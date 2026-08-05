@@ -74,6 +74,19 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     assert len(cache_files) == 2
 
 
+def test_cuda_binary_cache_resource_metadata_sidecar(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+
+    key = "resource-sidecar"
+    payload = {"main_kernel": {"n_regs": 64, "static_smem_bytes": 1024}}
+
+    CUDABinaryCache.save_metadata(key, "resource_usage", payload)
+
+    assert CUDABinaryCache.load_metadata(key, "resource_usage") == payload
+    metadata_files = list((tmp_path / "cache").glob("*/cuda-binaries/*.resource_usage.json"))
+    assert len(metadata_files) == 1
+
+
 def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     cache = KernelCache()

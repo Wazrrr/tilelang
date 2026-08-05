@@ -14,9 +14,23 @@ class cudaDeviceAttrNames:
     """
 
     cudaDevAttrMaxThreadsPerBlock: int = 1
+    cudaDevAttrMaxBlockDimX: int = 2
+    cudaDevAttrMaxBlockDimY: int = 3
+    cudaDevAttrMaxBlockDimZ: int = 4
+    cudaDevAttrMaxGridDimX: int = 5
+    cudaDevAttrMaxGridDimY: int = 6
+    cudaDevAttrMaxGridDimZ: int = 7
+    cudaDevAttrMaxSharedMemoryPerBlock: int = 8
     cudaDevAttrMaxRegistersPerBlock: int = 12
+    cudaDevAttrMultiProcessorCount: int = 16
+    cudaDevAttrMaxThreadsPerMultiProcessor: int = 39
     cudaDevAttrMaxSharedMemoryPerMultiprocessor: int = 81
+    cudaDevAttrMaxRegistersPerMultiprocessor: int = 82
+    cudaDevAttrCooperativeLaunch: int = 95
+    cudaDevAttrMaxSharedMemoryPerBlockOptin: int = 97
+    cudaDevAttrMaxBlocksPerMultiprocessor: int = 106
     cudaDevAttrMaxPersistingL2CacheSize: int = 108
+    cudaDevAttrReservedSharedMemoryPerBlock: int = 111
 
 
 def get_cuda_device_properties(device_id: int = 0) -> _CudaDeviceProperties | None:
@@ -89,10 +103,10 @@ def get_device_attribute(attr: int, device_id: int = 0) -> int:
 
 def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes") -> int | None:
     """
-    Get the maximum dynamic shared memory size in bytes, kilobytes, or megabytes.
+    Get the maximum opt-in dynamic shared memory size per block.
     """
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
-    shared_mem = get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerMultiprocessor, device_id)
+    shared_mem = get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id)
     if format == "bytes":
         return shared_mem
     elif format == "kb":
@@ -136,3 +150,48 @@ def get_registers_per_block(device_id: int = 0) -> int:
         device_id,
     )
     return prop
+
+
+def get_max_threads_per_block(device_id: int = 0) -> int | None:
+    return get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxThreadsPerBlock, device_id)
+
+
+def get_max_block_dims(device_id: int = 0) -> tuple[int | None, int | None, int | None]:
+    return (
+        get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxBlockDimX, device_id),
+        get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxBlockDimY, device_id),
+        get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxBlockDimZ, device_id),
+    )
+
+
+def get_max_grid_dims(device_id: int = 0) -> tuple[int | None, int | None, int | None]:
+    return (
+        get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxGridDimX, device_id),
+        get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxGridDimY, device_id),
+        get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxGridDimZ, device_id),
+    )
+
+
+def get_shared_memory_per_multiprocessor(device_id: int = 0) -> int | None:
+    return get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerMultiprocessor, device_id)
+
+
+def get_registers_per_multiprocessor(device_id: int = 0) -> int | None:
+    return get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxRegistersPerMultiprocessor, device_id)
+
+
+def get_max_threads_per_multiprocessor(device_id: int = 0) -> int | None:
+    return get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxThreadsPerMultiProcessor, device_id)
+
+
+def get_max_blocks_per_multiprocessor(device_id: int = 0) -> int | None:
+    return get_device_attribute(cudaDeviceAttrNames.cudaDevAttrMaxBlocksPerMultiprocessor, device_id)
+
+
+def get_reserved_shared_memory_per_block(device_id: int = 0) -> int | None:
+    return get_device_attribute(cudaDeviceAttrNames.cudaDevAttrReservedSharedMemoryPerBlock, device_id)
+
+
+def get_cooperative_launch_support(device_id: int = 0) -> bool | None:
+    value = get_device_attribute(cudaDeviceAttrNames.cudaDevAttrCooperativeLaunch, device_id)
+    return None if value is None else bool(value)

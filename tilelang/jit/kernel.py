@@ -23,11 +23,16 @@ from tilelang.jit.adapter import (
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.backend.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
-from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
+from tilelang.contrib.hip_resource_info import pop_recorded as hip_pop_recorded
+from tilelang.contrib.hip_resource_info import reset_recorder as hip_reset_recorder
+from tilelang.contrib.cuda_resource_info import pop_recorded as cuda_pop_recorded
+from tilelang.contrib.cuda_resource_info import reset_recorder as cuda_reset_recorder
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
 from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
+from tilelang.contrib import cuda_resource_info
+import contextlib
 import logging
 import os
 
@@ -254,10 +259,15 @@ class JITKernel(Generic[_P, _T]):
             profile_threshold_ms,
         )
 
-        # open a recorder window for kernel-resource-usage remarks
-        capture_resources = is_hip_target(target)
-        if capture_resources:
-            reset_recorder()
+        # Open recorder windows for exact compiler-reported resource usage.
+        capture_hip_resources = is_hip_target(target)
+        capture_cuda_resources = is_cuda_target(target) and bool(
+            pass_configs.pop(cuda_resource_info.CUDA_RESOURCE_CAPTURE_CONFIG_KEY, False)
+        )
+        if capture_hip_resources:
+            hip_reset_recorder()
+        if capture_cuda_resources:
+            cuda_reset_recorder()
         func_name = tilelang_func.attrs.get("global_symbol", "<unknown>")
         phase_context = {
             "kernel": func_name,
@@ -265,7 +275,9 @@ class JITKernel(Generic[_P, _T]):
             "target_host": str(target_host) if target_host is not None else None,
             "backend": execution_backend,
         }
+        capture_context = cuda_resource_info.capture_resource_usage() if capture_cuda_resources else contextlib.nullcontext()
         with (
+            capture_context,
             report_pass_timing_on_exit(
                 timing_instrument,
                 context=f"stage=jit-lower, kernel={func_name}, backend={execution_backend}",
@@ -371,8 +383,10 @@ class JITKernel(Generic[_P, _T]):
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
 
-        if capture_resources:
-            self._resource_usage = pop_recorded()
+        if capture_hip_resources:
+            self._resource_usage = hip_pop_recorded()
+        if capture_cuda_resources:
+            self._resource_usage = cuda_pop_recorded()
 
         return adapter
 
@@ -680,7 +694,7 @@ class JITKernel(Generic[_P, _T]):
 
     @property
     def resource_usage(self) -> dict[str, Any]:
-        """HIP only now"""
+        """Compiler-reported per-kernel resource usage when captured."""
         return getattr(self, "_resource_usage", {}) or {}
 
     def _primary_resource_usage(self):

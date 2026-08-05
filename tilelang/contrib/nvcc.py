@@ -92,7 +92,7 @@ def format_target_code_for_gencode(target_code: object | None) -> str | None:
     return code_list[0] if len(code_list) == 1 else f"[{','.join(code_list)}]"
 
 
-def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False):
+def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False, return_output=False):
     """Compile cuda code with NVCC from env.
 
     Parameters
@@ -112,9 +112,13 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     path_target : str, optional
         Output file.
 
+    return_output : bool
+        When True, return ``(data, compiler_output)``. The default preserves
+        the historical bytearray-only return value.
+
     Return
     ------
-    data : bytearray
+    data : bytearray or tuple[bytearray, str]
         The compiled output bytes.
     """
     target_code = None
@@ -217,6 +221,8 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         data = bytearray(f.read())
         if not data:
             raise RuntimeError("Compilation error: empty result is generated")
+        if return_output:
+            return data, py_str(out)
         return data
 
 
