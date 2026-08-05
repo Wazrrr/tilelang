@@ -35,18 +35,16 @@ from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
-from tilelang.autotuner.resource_filter import (
+from tilelang.autotuner.filters import (
+    AutotuneQualityFilterConfig,
+    AutotuneQualityFilterReject,
     AutotuneResourceFilterConfig,
     AutotuneResourceFilterReject,
+    evaluate_post_compile_quality_filter,
     evaluate_post_compile_resource_filter,
     evaluate_pre_compile_resource_filter,
     extract_launch_resource_info,
     query_cuda_device_limits,
-)
-from tilelang.autotuner.quality_filter import (
-    AutotuneQualityFilterConfig,
-    AutotuneQualityFilterReject,
-    evaluate_post_compile_quality_filter,
 )
 from tilelang.contrib import cuda_resource_info
 from tilelang.contrib.cuda_resource_info import pop_recorded as cuda_pop_recorded

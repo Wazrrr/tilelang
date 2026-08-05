@@ -7,7 +7,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.autotuner import AutoTuner
-from tilelang.autotuner.resource_filter import (
+from tilelang.autotuner.filters import (
     CudaDeviceLimits,
     LaunchResourceInfo,
     evaluate_post_compile_resource_filter,

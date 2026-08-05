@@ -23,18 +23,16 @@ from tilelang.jit.kernel import JITKernel
 from tilelang.contrib.cuda_resource_info import pop_recorded as cuda_pop_recorded
 from tilelang.contrib.cuda_resource_info import reset_recorder as cuda_reset_recorder
 from tilelang.contrib import cuda_resource_info
-from tilelang.autotuner.resource_filter import (
+from tilelang.autotuner.filters import (
+    AutotuneQualityFilterConfig,
+    AutotuneQualityFilterReject,
     AutotuneResourceFilterConfig,
     AutotuneResourceFilterReject,
+    evaluate_post_compile_quality_filter,
     evaluate_post_compile_resource_filter,
     evaluate_pre_compile_resource_filter,
     extract_launch_resource_info,
     query_cuda_device_limits,
-)
-from tilelang.autotuner.quality_filter import (
-    AutotuneQualityFilterConfig,
-    AutotuneQualityFilterReject,
-    evaluate_post_compile_quality_filter,
 )
 from tilelang.transform import PassConfigKey
 from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
