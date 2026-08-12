@@ -62,6 +62,23 @@ extern "C" __global__ void attention_kernel(const void* Q, const void* K, const 
 }
 '''
 
+QUANTIZED_GEMM_KERNEL_SOURCE = r'''
+extern "C" __global__ void quant_kernel(const void* A, const void* B) {
+  float Ct_local[128];
+  half_t B_dequantize_local[192];
+  for (int k = 0; k < 8; ++k) {
+  }
+}
+'''
+
+SPARSE_GEMM_KERNEL_SOURCE = r'''
+extern "C" __global__ void sparse_kernel(const void* A, const void* BlockMask) {
+  float C_local[128];
+  if (((bool*)BlockMask)[0]) {
+  }
+}
+'''
+
 
 def test_extract_cuda_function_source_selects_named_kernel_from_grouped_source():
     source = extract_cuda_function_source(SLOW_KERNEL_SOURCE, "main_kernel")
@@ -108,6 +125,33 @@ def test_attention_quality_info_extracts_exact_fragment_state():
     assert info.attention_softmax_elements_per_thread == 24
     assert info.attention_state_elements_per_thread == 216
     assert info.attention_cast_elements_per_thread == 128
+
+
+def test_quantized_gemm_quality_info_extracts_dequant_state():
+    info = extract_cuda_kernel_quality_info(
+        function_name="quant_kernel",
+        kernel_source=QUANTIZED_GEMM_KERNEL_SOURCE,
+        launch_info=LaunchResourceInfo("quant_kernel", block_dims=(128, 1, 1)),
+        raw_usage=KernelResourceUsage(n_regs=120),
+        config={"block_M": 64, "block_N": 128, "threads": 128},
+    )
+
+    assert info.detected_kernel_type == "quantized_gemm"
+    assert info.c_local_floats == 128
+    assert info.quant_dequant_elements_per_thread == 192
+
+
+def test_sparse_gemm_quality_info_extracts_mask_signal():
+    info = extract_cuda_kernel_quality_info(
+        function_name="sparse_kernel",
+        kernel_source=SPARSE_GEMM_KERNEL_SOURCE,
+        launch_info=LaunchResourceInfo("sparse_kernel", block_dims=(128, 1, 1)),
+        raw_usage=KernelResourceUsage(n_regs=120),
+        config={"block_M": 64, "block_N": 128, "threads": 128},
+    )
+
+    assert info.detected_kernel_type == "sparse_gemm"
+    assert info.sparse_mask_access_count > 0
 
 
 def test_quality_filter_rejects_enabled_targets():
@@ -177,6 +221,43 @@ def test_attention_quality_profile_rejects_large_state_and_large_spills():
     assert "attention_spills_over_quality_limit" in reasons
     assert "attention_local_memory_over_quality_limit" in reasons
     assert "attention_state_elements_per_thread_over_quality_limit" in reasons
+
+
+def test_quantized_gemm_profile_reports_dequant_advisory():
+    decision = evaluate_post_compile_quality_filter(
+        launch_infos=[LaunchResourceInfo("quant_kernel", block_dims=(128, 1, 1))],
+        resource_usage={"quant_kernel": KernelResourceUsage(n_spills=0, local_size_bytes=0)},
+        kernel_source=QUANTIZED_GEMM_KERNEL_SOURCE,
+        config={"block_M": 64, "block_N": 128, "threads": 128},
+        quality_config=AutotuneQualityFilterConfig(
+            enabled=True,
+            kernel_type="quantized_gemm",
+            check_tma_tiny_tile=False,
+        ),
+    )
+
+    assert decision.verdict == "keep"
+    advisory_reasons = {advisory["reason"] for advisory in decision.details["advisories"]}
+    assert "quant_dequant_elements_per_thread_over_advisory_limit" in advisory_reasons
+
+
+def test_sparse_gemm_profile_can_reject_missing_mask_when_requested():
+    decision = evaluate_post_compile_quality_filter(
+        launch_infos=[LaunchResourceInfo("sparse_kernel", block_dims=(128, 1, 1))],
+        resource_usage={"sparse_kernel": KernelResourceUsage(n_spills=0, local_size_bytes=0)},
+        kernel_source='extern "C" __global__ void sparse_kernel() { float C_local[128]; }',
+        config={"block_M": 64, "block_N": 128, "threads": 128},
+        quality_config=AutotuneQualityFilterConfig(
+            enabled=True,
+            kernel_type="sparse_gemm",
+            check_sparse_mask=True,
+            check_tma_tiny_tile=False,
+        ),
+    )
+
+    assert decision.verdict == "reject"
+    reasons = {violation["reason"] for violation in decision.details["violations"]}
+    assert "sparse_mask_not_detected" in reasons
 
 
 def test_quality_filter_targets_can_be_disabled_independently():

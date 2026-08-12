@@ -1,76 +1,110 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import pytest
 
 from static_gemm_analyzer import (
-    GemmConfig,
-    analyze_cuda_source,
-    estimate_static_resources,
+    CudaDeviceLimits,
+    KernelResourceUsage,
+    LaunchResourceInfo,
+    analyze_compiled_resources,
+    analyze_config_space,
+    analyze_launch_resources,
+    estimate_registers_from_device_code,
     parse_ptxas_output,
 )
 
 
-def _fake_h200_arch():
-    return SimpleNamespace(
-        name="NVIDIA H200",
-        sm_version=90,
-        compute_max_core=132,
-        warp_size=32,
-        smem_cap=228 * 1024,
-        max_smem_usage=228 * 1024,
-        reg_cap=65536,
-        target=SimpleNamespace(attrs={"arch": "sm_90"}),
+BASE_CONFIG = {
+    "block_M": 64,
+    "block_N": 64,
+    "block_K": 64,
+    "num_stages": 2,
+    "thread_num": 256,
+}
+
+
+def _limits() -> CudaDeviceLimits:
+    return CudaDeviceLimits(
+        max_threads_per_block=1024,
+        max_block_dims=(1024, 1024, 64),
+        max_grid_dims=(2**31 - 1, 65535, 65535),
+        max_shared_memory_per_block=49152,
+        max_shared_memory_per_block_optin=228 * 1024,
+        max_registers_per_block=65536,
+        cooperative_launch=True,
     )
 
 
-def test_parse_ptxas_output():
+def test_source_register_estimation_is_rejected():
+    with pytest.raises(RuntimeError, match="after NVCC/PTXAS compilation"):
+        estimate_registers_from_device_code("float local[32];")
+
+
+def test_parse_ptxas_output_reports_exact_registers_and_smem():
     output = """
-ptxas info    : Compiling entry function '_Z4mainv' for 'sm_90'
-ptxas info    : Function properties for _Z4mainv
-    0 bytes stack frame, 8 bytes spill stores, 16 bytes spill loads
-ptxas info    : Used 96 registers, 2048 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compiling entry function 'main_kernel' for 'sm_90'
+ptxas info    : Function properties for main_kernel
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 80 registers, 49152 bytes smem, 392 bytes cmem[0]
 """
-    info = parse_ptxas_output(output)
+    usage = parse_ptxas_output(output)
 
-    assert info.registers_per_thread == 96
-    assert info.smem_bytes == 2048
-    assert info.cmem_bytes == 392
-    assert info.spill_bytes == 24
-    assert info.has_metadata
-
-
-def test_static_resource_estimate_stage_scales_shared_memory():
-    cfg_stage_1 = GemmConfig(block_M=128, block_N=128, block_K=64, num_stages=1, thread_num=256, enable_rasteration=True)
-    cfg_stage_3 = GemmConfig(block_M=128, block_N=128, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True)
-
-    stage_1 = estimate_static_resources(cfg_stage_1, M=4096, N=4096, K=4096)
-    stage_3 = estimate_static_resources(cfg_stage_3, M=4096, N=4096, K=4096)
-
-    assert stage_3.pipeline_shared_bytes_estimate == stage_1.pipeline_shared_bytes_estimate * 3
-    assert stage_3.shared_bytes_estimate > stage_1.shared_bytes_estimate
-    assert stage_1.registers_per_thread_estimate > stage_1.accumulator_registers_per_thread_estimate
+    assert usage["main_kernel"] == KernelResourceUsage(
+        n_regs=80,
+        static_smem_bytes=49152,
+        const_size_bytes=392,
+        extra={"cmem[0]": 392, "spill_stores_bytes": 0, "spill_loads_bytes": 0},
+    )
 
 
-def test_analyze_cuda_source_rejects_spilling_config():
-    cfg = GemmConfig(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True)
-    source = 'extern "C" __global__ void __launch_bounds__(256) main_kernel() { asm("wgmma.mma_async"); }'
-    ptxas = "ptxas info    : Used 128 registers, 0 bytes smem\n0 bytes stack frame, 4 bytes spill stores, 0 bytes spill loads"
-
-    report = analyze_cuda_source(source, cfg, _fake_h200_arch(), M=4096, N=4096, K=4096, ptxas_output=ptxas)
+def test_pre_compile_rejects_only_exact_launch_overbooking():
+    report = analyze_launch_resources(
+        BASE_CONFIG,
+        [LaunchResourceInfo("main_kernel", block_dims=(2048, 1, 1), dynamic_smem_bytes=0)],
+        _limits(),
+    )
 
     assert report.verdict == "reject"
-    assert "register_spill_risk" in report.reasons
-    assert report.source.launch_bounds_threads == 256
-    assert report.source.wgmma_ops == 1
+    assert report.reason == "threads_per_block_over_limit"
 
 
-def test_analyze_cuda_source_keeps_resource_fit_config():
-    cfg = GemmConfig(block_M=128, block_N=128, block_K=64, num_stages=2, thread_num=256, enable_rasteration=True)
-    source = 'extern "C" __global__ void __launch_bounds__(256) main_kernel() { asm("wgmma.mma_async"); }'
-    ptxas = "ptxas info    : Used 80 registers, 0 bytes smem\n0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"
-
-    report = analyze_cuda_source(source, cfg, _fake_h200_arch(), M=4096, N=4096, K=4096, ptxas_output=ptxas)
+def test_pre_compile_keeps_unknown_symbolic_values():
+    report = analyze_launch_resources(
+        BASE_CONFIG,
+        [LaunchResourceInfo("main_kernel", block_dims=(None, 1, 1), dynamic_smem_bytes=None)],
+        _limits(),
+    )
 
     assert report.verdict == "keep"
-    assert report.active_blocks_per_sm_estimate > 0
-    assert report.score > 0
+
+
+def test_post_compile_rejects_registers_per_block_overbooking():
+    output = """
+ptxas info    : Compiling entry function 'main_kernel' for 'sm_90'
+ptxas info    : Used 256 registers
+"""
+    report = analyze_compiled_resources(
+        BASE_CONFIG,
+        [LaunchResourceInfo("main_kernel", block_dims=(512, 1, 1), dynamic_smem_bytes=0)],
+        output,
+        _limits(),
+    )
+
+    assert report.verdict == "reject"
+    assert report.reason == "registers_per_block_over_limit"
+
+
+def test_config_space_returns_only_exactly_kept_configs():
+    good = {**BASE_CONFIG, "thread_num": 256}
+    bad = {**BASE_CONFIG, "thread_num": 2048}
+    summary = analyze_config_space(
+        [good, bad],
+        [
+            [LaunchResourceInfo("main_kernel", block_dims=(256, 1, 1), dynamic_smem_bytes=0)],
+            [LaunchResourceInfo("main_kernel", block_dims=(2048, 1, 1), dynamic_smem_bytes=0)],
+        ],
+        _limits(),
+    )
+
+    assert summary.selected_configs() == [good]
+    assert len(summary.rejected_reports) == 1

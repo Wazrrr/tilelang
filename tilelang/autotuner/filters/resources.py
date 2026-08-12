@@ -75,8 +75,13 @@ class CudaDeviceLimits:
 class AutotuneResourceFilterReject(RuntimeError):
     """Internal marker for configs skipped by exact resource filtering."""
 
-    def __init__(self, decision: AutotuneFilterDecision):
+    def __init__(
+        self,
+        decision: AutotuneFilterDecision,
+        decisions: list[AutotuneFilterDecision] | None = None,
+    ):
         self.decision = decision
+        self.decisions = list(decisions) if decisions is not None else [decision]
         super().__init__(f"{decision.stage}:{decision.reason}:{decision.details}")
 
 

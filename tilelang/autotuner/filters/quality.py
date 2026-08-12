@@ -66,6 +66,14 @@ class AutotuneQualityFilterConfig(AutotuneBaseFilterConfig):
     check_tma_store_count: bool = True
     max_tma_store_count: int | None = None
 
+    check_quant_dequant_elements_per_thread: bool = True
+    max_quant_dequant_elements_per_thread: int | None = None
+    check_quant_dequant_elements_per_thread_advisory: bool = True
+    advisory_max_quant_dequant_elements_per_thread: int | None = 128
+
+    check_sparse_mask: bool = False
+    check_sparse_mask_advisory: bool = True
+
     check_attention_spills: bool = True
     max_attention_spills: int | None = 128
     check_attention_spills_advisory: bool = True
@@ -102,6 +110,8 @@ class CudaKernelQualityInfo:
     detected_kernel_type: KernelType = "generic"
     fragment_array_elements: dict[str, int] = field(default_factory=dict)
     c_local_floats: int | None = None
+    quant_dequant_elements_per_thread: int | None = None
+    sparse_mask_access_count: int = 0
     attention_score_elements_per_thread: int | None = None
     attention_output_elements_per_thread: int | None = None
     attention_softmax_elements_per_thread: int | None = None
@@ -145,12 +155,19 @@ class AutotuneQualityFilterDecision(AutotuneFilterDecision):
 class AutotuneQualityFilterReject(RuntimeError):
     """Internal marker for configs skipped by exact quality filtering."""
 
-    def __init__(self, decision: AutotuneQualityFilterDecision):
+    def __init__(
+        self,
+        decision: AutotuneQualityFilterDecision,
+        resource_decisions: list[AutotuneFilterDecision] | None = None,
+        quality_decisions: list[AutotuneQualityFilterDecision] | None = None,
+    ):
         self.decision = decision
+        self.resource_decisions = list(resource_decisions) if resource_decisions is not None else []
+        self.quality_decisions = list(quality_decisions) if quality_decisions is not None else [decision]
         super().__init__(f"{decision.stage}:{decision.reason}:{decision.details}")
 
 
-_C_LOCAL_RE = re.compile(r"\bfloat\s+C_local\s*\[\s*(\d+)\s*\]")
+_C_LOCAL_RE = re.compile(r"\bfloat\s+\w*C(?:t)?_local(?:_\w*)?\s*\[\s*(\d+)\s*\]")
 _LOCAL_ARRAY_RE = re.compile(
     r"\b(?P<type>float|half_t|half|__half|uint32_t|int|unsigned\s+int)\s+"
     r"(?P<name>[A-Za-z_]\w*)\s*\[\s*(?P<count>\d+)\s*\]"
@@ -219,6 +236,10 @@ def extract_cuda_kernel_quality_info(
 
     c_local_matches = [int(match.group(1)) for match in _C_LOCAL_RE.finditer(function_source)]
     fragment_array_elements = _extract_local_array_elements(function_source)
+    quant_dequant_elements = max(
+        (count for name, count in fragment_array_elements.items() if _is_dequant_fragment_name(name)),
+        default=None,
+    )
     attention_score_elements = fragment_array_elements.get("acc_s")
     attention_output_elements = fragment_array_elements.get("acc_o")
     attention_softmax_elements = sum(fragment_array_elements.get(name, 0) for name in _ATTENTION_SOFTMAX_NAMES)
@@ -249,9 +270,11 @@ def extract_cuda_kernel_quality_info(
     return CudaKernelQualityInfo(
         function_name=function_name,
         source_available=bool(function_source),
-        detected_kernel_type=_detect_kernel_type(c_local_matches, fragment_array_elements),
+        detected_kernel_type=_detect_kernel_type(c_local_matches, fragment_array_elements, function_source),
         fragment_array_elements=fragment_array_elements,
         c_local_floats=max(c_local_matches) if c_local_matches else None,
+        quant_dequant_elements_per_thread=quant_dequant_elements,
+        sparse_mask_access_count=_count_sparse_mask_accesses(function_source),
         attention_score_elements_per_thread=attention_score_elements,
         attention_output_elements_per_thread=attention_output_elements,
         attention_softmax_elements_per_thread=attention_softmax_elements if attention_state_elements is not None else None,
@@ -369,6 +392,82 @@ class _GemmCudaQualityProfile(_GenericCudaQualityProfile):
     kernel_type: KernelType = "gemm"
 
 
+class _DenseGemmCudaQualityProfile(_GemmCudaQualityProfile):
+    kernel_type: KernelType = "dense_gemm"
+
+
+class _QuantizedGemmCudaQualityProfile(_GemmCudaQualityProfile):
+    kernel_type: KernelType = "quantized_gemm"
+
+    def find_violations(
+        self,
+        info: CudaKernelQualityInfo,
+        config: AutotuneQualityFilterConfig,
+    ) -> list[dict[str, Any]]:
+        violations = super().find_violations(info, config)
+        _append_limit_violation(
+            violations,
+            enabled=config.check_quant_dequant_elements_per_thread,
+            observed=info.quant_dequant_elements_per_thread,
+            limit=config.max_quant_dequant_elements_per_thread,
+            reason="quant_dequant_elements_per_thread_over_quality_limit",
+            function=info.function_name,
+        )
+        return self._with_kernel_type(violations)
+
+    def find_advisories(
+        self,
+        info: CudaKernelQualityInfo,
+        config: AutotuneQualityFilterConfig,
+    ) -> list[dict[str, Any]]:
+        advisories = super().find_advisories(info, config)
+        _append_limit_violation(
+            advisories,
+            enabled=config.check_quant_dequant_elements_per_thread_advisory,
+            observed=info.quant_dequant_elements_per_thread,
+            limit=config.advisory_max_quant_dequant_elements_per_thread,
+            reason="quant_dequant_elements_per_thread_over_advisory_limit",
+            function=info.function_name,
+        )
+        return self._with_kernel_type(advisories)
+
+
+class _SparseGemmCudaQualityProfile(_GemmCudaQualityProfile):
+    kernel_type: KernelType = "sparse_gemm"
+
+    def find_violations(
+        self,
+        info: CudaKernelQualityInfo,
+        config: AutotuneQualityFilterConfig,
+    ) -> list[dict[str, Any]]:
+        violations = super().find_violations(info, config)
+        if config.check_sparse_mask and info.source_available and info.sparse_mask_access_count == 0:
+            violations.append(
+                {
+                    "reason": "sparse_mask_not_detected",
+                    "function": info.function_name,
+                    "observed": info.sparse_mask_access_count,
+                }
+            )
+        return self._with_kernel_type(violations)
+
+    def find_advisories(
+        self,
+        info: CudaKernelQualityInfo,
+        config: AutotuneQualityFilterConfig,
+    ) -> list[dict[str, Any]]:
+        advisories = super().find_advisories(info, config)
+        if config.check_sparse_mask_advisory and info.source_available and info.sparse_mask_access_count > 0:
+            advisories.append(
+                {
+                    "reason": "sparse_mask_guard_detected",
+                    "function": info.function_name,
+                    "observed": info.sparse_mask_access_count,
+                }
+            )
+        return self._with_kernel_type(advisories)
+
+
 class _AttentionCudaQualityProfile(_CudaQualityProfile):
     kernel_type: KernelType = "attention"
 
@@ -475,6 +574,9 @@ class _AttentionCudaQualityProfile(_CudaQualityProfile):
 _QUALITY_PROFILES: dict[KernelType, _CudaQualityProfile] = {
     "generic": _GenericCudaQualityProfile(),
     "gemm": _GemmCudaQualityProfile(),
+    "dense_gemm": _DenseGemmCudaQualityProfile(),
+    "quantized_gemm": _QuantizedGemmCudaQualityProfile(),
+    "sparse_gemm": _SparseGemmCudaQualityProfile(),
     "attention": _AttentionCudaQualityProfile(),
 }
 
@@ -507,12 +609,28 @@ def _extract_local_array_elements(source: str) -> dict[str, int]:
     return arrays
 
 
-def _detect_kernel_type(c_local_matches: list[int], fragment_array_elements: dict[str, int]) -> KernelType:
+def _detect_kernel_type(
+    c_local_matches: list[int],
+    fragment_array_elements: dict[str, int],
+    source: str,
+) -> KernelType:
     if "acc_s" in fragment_array_elements and "acc_o" in fragment_array_elements:
         return "attention"
+    if any(_is_dequant_fragment_name(name) for name in fragment_array_elements):
+        return "quantized_gemm"
+    if _count_sparse_mask_accesses(source) > 0:
+        return "sparse_gemm"
     if c_local_matches:
-        return "gemm"
+        return "dense_gemm"
     return "generic"
+
+
+def _is_dequant_fragment_name(name: str) -> bool:
+    return "dequant" in name.lower()
+
+
+def _count_sparse_mask_accesses(source: str) -> int:
+    return source.count("BlockMask") + source.count("block_mask") + source.count("blockMask")
 
 
 def _find_common_quality_violations(info: CudaKernelQualityInfo, config: AutotuneQualityFilterConfig) -> list[dict[str, Any]]:

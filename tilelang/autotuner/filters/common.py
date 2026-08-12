@@ -8,7 +8,15 @@ from typing import Any, Literal
 FilterStage = Literal["pre_compile", "post_compile", "post_compile_quality"]
 FilterVerdict = Literal["keep", "reject"]
 FilterAction = Literal["reject", "report"]
-KernelType = Literal["auto", "generic", "gemm", "attention"]
+KernelType = Literal[
+    "auto",
+    "generic",
+    "gemm",
+    "dense_gemm",
+    "quantized_gemm",
+    "sparse_gemm",
+    "attention",
+]
 
 
 class AutotuneBaseFilterConfig:

@@ -110,7 +110,7 @@ def compile_grouped_unit_tvm_ffi(
                 decision = evaluate_pre_compile_resource_filter(launch_infos, device_limits)
                 filter_decisions.append(decision)
                 if not decision.keep:
-                    unit_results.append((idx, config_arg, None, AutotuneResourceFilterReject(decision)))
+                    unit_results.append((idx, config_arg, None, AutotuneResourceFilterReject(decision, decisions=filter_decisions)))
                     continue
 
             lowered_items.append(
@@ -186,7 +186,14 @@ def compile_grouped_unit_tvm_ffi(
                     decision = evaluate_post_compile_resource_filter(item["launch_infos"], grouped_resource_usage, device_limits)
                     item["filter_decisions"].append(decision)
                     if not decision.keep:
-                        unit_results.append((idx, config_arg, None, AutotuneResourceFilterReject(decision)))
+                        unit_results.append(
+                            (
+                                idx,
+                                config_arg,
+                                None,
+                                AutotuneResourceFilterReject(decision, decisions=item["filter_decisions"]),
+                            )
+                        )
                         continue
 
                 if quality_filter_config.enabled:
@@ -199,7 +206,18 @@ def compile_grouped_unit_tvm_ffi(
                     )
                     item["quality_decisions"].append(decision)
                     if not decision.keep:
-                        unit_results.append((idx, config_arg, None, AutotuneQualityFilterReject(decision)))
+                        unit_results.append(
+                            (
+                                idx,
+                                config_arg,
+                                None,
+                                AutotuneQualityFilterReject(
+                                    decision,
+                                    resource_decisions=item["filter_decisions"],
+                                    quality_decisions=item["quality_decisions"],
+                                ),
+                            )
+                        )
                         continue
 
                 host_instruments, host_timing_inst = create_pass_instruments()

@@ -738,7 +738,7 @@ class AutoTuner:
             decision = evaluate_pre_compile_resource_filter(launch_infos, device_limits)
             filter_decisions.append(decision)
             if not decision.keep:
-                raise AutotuneResourceFilterReject(decision)
+                raise AutotuneResourceFilterReject(decision, decisions=filter_decisions)
 
         device_instruments, device_timing_inst = self._create_pass_instruments(pass_configs)
         capture_cuda_resources = (
@@ -767,7 +767,7 @@ class AutoTuner:
             decision = evaluate_post_compile_resource_filter(launch_infos, resource_usage, device_limits)
             filter_decisions.append(decision)
             if not decision.keep:
-                raise AutotuneResourceFilterReject(decision)
+                raise AutotuneResourceFilterReject(decision, decisions=filter_decisions)
 
         if quality_filter_args.enabled:
             decision = evaluate_post_compile_quality_filter(
@@ -779,7 +779,11 @@ class AutoTuner:
             )
             quality_decisions.append(decision)
             if not decision.keep:
-                raise AutotuneQualityFilterReject(decision)
+                raise AutotuneQualityFilterReject(
+                    decision,
+                    resource_decisions=filter_decisions,
+                    quality_decisions=quality_decisions,
+                )
 
         host_instruments, host_timing_inst = self._create_pass_instruments(pass_configs)
         with (
@@ -1592,7 +1596,8 @@ class AutoTuner:
                     for idx, config, jit_kernel, error in unit_results:
                         if error is not None:
                             if isinstance(error, AutotuneResourceFilterReject):
-                                self._write_resource_filter_decision(idx, error.decision)
+                                for decision in error.decisions:
+                                    self._write_resource_filter_decision(idx, decision)
                                 logger.info(
                                     "Filtered config %s at index %s during %s: %s (%s)",
                                     self.configs[idx],
@@ -1603,7 +1608,10 @@ class AutoTuner:
                                 )
                                 continue
                             if isinstance(error, AutotuneQualityFilterReject):
-                                self._write_quality_filter_decision(idx, error.decision)
+                                for decision in error.resource_decisions:
+                                    self._write_resource_filter_decision(idx, decision)
+                                for decision in error.quality_decisions:
+                                    self._write_quality_filter_decision(idx, decision)
                                 logger.info(
                                     "Quality-filtered config %s at index %s during %s: %s (%s)",
                                     self.configs[idx],
