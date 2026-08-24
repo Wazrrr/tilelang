@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any
 
 from tilelang.autotuner.filters import (
@@ -84,6 +86,26 @@ def analyze_config_space(
     return GemmAnalysisSummary(reports=reports)
 
 
+def write_static_report(summary: GemmAnalysisSummary, path: str | Path) -> None:
+    report_path = Path(path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "total": len(summary.reports),
+        "kept": len(summary.kept_reports),
+        "rejected": len(summary.rejected_reports),
+        "reports": [
+            {
+                "config": report.config,
+                "verdict": report.verdict,
+                "reason": report.reason,
+                "details": report.details,
+            }
+            for report in summary.reports
+        ],
+    }
+    report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 __all__ = [
     "AutotuneResourceFilterConfig",
     "CudaDeviceLimits",
@@ -96,4 +118,5 @@ __all__ = [
     "analyze_launch_resources",
     "estimate_registers_from_device_code",
     "parse_ptxas_output",
+    "write_static_report",
 ]

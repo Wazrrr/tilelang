@@ -53,8 +53,8 @@ def compile_grouped_unit_tvm_ffi(
     1. Elaborate each config into a PrimFunc.
     2. Lower each PrimFunc into host/device IR modules.
     3. Merge all device IR into one IRModule and compile device code once.
-    4. Build host runtime module per config and import shared device module.
-    5. Construct per-config JITKernel objects that share the grouped device module.
+    4. Merge kept host IR, build one host runtime module, and import the shared device module.
+    5. Construct per-config JITKernel objects that dispatch to named entries in the shared executable.
     """
 
     resource_filter_config = AutotuneResourceFilterConfig.from_value(resource_filter_config)
@@ -178,6 +178,7 @@ def compile_grouped_unit_tvm_ffi(
 
         grouped_kernel_source = grouped_device_rt_mod.inspect_source()
 
+        runtime_items: list[dict[str, Any]] = []
         for item in lowered_items:
             idx = item["idx"]
             config_arg = item["config_arg"]
@@ -220,20 +221,55 @@ def compile_grouped_unit_tvm_ffi(
                         )
                         continue
 
-                host_instruments, host_timing_inst = create_pass_instruments()
+                runtime_items.append(item)
+            except Exception as e:
+                unit_results.append((idx, config_arg, None, e))
+
+        if not runtime_items:
+            return unit_results
+
+        runtime_grouped_config_indices = ",".join(str(item["idx"]) for item in runtime_items)
+        merged_host_funcs: dict[Any, Any] = {}
+        merged_host_attrs = None
+        merged_host_names: set[str] = set()
+        for item in runtime_items:
+            host_mod = item["host_mod"]
+            if merged_host_attrs is None:
+                merged_host_attrs = host_mod.attrs
+            for global_var, func in host_mod.functions.items():
+                name_hint = getattr(global_var, "name_hint", str(global_var))
+                if name_hint in merged_host_names:
+                    raise RuntimeError(
+                        f"Duplicate host global symbol '{name_hint}' during grouped compilation (config index={item['idx']})."
+                    )
+                merged_host_names.add(name_hint)
+                merged_host_funcs[global_var] = func
+        merged_host_mod = tvm.IRModule(merged_host_funcs, attrs=merged_host_attrs)
+
+        host_instruments, host_timing_inst = create_pass_instruments()
+        with (
+            report_pass_timing_on_exit(
+                host_timing_inst,
+                context=f"stage=grouped-host, configs=[{runtime_grouped_config_indices}]",
+            ),
+            tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
+            runtime_items[0]["target"],
+        ):
+            grouped_host_rt_mod = host_codegen(
+                merged_host_mod,
+                runtime_items[0]["target_host"],
+                target=runtime_items[0]["target"],
+            )
+
+        grouped_host_rt_mod.import_module(grouped_device_rt_mod)
+        shared_executable = tvm.runtime.Executable(grouped_host_rt_mod)
+        shared_executable.jit()
+
+        for item in runtime_items:
+            idx = item["idx"]
+            config_arg = item["config_arg"]
+            try:
                 kernel_symbol = str(item["program"].attrs["global_symbol"])
-                with (
-                    report_pass_timing_on_exit(
-                        host_timing_inst,
-                        context=f"stage=grouped-host, config={idx}, kernel={kernel_symbol}",
-                    ),
-                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
-                    item["target"],
-                ):
-                    grouped_host_rt_mod = host_codegen(item["host_mod"], item["target_host"], target=item["target"])
-
-                grouped_host_rt_mod.import_module(grouped_device_rt_mod)
-
                 artifact = CompiledArtifact(
                     host_mod=grouped_host_rt_mod,
                     device_mod=item["device_mod"],
@@ -251,6 +287,8 @@ def compile_grouped_unit_tvm_ffi(
                     device_mod=artifact.device_mod,
                     rt_mod=artifact.rt_mod,
                     device_kernel_source=artifact.kernel_source,
+                    entry_name=kernel_symbol,
+                    executable=shared_executable,
                     verbose=compile_args.verbose,
                     pass_configs=pass_configs,
                 )

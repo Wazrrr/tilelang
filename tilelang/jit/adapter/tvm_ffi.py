@@ -80,6 +80,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         rt_mod: tvm.runtime.Module | None = None,
         host_kernel_source: str | None = None,
         device_kernel_source: str | None = None,
+        entry_name: str | None = None,
+        executable: tvm.runtime.Executable | None = None,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
@@ -108,12 +110,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.host_mod = host_mod
         self.device_mod = device_mod
         self.rt_mod = rt_mod
+        self.entry_name = entry_name
         self.verbose = verbose
         self.pass_configs = pass_configs
         self.compile_flags = compile_flags
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.kernel_global_source = self.device_kernel_source
-        self.executable = None
+        self.executable = executable
+        self._packed_func = None
         self._executable_lock = threading.Lock()
 
         self._post_init()
@@ -138,6 +142,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 executable = self._make_executable()
                 self.executable = executable
             return executable
+
+    def _get_packed_func(self):
+        if self.entry_name is None:
+            return None
+        packed_func = self._packed_func
+        if packed_func is not None:
+            return packed_func
+        executable = self._get_executable()
+        with self._executable_lock:
+            packed_func = self._packed_func
+            if packed_func is None:
+                packed_func = executable[self.entry_name]
+                self._packed_func = packed_func
+            return packed_func
 
     def get_exportable_executable(self) -> tvm.runtime.Executable:
         return self._get_executable()
@@ -273,8 +291,12 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            executable = self._get_executable()
-            executable(*tensor_list)
+            packed_func = self._get_packed_func()
+            if packed_func is None:
+                executable = self._get_executable()
+                executable(*tensor_list)
+            else:
+                packed_func(*tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -308,6 +330,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             else None
         )
         adapter.pass_configs = pass_configs
+        adapter.entry_name = None
 
         if isinstance(func_or_mod, tirx.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -322,6 +345,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter.kernel_global_source = device_kernel_source.text
         adapter.rt_mod = None
         adapter.executable = runtime.load_module(kernel_lib_path)
+        adapter._packed_func = None
         adapter._executable_lock = threading.Lock()
         adapter._post_init()
         return adapter
