@@ -7,11 +7,21 @@ from .capture import (
     get_autotune_inputs,  # noqa: F401
 )
 from .filters import (
-    AutotuneQualityFilterConfig,  # noqa: F401
-    AutotuneQualityFilterDecision,  # noqa: F401
+    AutotuneFilterConfig,  # noqa: F401
+    AutotuneFilterResult,  # noqa: F401
     AutotuneResourceFilterConfig,  # noqa: F401
     AutotuneFilterDecision,  # noqa: F401
-    CudaKernelQualityInfo,  # noqa: F401
+    AutotuneRuleContext,  # noqa: F401
+    AutotuneRuleRegistry,  # noqa: F401
+    AutotuneVerifyRule,  # noqa: F401
+    CudaKernelFilterInfo,  # noqa: F401
+    KernelClassification,  # noqa: F401
     LaunchResourceInfo,  # noqa: F401
     CompiledResourceInfo,  # noqa: F401
+    RuleFindingKind,  # noqa: F401
+    RuleLayer,  # noqa: F401
+    classify_kernel_filter_info,  # noqa: F401
+    iter_filter_rules,  # noqa: F401
+    register_filter_rule,  # noqa: F401
+    unregister_filter_rule,  # noqa: F401
 )

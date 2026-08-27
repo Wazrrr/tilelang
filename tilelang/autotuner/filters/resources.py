@@ -1,24 +1,28 @@
-"""Exact CUDA resource filtering for autotune candidates."""
+"""Deprecated CUDA resource-filter compatibility helpers.
+
+Autotune candidate rejection now goes through the rule-based verifier in
+``tilelang.autotuner.filters.verify``. This module is kept for older scripts
+that imported the standalone resource-limit helpers directly.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from tilelang import tvm
 from tilelang.autotuner.filters.common import (
     AutotuneBaseFilterConfig,
     AutotuneFilterDecision,
-    FilterVerdict,
     KernelType,
 )
+from tilelang.autotuner.filters.launch import LaunchResourceInfo, extract_launch_resource_info  # noqa: F401
 
 FilterStage = Literal["pre_compile", "post_compile"]
 
 
 @dataclass(frozen=True)
 class AutotuneResourceFilterConfig(AutotuneBaseFilterConfig):
-    """Configuration for exact-only autotune resource filtering."""
+    """Deprecated configuration kept so older resource_filter arguments parse."""
 
     enabled: bool = False
     pre_compile: bool = True
@@ -26,25 +30,6 @@ class AutotuneResourceFilterConfig(AutotuneBaseFilterConfig):
     device_id: int | None = None
     report_path: str | None = None
     kernel_type: KernelType = "auto"
-
-
-@dataclass(frozen=True)
-class LaunchResourceInfo:
-    function_name: str
-    block_dims: tuple[int | None, int | None, int | None] = (1, 1, 1)
-    grid_dims: tuple[int | None, int | None, int | None] = (1, 1, 1)
-    dynamic_smem_bytes: int | None = 0
-    cluster_dims: tuple[int | None, int | None, int | None] | None = None
-    uses_cooperative_groups: bool = False
-
-    @property
-    def threads_per_block(self) -> int | None:
-        product = 1
-        for dim in self.block_dims:
-            if dim is None:
-                return None
-            product *= dim
-        return product
 
 
 @dataclass(frozen=True)
@@ -73,7 +58,7 @@ class CudaDeviceLimits:
 
 
 class AutotuneResourceFilterReject(RuntimeError):
-    """Internal marker for configs skipped by exact resource filtering."""
+    """Deprecated marker kept for older direct resource-filter callers."""
 
     def __init__(
         self,
@@ -104,46 +89,6 @@ def query_cuda_device_limits(device_id: int | None = None) -> CudaDeviceLimits |
         )
     except Exception:
         return None
-
-
-def extract_launch_resource_info(device_mod: tvm.IRModule) -> list[LaunchResourceInfo]:
-    infos: list[LaunchResourceInfo] = []
-    for global_var, func in device_mod.functions.items():
-        attrs = getattr(func, "attrs", None) or {}
-        function_name = str(attrs.get("global_symbol", getattr(global_var, "name_hint", str(global_var))))
-        block_dims: list[int | None] = [1, 1, 1]
-        grid_dims: list[int | None] = [1, 1, 1]
-
-        if "thread_extent" in attrs:
-            for tag, extent in attrs["thread_extent"].items():
-                tag_str = str(tag)
-                axis = tag_str[-1]
-                if axis not in "xyz":
-                    continue
-                index = "xyz".index(axis)
-                if "threadIdx" in tag_str:
-                    block_dims[index] = _exact_int(extent)
-                elif "blockIdx" in tag_str:
-                    grid_dims[index] = _exact_int(extent)
-
-        cluster_dims = None
-        if "cluster_dims" in attrs:
-            raw_cluster_dims = attrs["cluster_dims"]
-            parsed = [_exact_int(raw_cluster_dims[i]) for i in range(len(raw_cluster_dims))]
-            cluster_dims = tuple((parsed + [1, 1, 1])[:3])
-
-        dynamic_smem_bytes = _exact_int(attrs["dyn_shared_memory_buf"]) if "dyn_shared_memory_buf" in attrs else 0
-        infos.append(
-            LaunchResourceInfo(
-                function_name=function_name,
-                block_dims=tuple(block_dims),
-                grid_dims=tuple(grid_dims),
-                dynamic_smem_bytes=dynamic_smem_bytes,
-                cluster_dims=cluster_dims,
-                uses_cooperative_groups=bool(attrs.get("use_cooperative_groups", False)),
-            )
-        )
-    return infos
 
 
 def evaluate_pre_compile_resource_filter(
@@ -300,23 +245,4 @@ def _check_dims(
                 dim=dim,
                 limit=limit,
             )
-    return None
-
-
-def _exact_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if hasattr(value, "value"):
-        raw_value = value.value
-        if isinstance(raw_value, (int, bool)):
-            return int(raw_value)
-    try:
-        if isinstance(value, tvm.tirx.IntImm):
-            return int(value)
-    except Exception:
-        pass
     return None

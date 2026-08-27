@@ -5,25 +5,17 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-FilterStage = Literal["pre_compile", "post_compile", "post_compile_quality"]
+FilterStage = Literal["pre_compile", "post_compile"]
 FilterVerdict = Literal["keep", "reject"]
 FilterAction = Literal["reject", "report"]
-KernelType = Literal[
-    "auto",
-    "generic",
-    "gemm",
-    "dense_gemm",
-    "quantized_gemm",
-    "sparse_gemm",
-    "attention",
-]
+KernelType = str
 
 
 class AutotuneBaseFilterConfig:
-    """Base config shared by hard resource and quality filters."""
+    """Base config shared by autotune filter configs."""
 
     @classmethod
-    def from_value(cls, value: bool | dict[str, Any] | "AutotuneBaseFilterConfig" | None):
+    def from_value(cls, value: bool | dict[str, Any] | AutotuneBaseFilterConfig | None):
         if value is None:
             return cls()
         if isinstance(value, cls):
@@ -58,9 +50,9 @@ class AutotuneFilterDecision:
         return self.verdict == "keep"
 
     @classmethod
-    def keep_decision(cls, stage: FilterStage, reason: str, **details: Any) -> "AutotuneFilterDecision":
+    def keep_decision(cls, stage: FilterStage, reason: str, **details: Any) -> AutotuneFilterDecision:
         return cls("keep", stage, reason, details)
 
     @classmethod
-    def reject_decision(cls, stage: FilterStage, reason: str, **details: Any) -> "AutotuneFilterDecision":
+    def reject_decision(cls, stage: FilterStage, reason: str, **details: Any) -> AutotuneFilterDecision:
         return cls("reject", stage, reason, details)

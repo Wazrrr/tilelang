@@ -36,15 +36,12 @@ from pathlib import Path
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.autotuner.filters import (
-    AutotuneQualityFilterConfig,
-    AutotuneQualityFilterReject,
+    AutotuneFilterConfig,
+    AutotuneFilterReject,
     AutotuneResourceFilterConfig,
-    AutotuneResourceFilterReject,
-    evaluate_post_compile_quality_filter,
-    evaluate_post_compile_resource_filter,
-    evaluate_pre_compile_resource_filter,
+    evaluate_post_compile_filter,
+    evaluate_pre_compile_filter,
     extract_launch_resource_info,
-    query_cuda_device_limits,
 )
 from tilelang.contrib import cuda_resource_info
 from tilelang.contrib.cuda_resource_info import pop_recorded as cuda_pop_recorded
@@ -289,9 +286,8 @@ class AutoTuner:
         self.jit_compile = None
         self.jit_elaborate = None
         self.resource_filter_args = AutotuneResourceFilterConfig()
-        self._resource_filter_report_initialized = False
-        self.quality_filter_args = AutotuneQualityFilterConfig()
-        self._quality_filter_report_initialized = False
+        self.filter_args = AutotuneFilterConfig()
+        self._filter_report_initialized = False
         self.benchmark_report_path: str | None = None
         self._benchmark_report_initialized = False
 
@@ -380,33 +376,40 @@ class AutoTuner:
         resource_filter: bool | dict[str, Any] | AutotuneResourceFilterConfig | None = None,
         **kwargs: Any,
     ):
-        """Set exact CUDA resource-filtering arguments for autotune candidates."""
+        """Accept deprecated CUDA resource-filtering arguments.
+
+        Hard launch-resource filtering is no longer part of autotune dispatch.
+        Use ``filter`` for PTXAS/source checks such as spills,
+        registers, and local memory.
+        """
         config = AutotuneResourceFilterConfig.from_value(resource_filter)
         if kwargs:
             if resource_filter is None:
                 config = replace(config, enabled=True)
             config = replace(config, **kwargs)
         self.resource_filter_args = config
+        if config.enabled:
+            logger.warning("Autotune resource_filter is deprecated and ignored; use filter for resource-usage checks.")
         return self
 
-    def set_quality_filter_args(
+    def set_filter_args(
         self,
-        quality_filter: bool | dict[str, Any] | AutotuneQualityFilterConfig | None = None,
+        filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None,
         **kwargs: Any,
     ):
-        """Set exact post-compile CUDA quality-filtering arguments.
+        """Set CUDA filtering arguments.
 
-        This filter is independent from the hard resource filter. It only runs
-        after CUDA device compilation and evaluates exact PTXAS/source features
-        such as spills, local memory, C_local footprint, WGMMA shape, K-loop
-        trip count, and TMA/store patterns.
+        The pre-compile stage evaluates exact IR features before CUDA codegen.
+        The post-compile stage evaluates exact PTXAS/source features such as
+        spills, local memory, C_local footprint, WGMMA shape, K-loop trip count,
+        and TMA/store patterns.
         """
-        config = AutotuneQualityFilterConfig.from_value(quality_filter)
+        config = AutotuneFilterConfig.from_value(filter)
         if kwargs:
-            if quality_filter is None:
+            if filter is None:
                 config = replace(config, enabled=True)
             config = replace(config, **kwargs)
-        self.quality_filter_args = config
+        self.filter_args = config
         return self
 
     def set_benchmark_report_path(self, report_path: str | os.PathLike | None):
@@ -559,8 +562,7 @@ class AutoTuner:
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
             "profile_args": hash(self.profile_args),
-            "resource_filter_args": self.resource_filter_args.to_cache_key_dict(),
-            "quality_filter_args": self.quality_filter_args.to_cache_key_dict(),
+            "filter_args": self.filter_args.to_cache_key_dict(),
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
@@ -604,51 +606,26 @@ class AutoTuner:
         config_arg.pop(_PASS_CONFIGS_KEY, None)
         return self.fn(**config_arg)
 
-    def _resource_filter_report_path(self) -> Path | None:
-        report_path = self.resource_filter_args.report_path
-        if not (self.resource_filter_args.enabled and report_path):
+    def _filter_report_path(self) -> Path | None:
+        report_path = self.filter_args.report_path
+        if not (self.filter_args.enabled and report_path):
             return None
         return Path(report_path)
 
-    def _init_resource_filter_report(self) -> None:
-        report_path = self._resource_filter_report_path()
+    def _init_filter_report(self) -> None:
+        report_path = self._filter_report_path()
         if report_path is None:
             return
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text("index\tstage\tverdict\treason\tconfig\tdetails\n")
-        self._resource_filter_report_initialized = True
+        self._filter_report_initialized = True
 
-    def _write_resource_filter_decision(self, idx: int, decision) -> None:
-        report_path = self._resource_filter_report_path()
+    def _write_filter_decision(self, idx: int, decision) -> None:
+        report_path = self._filter_report_path()
         if report_path is None:
             return
-        if not self._resource_filter_report_initialized:
-            self._init_resource_filter_report()
-        config_text = json.dumps(self.configs[idx], sort_keys=True, default=str)
-        details_text = json.dumps(decision.details, sort_keys=True, default=str)
-        with report_path.open("a") as file:
-            file.write(f"{idx}\t{decision.stage}\t{decision.verdict}\t{decision.reason}\t{config_text}\t{details_text}\n")
-
-    def _quality_filter_report_path(self) -> Path | None:
-        report_path = self.quality_filter_args.report_path
-        if not (self.quality_filter_args.enabled and report_path):
-            return None
-        return Path(report_path)
-
-    def _init_quality_filter_report(self) -> None:
-        report_path = self._quality_filter_report_path()
-        if report_path is None:
-            return
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text("index\tstage\tverdict\treason\tconfig\tdetails\n")
-        self._quality_filter_report_initialized = True
-
-    def _write_quality_filter_decision(self, idx: int, decision) -> None:
-        report_path = self._quality_filter_report_path()
-        if report_path is None:
-            return
-        if not self._quality_filter_report_initialized:
-            self._init_quality_filter_report()
+        if not self._filter_report_initialized:
+            self._init_filter_report()
         config_text = json.dumps(self.configs[idx], sort_keys=True, default=str)
         details_text = json.dumps(decision.details, sort_keys=True, default=str)
         with report_path.open("a") as file:
@@ -700,17 +677,16 @@ class AutoTuner:
             )
         return build_pass_instruments(base_pass_instruments, profile_threshold_ms)
 
-    def _compile_tvm_ffi_with_resource_filter(
+    def _compile_tvm_ffi_with_filter(
         self,
         idx: int,
         config_arg: dict[str, Any],
         elaborate_func: Callable[..., PrimFunc],
     ) -> tilelang.JITKernel:
-        per_config_pass_configs = config_arg.get(_PASS_CONFIGS_KEY, None)
+        per_config_pass_configs = config_arg.get(_PASS_CONFIGS_KEY)
         compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
         pass_configs = dict(compile_args.pass_configs or {})
-        resource_filter_args = self.resource_filter_args
-        quality_filter_args = self.quality_filter_args
+        filter_args = self.filter_args
 
         program = elaborate_func(**dict(config_arg))
         func_name = str(program.attrs.get("global_symbol", f"config_{idx}"))
@@ -732,19 +708,22 @@ class AutoTuner:
 
         launch_infos = extract_launch_resource_info(device_mod)
         filter_decisions = []
-        quality_decisions = []
-        device_limits = query_cuda_device_limits(resource_filter_args.device_id) if resource_filter_args.enabled else None
-        if resource_filter_args.enabled and resource_filter_args.pre_compile:
-            decision = evaluate_pre_compile_resource_filter(launch_infos, device_limits)
+        if filter_args.enabled:
+            decision = evaluate_pre_compile_filter(
+                launch_infos=launch_infos,
+                device_mod=device_mod,
+                config=config_arg,
+                filter_config=filter_args,
+            )
             filter_decisions.append(decision)
             if not decision.keep:
-                raise AutotuneResourceFilterReject(decision, decisions=filter_decisions)
+                raise AutotuneFilterReject(
+                    decision,
+                    filter_decisions=filter_decisions,
+                )
 
         device_instruments, device_timing_inst = self._create_pass_instruments(pass_configs)
-        capture_cuda_resources = (
-            resource_filter_args.enabled
-            and resource_filter_args.post_compile
-        ) or quality_filter_args.needs_cuda_resource_usage()
+        capture_cuda_resources = filter_args.needs_cuda_resource_usage()
         if capture_cuda_resources:
             cuda_reset_recorder()
         capture_context = cuda_resource_info.capture_resource_usage() if capture_cuda_resources else contextlib.nullcontext()
@@ -763,26 +742,19 @@ class AutoTuner:
             resource_usage = cuda_pop_recorded() if capture_cuda_resources else {}
 
         kernel_source = device_rt_mod.inspect_source()
-        if resource_filter_args.enabled and resource_filter_args.post_compile:
-            decision = evaluate_post_compile_resource_filter(launch_infos, resource_usage, device_limits)
-            filter_decisions.append(decision)
-            if not decision.keep:
-                raise AutotuneResourceFilterReject(decision, decisions=filter_decisions)
-
-        if quality_filter_args.enabled:
-            decision = evaluate_post_compile_quality_filter(
+        if filter_args.enabled:
+            decision = evaluate_post_compile_filter(
                 launch_infos=launch_infos,
                 resource_usage=resource_usage,
                 kernel_source=kernel_source,
                 config=config_arg,
-                quality_config=quality_filter_args,
+                filter_config=filter_args,
             )
-            quality_decisions.append(decision)
+            filter_decisions.append(decision)
             if not decision.keep:
-                raise AutotuneQualityFilterReject(
+                raise AutotuneFilterReject(
                     decision,
-                    resource_decisions=filter_decisions,
-                    quality_decisions=quality_decisions,
+                    filter_decisions=filter_decisions,
                 )
 
         host_instruments, host_timing_inst = self._create_pass_instruments(pass_configs)
@@ -832,9 +804,7 @@ class AutoTuner:
         if resource_usage:
             jit_kernel._resource_usage = resource_usage
         if filter_decisions:
-            jit_kernel._resource_filter_decisions = filter_decisions
-        if quality_decisions:
-            jit_kernel._quality_filter_decisions = quality_decisions
+            jit_kernel._filter_decisions = filter_decisions
         return jit_kernel
 
     def _ensure_jit_functions(
@@ -928,17 +898,7 @@ class AutoTuner:
 
         target_kind = self.compile_args.target.kind.name if isinstance(self.compile_args.target, Target) else str(self.compile_args.target)
         execution_backend = str(self.compile_args.execution_backend)
-        resource_filter_active = (
-            self.resource_filter_args.enabled
-            and target_kind == "cuda"
-            and execution_backend == "tvm_ffi"
-        )
-        quality_filter_active = (
-            self.quality_filter_args.enabled
-            and target_kind == "cuda"
-            and execution_backend == "tvm_ffi"
-        )
-        post_compile_filter_active = resource_filter_active or quality_filter_active
+        filter_active = self.filter_args.enabled and target_kind == "cuda" and execution_backend == "tvm_ffi"
 
         def compile_unit(unit_items: list[UnitItem], per_config_pass_configs=None):
             if grouped_compile_active:
@@ -947,16 +907,15 @@ class AutoTuner:
                     unit_items=unit_items,
                     compile_args=effective_compile_args,
                     elaborate_func=get_elaborate_func(),
-                    resource_filter_config=self.resource_filter_args if resource_filter_active else None,
-                    quality_filter_config=self.quality_filter_args if quality_filter_active else None,
+                    filter_config=self.filter_args if filter_active else None,
                 )
             compile_impl = get_compile_func()
             elaborate_impl = get_elaborate_func()
             unit_results: list[UnitResult] = []
             for idx, config_arg in unit_items:
                 try:
-                    if post_compile_filter_active:
-                        jit_kernel = self._compile_tvm_ffi_with_resource_filter(idx, config_arg, elaborate_impl)
+                    if filter_active:
+                        jit_kernel = self._compile_tvm_ffi_with_filter(idx, config_arg, elaborate_impl)
                     else:
                         jit_kernel = compile_impl(**config_arg)
                     unit_results.append((idx, config_arg, jit_kernel, None))
@@ -1334,8 +1293,7 @@ class AutoTuner:
             self.configs = self.configs(*kernel_args, **kernel_kwargs)
 
         key = self.generate_cache_key(parameters, extra_parameters)
-        resource_filter_report_requested = self._resource_filter_report_path() is not None
-        quality_filter_report_requested = self._quality_filter_report_path() is not None
+        filter_report_requested = self._filter_report_path() is not None
         benchmark_report_requested = self._benchmark_report_path() is not None
 
         with self._lock:
@@ -1343,8 +1301,7 @@ class AutoTuner:
                 key is not None
                 and env.is_cache_enabled()
                 and not env.is_autotune_cache_disabled()
-                and not resource_filter_report_requested
-                and not quality_filter_report_requested
+                and not filter_report_requested
                 and not benchmark_report_requested
             ):
                 # First check in-memory cache
@@ -1391,25 +1348,16 @@ class AutoTuner:
 
         if len(config_args) == 0:
             raise ValueError("No configurations to tune, please check your `@autotune` decorator")
-        self._init_resource_filter_report()
-        self._init_quality_filter_report()
+        self._init_filter_report()
         self._init_benchmark_report()
 
         target_kind, execution_backend, grouped_compile_active, _ = self._resolve_grouped_compile_mode(
             enable_grouped_compile=enable_grouped_compile,
             group_compile_size=group_compile_size,
         )
-        if self.resource_filter_args.enabled and not (target_kind == "cuda" and execution_backend == "tvm_ffi"):
+        if self.filter_args.enabled and not (target_kind == "cuda" and execution_backend == "tvm_ffi"):
             logger.warning(
-                "Autotune resource filtering is implemented for CUDA+tvm_ffi; "
-                "skipping resource filter for target=%s, execution_backend=%s.",
-                target_kind,
-                execution_backend,
-            )
-        if self.quality_filter_args.enabled and not (target_kind == "cuda" and execution_backend == "tvm_ffi"):
-            logger.warning(
-                "Autotune quality filtering is implemented for CUDA+tvm_ffi; "
-                "skipping quality filter for target=%s, execution_backend=%s.",
+                "Autotune filtering is implemented for CUDA+tvm_ffi; skipping filter for target=%s, execution_backend=%s.",
                 target_kind,
                 execution_backend,
             )
@@ -1595,25 +1543,11 @@ class AutoTuner:
                     compile_progress.update(len(unit_results))
                     for idx, config, jit_kernel, error in unit_results:
                         if error is not None:
-                            if isinstance(error, AutotuneResourceFilterReject):
-                                for decision in error.decisions:
-                                    self._write_resource_filter_decision(idx, decision)
+                            if isinstance(error, AutotuneFilterReject):
+                                for decision in error.filter_decisions:
+                                    self._write_filter_decision(idx, decision)
                                 logger.info(
                                     "Filtered config %s at index %s during %s: %s (%s)",
-                                    self.configs[idx],
-                                    idx,
-                                    error.decision.stage,
-                                    error.decision.reason,
-                                    error.decision.details,
-                                )
-                                continue
-                            if isinstance(error, AutotuneQualityFilterReject):
-                                for decision in error.resource_decisions:
-                                    self._write_resource_filter_decision(idx, decision)
-                                for decision in error.quality_decisions:
-                                    self._write_quality_filter_decision(idx, decision)
-                                logger.info(
-                                    "Quality-filtered config %s at index %s during %s: %s (%s)",
                                     self.configs[idx],
                                     idx,
                                     error.decision.stage,
@@ -1624,10 +1558,8 @@ class AutoTuner:
                             logger.debug(f"Compilation failed for config {self.configs[idx]} at index {idx} with error: {error}")
                             continue
                         assert jit_kernel is not None
-                        for decision in getattr(jit_kernel, "_resource_filter_decisions", []) or []:
-                            self._write_resource_filter_decision(idx, decision)
-                        for decision in getattr(jit_kernel, "_quality_filter_decisions", []) or []:
-                            self._write_quality_filter_decision(idx, decision)
+                        for decision in getattr(jit_kernel, "_filter_decisions", []) or []:
+                            self._write_filter_decision(idx, decision)
                         _enqueue_benchmark_task(jit_kernel=jit_kernel, config=config, idx=idx)
 
                 _drain_benchmark_results(progress_bar=progress_bar, block=False)
@@ -1724,7 +1656,7 @@ class AutoTuneImpl(Generic[_P, _T]):
     early_stop: bool = False
     early_stop_factor: float = 2.0
     resource_filter: bool | dict[str, Any] | AutotuneResourceFilterConfig | None = None
-    quality_filter: bool | dict[str, Any] | AutotuneQualityFilterConfig | None = None
+    filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None
 
     def __post_init__(self):
         self._tuner_cache = {}
@@ -1780,7 +1712,7 @@ class AutoTuneImpl(Generic[_P, _T]):
                 pass_configs=self.jit_impl.pass_configs,
             )
             .set_resource_filter_args(self.resource_filter)
-            .set_quality_filter_args(self.quality_filter)
+            .set_filter_args(self.filter)
         )
         autotuner.run = partial(
             autotuner.run,
@@ -1865,7 +1797,7 @@ def autotune(  # This is the new public interface
     early_stop: bool = False,
     early_stop_factor: float = 2.0,
     resource_filter: bool | dict[str, Any] | AutotuneResourceFilterConfig | None = None,
-    quality_filter: bool | dict[str, Any] | AutotuneQualityFilterConfig | None = None,
+    filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None,
 ):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
@@ -1945,7 +1877,7 @@ def autotune(  # This is the new public interface
                 early_stop=early_stop,
                 early_stop_factor=early_stop_factor,
                 resource_filter=resource_filter,
-                quality_filter=quality_filter,
+                filter=filter,
             )
 
         return decorator

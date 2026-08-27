@@ -211,7 +211,7 @@ if not env.is_light_import():
     from .autotuner import (  # noqa: F401
         autotune,
         AutotuneResourceFilterConfig,
-        AutotuneQualityFilterConfig,
+        AutotuneFilterConfig,
     )
     from .transform import PassConfigKey  # noqa: F401
     from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
