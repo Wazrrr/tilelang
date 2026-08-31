@@ -8,6 +8,10 @@ from .common import (  # noqa: F401
     FilterVerdict,
     KernelType,
 )
+from .classifier import (  # noqa: F401
+    KernelClassification,
+    classify_kernel_filter_info,
+)
 from .launch import (  # noqa: F401
     LaunchResourceInfo,
     extract_launch_resource_info,
@@ -27,8 +31,6 @@ from .verify import (  # noqa: F401
     AutotuneFilterResult,
     AutotuneFilterReject,
     CudaKernelFilterInfo,
-    KernelClassification,
-    classify_kernel_filter_info,
     evaluate_post_compile_filter,
     evaluate_pre_compile_filter,
     extract_cuda_function_source,

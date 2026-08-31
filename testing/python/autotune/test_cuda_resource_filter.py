@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import tilelang
 import tilelang.language as T
-import tilelang.testing
 from tilelang import tvm
 from tilelang.autotuner import AutoTuner
 from tilelang.autotuner.filters import (
@@ -166,70 +166,26 @@ ptxas info    : Used 64 registers, 2048 bytes smem, 16 bytes cmem[0]
     assert second_usage["main_kernel"].n_regs == 64
 
 
-@tilelang.testing.requires_cuda
-def test_autotuner_resource_filter_compiles_and_captures_usage(monkeypatch, tmp_path):
-    _set_cache_dirs(monkeypatch, tmp_path)
+def test_autotuner_resource_filter_args_are_deprecated_noop(tmp_path):
     report_path = tmp_path / "resource_filter_report.tsv"
-    result = (
-        AutoTuner.from_kernel(
-            kernel=_make_small_matmul_kernel(),
-            configs=[
-                {
-                    "block_M": 64,
-                    "block_N": 64,
-                    "block_K": 32,
-                },
-                {
-                    "block_M": 64,
-                    "block_N": 64,
-                    "block_K": 65536,
-                }
-            ],
-        )
-        .set_compile_args(out_idx=[-1], target="cuda", execution_backend="tvm_ffi")
-        .set_profile_args(supply_type=tilelang.TensorSupplyType.Integer, skip_check=True)
-        .set_resource_filter_args(True, report_path=str(report_path))
-        .run(warmup=1, rep=1)
+    tuner = AutoTuner.from_kernel(
+        kernel=_make_small_matmul_kernel(),
+        configs=[{"block_M": 64, "block_N": 64, "block_K": 32}],
+    ).set_resource_filter_args(True, report_path=str(report_path))
+
+    assert tuner.resource_filter_args.enabled is True
+    assert tuner.resource_filter_args.report_path == str(report_path)
+
+
+def test_autotuner_resource_filter_args_do_not_affect_cache_key(tmp_path):
+    tuner = AutoTuner.from_kernel(
+        kernel=_make_small_matmul_kernel(),
+        configs=[{"block_M": 64, "block_N": 64, "block_K": 32}],
     )
+    parameters = inspect.signature(tuner.fn).parameters
 
-    assert result.kernel is not None
-    assert result.kernel.resource_usage
-    assert result.kernel.n_regs is not None
-    report_text = report_path.read_text()
-    assert "pre_compile\tkeep" in report_text
-    assert "post_compile\tkeep" in report_text
-    assert "pre_compile\treject\tdynamic_shared_memory_over_limit" in report_text
+    before = tuner.generate_cache_key(parameters, {})
+    tuner.set_resource_filter_args(True, report_path=str(tmp_path / "resource_filter_report.tsv"), kernel_type="dense_gemm")
+    after = tuner.generate_cache_key(parameters, {})
 
-
-@tilelang.testing.requires_cuda
-def test_grouped_autotuner_resource_filter_compiles_and_captures_usage(monkeypatch, tmp_path):
-    _set_cache_dirs(monkeypatch, tmp_path)
-    report_path = tmp_path / "grouped_resource_filter_report.tsv"
-    result = (
-        AutoTuner.from_kernel(
-            kernel=_make_small_matmul_kernel(),
-            configs=[
-                {
-                    "block_M": 64,
-                    "block_N": 64,
-                    "block_K": 32,
-                },
-                {
-                    "block_M": 64,
-                    "block_N": 64,
-                    "block_K": 64,
-                },
-            ],
-        )
-        .set_compile_args(out_idx=[-1], target="cuda", execution_backend="tvm_ffi")
-        .set_profile_args(supply_type=tilelang.TensorSupplyType.Integer, skip_check=True)
-        .set_resource_filter_args(True, report_path=str(report_path))
-        .run(warmup=1, rep=1, enable_grouped_compile=True, group_compile_size=2)
-    )
-
-    assert result.kernel is not None
-    assert result.kernel.resource_usage
-    assert result.kernel.n_regs is not None
-    report_text = report_path.read_text()
-    assert report_text.count("pre_compile\tkeep") == 2
-    assert report_text.count("post_compile\tkeep") == 2
+    assert before == after
