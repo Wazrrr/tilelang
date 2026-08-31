@@ -46,7 +46,7 @@ from tilelang.autotuner.filters import (
 from tilelang.contrib import cuda_resource_info
 from tilelang.contrib.cuda_resource_info import pop_recorded as cuda_pop_recorded
 from tilelang.contrib.cuda_resource_info import reset_recorder as cuda_reset_recorder
-from tilelang.engine.lower import device_codegen, host_codegen, lower_to_host_device_ir
+from tilelang.engine.lower import device_codegen, device_codegen_without_compile, host_codegen, lower_to_host_device_ir
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.utils.language import get_prim_func_name
@@ -708,12 +708,26 @@ class AutoTuner:
 
         launch_infos = extract_launch_resource_info(device_mod)
         filter_decisions = []
+        kernel_source = ""
         if filter_args.enabled:
+            source_instruments, source_timing_inst = self._create_pass_instruments(pass_configs)
+            with (
+                report_pass_timing_on_exit(
+                    source_timing_inst,
+                    context=f"stage=autotune-filter-pre-compile-codegen, config={idx}, kernel={func_name}",
+                ),
+                tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=source_instruments),
+                normalized_target,
+            ):
+                source_mod = device_codegen_without_compile(device_mod, normalized_target)
+            kernel_source = source_mod.inspect_source()
+
             decision = evaluate_pre_compile_filter(
                 launch_infos=launch_infos,
                 device_mod=device_mod,
                 config=config_arg,
                 filter_config=filter_args,
+                kernel_source=kernel_source,
             )
             filter_decisions.append(decision)
             if not decision.keep:
@@ -741,7 +755,7 @@ class AutoTuner:
         finally:
             resource_usage = cuda_pop_recorded() if capture_cuda_resources else {}
 
-        kernel_source = device_rt_mod.inspect_source()
+        kernel_source = kernel_source or device_rt_mod.inspect_source()
         if filter_args.enabled:
             decision = evaluate_post_compile_filter(
                 launch_infos=launch_infos,

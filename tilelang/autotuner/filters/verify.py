@@ -442,8 +442,14 @@ def extract_pre_compile_filter_info(
     device_mod: Any,
     launch_info: LaunchResourceInfo,
     config: dict[str, Any] | None = None,
+    kernel_source: str | None = None,
 ) -> CudaKernelFilterInfo:
-    """Extract exact filter features visible in lowered IR before CUDA codegen."""
+    """Extract filter features visible before the real CUDA device compile.
+
+    The first half comes from lowered device IR.  When ``kernel_source`` is
+    available, it is the CUDA emitted with ``compile_device=False`` and is still
+    a pre-NVCC signal.
+    """
     config = config or {}
     wgmma_shapes = _extract_pre_compile_wgmma_shapes(device_mod, function_name)
     op_names = _extract_pre_compile_op_names(device_mod, function_name)
@@ -454,7 +460,7 @@ def extract_pre_compile_filter_info(
     )
     detected_kernel_type = _detect_pre_compile_kernel_type(traits)
     config_metrics = _extract_config_filter_metrics(config, launch_info)
-    return CudaKernelFilterInfo(
+    info = CudaKernelFilterInfo(
         function_name=function_name,
         source_available=False,
         detected_kernel_type=detected_kernel_type,
@@ -467,6 +473,17 @@ def extract_pre_compile_filter_info(
         tile_area=config_metrics["tile_area"],
         num_stages=config_metrics["num_stages"],
     )
+    if not kernel_source:
+        return info
+
+    source_info = extract_cuda_kernel_filter_info(
+        function_name=function_name,
+        kernel_source=kernel_source,
+        launch_info=launch_info,
+        raw_usage=None,
+        config=config,
+    )
+    return _combine_pre_compile_filter_info(info, source_info)
 
 
 def evaluate_pre_compile_filter(
@@ -474,8 +491,9 @@ def evaluate_pre_compile_filter(
     device_mod: Any,
     config: dict[str, Any],
     filter_config: AutotuneFilterConfig,
+    kernel_source: str | None = None,
 ) -> AutotuneFilterResult:
-    """Evaluate filter targets that are exact before CUDA codegen."""
+    """Evaluate filter targets that are exact before the real CUDA compile."""
     if not filter_config.enabled:
         return AutotuneFilterResult.keep_decision("filter_disabled", stage="pre_compile")
 
@@ -485,6 +503,7 @@ def evaluate_pre_compile_filter(
             device_mod=device_mod,
             launch_info=launch,
             config=config,
+            kernel_source=kernel_source,
         )
         for launch in launch_infos
     ]
@@ -517,6 +536,64 @@ def evaluate_post_compile_filter(
         )
 
     return _evaluate_filter_infos(infos, filter_config, stage="post_compile")
+
+
+def _combine_pre_compile_filter_info(
+    ir_info: CudaKernelFilterInfo,
+    source_info: CudaKernelFilterInfo,
+) -> CudaKernelFilterInfo:
+    source_type = source_info.detected_kernel_type
+    detected_kernel_type = (
+        source_type if source_type not in ("auto", "generic") else ir_info.detected_kernel_type
+    )
+    wgmma_shapes = _merge_wgmma_shapes(ir_info.wgmma_shapes, source_info.wgmma_shapes)
+    return CudaKernelFilterInfo(
+        function_name=ir_info.function_name,
+        source_available=source_info.source_available,
+        detected_kernel_type=detected_kernel_type,
+        detected_kernel_traits=_merge_names(ir_info.detected_kernel_traits, source_info.detected_kernel_traits),
+        classification_evidence=_merge_names(ir_info.classification_evidence, source_info.classification_evidence),
+        fragment_array_elements=source_info.fragment_array_elements,
+        c_local_floats=source_info.c_local_floats,
+        quant_dequant_elements_per_thread=source_info.quant_dequant_elements_per_thread,
+        sparse_mask_access_count=source_info.sparse_mask_access_count,
+        attention_score_elements_per_thread=source_info.attention_score_elements_per_thread,
+        attention_output_elements_per_thread=source_info.attention_output_elements_per_thread,
+        attention_softmax_elements_per_thread=source_info.attention_softmax_elements_per_thread,
+        attention_state_elements_per_thread=source_info.attention_state_elements_per_thread,
+        attention_cast_elements_per_thread=source_info.attention_cast_elements_per_thread,
+        wgmma_shapes=wgmma_shapes,
+        max_wgmma_n=max((shape[1] for shape in wgmma_shapes), default=None),
+        max_k_loop_iterations=(
+            source_info.max_k_loop_iterations
+            if source_info.max_k_loop_iterations is not None
+            else ir_info.max_k_loop_iterations
+        ),
+        tma_load_count=source_info.tma_load_count,
+        tma_store_count=source_info.tma_store_count,
+        stmatrix_count=source_info.stmatrix_count,
+        mbarrier_count=source_info.mbarrier_count,
+        syncthreads_count=source_info.syncthreads_count,
+        output_elements_per_thread=(
+            ir_info.output_elements_per_thread
+            if ir_info.output_elements_per_thread is not None
+            else source_info.output_elements_per_thread
+        ),
+        tile_area=ir_info.tile_area if ir_info.tile_area is not None else source_info.tile_area,
+        num_stages=ir_info.num_stages if ir_info.num_stages is not None else source_info.num_stages,
+    )
+
+
+def _merge_wgmma_shapes(*groups: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
+    merged: list[tuple[int, int, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for group in groups:
+        for shape in group:
+            if shape in seen:
+                continue
+            merged.append(shape)
+            seen.add(shape)
+    return merged
 
 
 def _evaluate_filter_infos(
@@ -561,6 +638,8 @@ def _evaluate_filter_infos(
 _ATTENTION_KERNEL_TYPE_TAGS = frozenset({"attention"})
 _QUANTIZED_GEMM_KERNEL_TYPE_TAGS = frozenset({"quantized_gemm"})
 _SPARSE_GEMM_KERNEL_TYPE_TAGS = frozenset({"sparse_gemm"})
+_PRE_COMPILE_STAGES = frozenset({"pre_compile"})
+_POST_COMPILE_STAGES = frozenset({"post_compile"})
 
 
 class _LimitFilterRule(AutotuneVerifyRule):
@@ -577,6 +656,7 @@ class _LimitFilterRule(AutotuneVerifyRule):
         match_kernel_type_tags: frozenset[str] | None = None,
         exclude_kernel_type_tags: frozenset[str] = frozenset(),
         skip_when_config_attr_set: str | None = None,
+        stages: frozenset[str] | None = None,
     ):
         self.name = name
         self.layer = layer
@@ -588,6 +668,7 @@ class _LimitFilterRule(AutotuneVerifyRule):
         self.match_kernel_type_tags = match_kernel_type_tags
         self.exclude_kernel_type_tags = exclude_kernel_type_tags
         self.skip_when_config_attr_set = skip_when_config_attr_set
+        self.stages = stages
 
     def check(self, context: AutotuneRuleContext) -> list[dict[str, Any]]:
         if self.skip_when_config_attr_set is not None and getattr(context.config, self.skip_when_config_attr_set) is not None:
@@ -615,12 +696,14 @@ class _TmaTinyTileRule(AutotuneVerifyRule):
         reason: str,
         match_kernel_type_tags: frozenset[str] | None = None,
         exclude_kernel_type_tags: frozenset[str] = frozenset(),
+        stages: frozenset[str] | None = None,
     ):
         self.name = name
         self.finding_kind = finding_kind
         self.reason = reason
         self.match_kernel_type_tags = match_kernel_type_tags
         self.exclude_kernel_type_tags = exclude_kernel_type_tags
+        self.stages = stages
 
     def check(self, context: AutotuneRuleContext) -> list[dict[str, Any]]:
         config = context.config
@@ -651,6 +734,7 @@ class _SparseMaskRequiredRule(AutotuneVerifyRule):
     layer: RuleLayer = "kernel"
     finding_kind: RuleFindingKind = "violation"
     match_kernel_type_tags = _SPARSE_GEMM_KERNEL_TYPE_TAGS
+    stages = _PRE_COMPILE_STAGES
 
     def check(self, context: AutotuneRuleContext) -> list[dict[str, Any]]:
         config = context.config
@@ -671,6 +755,7 @@ class _SparseMaskAdvisoryRule(AutotuneVerifyRule):
     layer: RuleLayer = "kernel"
     finding_kind: RuleFindingKind = "advisory"
     match_kernel_type_tags = _SPARSE_GEMM_KERNEL_TYPE_TAGS
+    stages = _PRE_COMPILE_STAGES
 
     def check(self, context: AutotuneRuleContext) -> list[dict[str, Any]]:
         config = context.config
@@ -698,6 +783,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_attention_spills",
             reason="attention_spills_over_limit",
             match_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_POST_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="attention.local_memory",
@@ -708,6 +794,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_attention_local_size_bytes",
             reason="attention_local_memory_over_limit",
             match_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_POST_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="common.spills",
@@ -718,6 +805,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_spills",
             reason="spills_over_limit",
             exclude_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_POST_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="common.local_memory",
@@ -728,6 +816,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_local_size_bytes",
             reason="local_memory_over_limit",
             exclude_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_POST_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="common.registers",
@@ -737,6 +826,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             enabled_attr="check_registers",
             limit_attr="max_registers_per_thread",
             reason="registers_per_thread_over_limit",
+            stages=_POST_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="attention.state_elements",
@@ -747,6 +837,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_attention_state_elements_per_thread",
             reason="attention_state_elements_per_thread_over_limit",
             match_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="gemm.c_local",
@@ -757,6 +848,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_c_local_floats",
             reason="c_local_floats_over_limit",
             exclude_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="primitive.output_elements_per_thread",
@@ -767,6 +859,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_output_elements_per_thread",
             reason="output_elements_per_thread_over_limit",
             exclude_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="primitive.wgmma_n",
@@ -776,6 +869,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             enabled_attr="check_wgmma_n",
             limit_attr="max_wgmma_n",
             reason="wgmma_n_over_limit",
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="primitive.k_loop",
@@ -785,6 +879,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             enabled_attr="check_k_loop",
             limit_attr="max_k_loop_iterations",
             reason="k_loop_iterations_over_limit",
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="primitive.tma_store_count",
@@ -795,12 +890,14 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_tma_store_count",
             reason="tma_store_count_over_limit",
             exclude_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _TmaTinyTileRule(
             name="primitive.tma_tiny_tile",
             finding_kind="violation",
             reason="tma_tiny_tile_limit",
             exclude_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="quantized_gemm.dequant_elements",
@@ -811,6 +908,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="max_quant_dequant_elements_per_thread",
             reason="quant_dequant_elements_per_thread_over_limit",
             match_kernel_type_tags=_QUANTIZED_GEMM_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _SparseMaskRequiredRule(),
         _LimitFilterRule(
@@ -822,6 +920,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="advisory_max_attention_spills",
             reason="attention_spills_over_advisory_limit",
             match_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_POST_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="attention.local_memory_advisory",
@@ -832,12 +931,14 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="advisory_max_attention_local_size_bytes",
             reason="attention_local_memory_over_advisory_limit",
             match_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_POST_COMPILE_STAGES,
         ),
         _TmaTinyTileRule(
             name="attention.tma_tiny_tile_advisory",
             finding_kind="advisory",
             reason="tma_tiny_tile_advisory_limit",
             match_kernel_type_tags=_ATTENTION_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="primitive.wgmma_n_advisory",
@@ -848,6 +949,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="advisory_max_wgmma_n",
             reason="wgmma_n_over_advisory_limit",
             skip_when_config_attr_set="max_wgmma_n",
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="primitive.k_loop_advisory",
@@ -858,6 +960,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="advisory_max_k_loop_iterations",
             reason="k_loop_iterations_over_advisory_limit",
             skip_when_config_attr_set="max_k_loop_iterations",
+            stages=_PRE_COMPILE_STAGES,
         ),
         _LimitFilterRule(
             name="quantized_gemm.dequant_elements_advisory",
@@ -868,6 +971,7 @@ def _make_default_filter_rule_registry() -> AutotuneRuleRegistry:
             limit_attr="advisory_max_quant_dequant_elements_per_thread",
             reason="quant_dequant_elements_per_thread_over_advisory_limit",
             match_kernel_type_tags=_QUANTIZED_GEMM_KERNEL_TYPE_TAGS,
+            stages=_PRE_COMPILE_STAGES,
         ),
         _SparseMaskAdvisoryRule(),
     ):

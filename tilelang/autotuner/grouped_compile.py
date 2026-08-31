@@ -16,7 +16,7 @@ from tvm.tirx import PrimFunc
 from tilelang import env
 from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
-from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
+from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, device_codegen_without_compile, host_codegen
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
@@ -100,11 +100,24 @@ def compile_grouped_unit_tvm_ffi(
             launch_infos = extract_launch_resource_info(device_mod)
             filter_decisions = []
             if filter_config.enabled:
+                source_instruments, source_timing_inst = create_pass_instruments()
+                with (
+                    report_pass_timing_on_exit(
+                        source_timing_inst,
+                        context=f"stage=grouped-pre-compile-codegen, config={idx}, kernel={unique_symbol}",
+                    ),
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=source_instruments),
+                    normalized_target,
+                ):
+                    source_mod = device_codegen_without_compile(device_mod, normalized_target)
+                kernel_source = source_mod.inspect_source()
+
                 decision = evaluate_pre_compile_filter(
                     launch_infos=launch_infos,
                     device_mod=device_mod,
                     config=config_arg,
                     filter_config=filter_config,
+                    kernel_source=kernel_source,
                 )
                 filter_decisions.append(decision)
                 if not decision.keep:
