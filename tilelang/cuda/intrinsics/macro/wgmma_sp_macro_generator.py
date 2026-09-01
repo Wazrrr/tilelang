@@ -95,6 +95,13 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         self.wgmma_inst_n = inst_n
         self.wgmma_prefix = f"m{inst_m}n{inst_n}k{inst_k}"
 
+    @property
+    def wgmma_accum_regs(self) -> int:
+        """Number of 32-bit registers in one thread's accumulator fragment."""
+        accum_elements = self.warp_rows * self.warp_cols * self.local_size_out
+        accum_bits = DataType(self.accum_dtype).bits
+        return (accum_elements * accum_bits + 31) // 32
+
     # -- Descriptor parameter computation (pure Python, no TIR) --
 
     def compute_wgmma_a_desc_params(self, A_region: BufferRegion) -> WGMMADescriptorParams:
@@ -175,8 +182,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         a_is_sliced = not isinstance(a_slice_byte_offset, int) or a_slice_byte_offset != 0
         b_is_sliced = not isinstance(b_slice_byte_offset, int) or b_slice_byte_offset != 0
 
-        accum_bits = DataType(accum_dtype).bits
-        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
+        accum_regs = self.wgmma_accum_regs
 
         # for example, if [n, k] where k is 128, we should split it into 2 atoms
         # where max specially handles the case when n_dim is 8.
@@ -301,7 +307,6 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_dtype_abbrv = self.b_dtype_abbrv
         accum_dtype = self.accum_dtype
         accum_dtype_abbrv = self.accum_dtype_abbrv
-        m_dim = self.block_row_warps * self.warp_row_tiles
         warp_rows, warp_cols = self.warp_rows, self.warp_cols
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.warp_k, self.block_col_warps * self.warp_col_tiles
@@ -313,9 +318,8 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
         elems_in_bytes = DataType(self.a_dtype).bits // 8
         a_bits = DataType(self.a_dtype).bits
-        accum_bits = DataType(accum_dtype).bits
         a_regs = ((warp_rows * local_size_a * (k_dim // micro_size_k)) * a_bits + 31) // 32
-        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
+        accum_regs = self.wgmma_accum_regs
         b_is_k_major = self.b_transposed
 
         b_params = self.compute_wgmma_b_desc_params(B_region)

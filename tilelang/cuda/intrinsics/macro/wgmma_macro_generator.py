@@ -384,10 +384,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     @property
     def wgmma_accum_regs(self) -> int:
-        """Number of 32-bit registers occupied by the accumulator fragment."""
-        m_dim = self.block_row_warps * self.warp_row_tiles
+        """Number of 32-bit registers in one thread's accumulator fragment."""
+        accum_elements = self.warp_rows * self.warp_cols * self.local_size_out
         accum_bits = DataType(self.accum_dtype).bits
-        return ((m_dim // 64) * self.warp_cols * self.local_size_out * accum_bits + 31) // 32
+        return (accum_elements * accum_bits + 31) // 32
 
     # -- Descriptor parameter computation (pure Python, no TIR) --
 

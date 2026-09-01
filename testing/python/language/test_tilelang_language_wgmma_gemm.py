@@ -11,7 +11,66 @@ from tilelang.layout.swizzle import (
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
 )
+from tilelang.cuda.language.intrinsics import (
+    WGMMATensorCoreIntrinEmitter,
+    WGSparseTensorCoreIntrinEmitter,
+)
 from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import compute_gmma_descriptor
+
+
+@pytest.mark.parametrize(
+    "emitter_cls,k_arg",
+    [
+        (WGMMATensorCoreIntrinEmitter, "chunk"),
+        (WGSparseTensorCoreIntrinEmitter, "warp_k"),
+    ],
+    ids=["dense", "sparse"],
+)
+@pytest.mark.parametrize("accum_dtype,accum_bits", [("float32", 32), ("float16", 16)])
+@pytest.mark.parametrize(
+    "block_row_warps,block_col_warps,warp_row_tiles,warp_col_tiles,expected_elements",
+    [
+        (4, 1, 16, 8, 4),
+        (4, 1, 16, 256, 128),
+        (8, 1, 16, 256, 128),
+        (4, 2, 32, 128, 128),
+        (8, 2, 16, 128, 64),
+        (16, 1, 16, 64, 32),
+    ],
+)
+def test_wgmma_accumulator_register_count_is_per_thread(
+    emitter_cls,
+    k_arg,
+    accum_dtype,
+    accum_bits,
+    block_row_warps,
+    block_col_warps,
+    warp_row_tiles,
+    warp_col_tiles,
+    expected_elements,
+):
+    emitter = emitter_cls(
+        a_dtype="float16",
+        b_dtype="float16",
+        accum_dtype=accum_dtype,
+        block_row_warps=block_row_warps,
+        block_col_warps=block_col_warps,
+        warp_row_tiles=warp_row_tiles,
+        warp_col_tiles=warp_col_tiles,
+        **{k_arg: 32},
+    )
+
+    instruction_elements = (
+        (4 * warp_row_tiles // emitter.wgmma_inst_m)
+        * (warp_col_tiles // emitter.wgmma_inst_n)
+        * emitter.wgmma_inst_m
+        * emitter.wgmma_inst_n
+        // 128
+    )
+    expected_regs = (expected_elements * accum_bits + 31) // 32
+
+    assert instruction_elements == expected_elements
+    assert emitter.wgmma_accum_regs == expected_regs
 
 
 @pytest.mark.parametrize(
@@ -53,23 +112,23 @@ def test_compute_gmma_descriptor_same_layout_both_majors():
     assert pmn.swizzle_mode == SwizzleMode.SWIZZLE_128B
 
 
-def _make_wgmma_kernel(gemm_op):
+def _make_wgmma_kernel(gemm_op, *, m=64, n=64, k=16, accum_dtype=T.float16, threads=128):
     @T.prim_func
     def main(
-        A: T.Tensor((64, 16), T.float16),
-        B: T.Tensor((16, 64), T.float16),
-        D: T.Tensor((64, 64), T.float16),
+        A: T.Tensor((m, k), T.float16),
+        B: T.Tensor((k, n), T.float16),
+        D: T.Tensor((m, n), T.float16),
     ):
-        with T.Kernel(1, threads=128):
-            A_shared = T.alloc_shared((64, 16), T.float16)
-            B_shared = T.alloc_shared((16, 64), T.float16)
-            C_local = T.alloc_fragment((64, 64), T.float16)
+        with T.Kernel(1, threads=threads):
+            A_shared = T.alloc_shared((m, k), T.float16)
+            B_shared = T.alloc_shared((k, n), T.float16)
+            C_local = T.alloc_fragment((m, n), accum_dtype)
 
-            T.copy(A[0:64, 0:16], A_shared)
-            T.copy(B[0:16, 0:64], B_shared)
+            T.copy(A, A_shared)
+            T.copy(B, B_shared)
             gemm_op(A_shared, B_shared, C_local)
             T.wait_wgmma(0)
-            T.copy(C_local, D[0:64, 0:64])
+            T.copy(C_local, D)
 
     return main
 
@@ -96,6 +155,32 @@ def test_wgmma_gemm_dispatch_has_no_implicit_wait():
     )
 
     assert kernel.get_kernel_source().count("tl::wait_wgmma<0>();") == 1
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
+def test_wgmma_fence_count_is_independent_of_row_warpgroups():
+    kernel = tilelang.compile(
+        _make_wgmma_kernel(
+            lambda A, B, C: T.wgmma_gemm(
+                A,
+                B,
+                C,
+                policy=T.GemmWarpPolicy.FullRow,
+                clear_accum=True,
+            ),
+            m=128,
+            n=256,
+            accum_dtype=T.float32,
+            threads=256,
+        ),
+        target="cuda",
+    )
+    src = kernel.get_kernel_source()
+
+    assert src.count("warpgroup_fence_operand") == 2
+    assert ", 128);" in src
+    assert ", 256);" not in src
 
 
 @tilelang.testing.requires_cuda
