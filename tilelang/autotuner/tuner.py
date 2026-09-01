@@ -38,7 +38,6 @@ from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.autotuner.filters import (
     AutotuneFilterConfig,
     AutotuneFilterReject,
-    AutotuneResourceFilterConfig,
     evaluate_post_compile_filter,
     evaluate_pre_compile_filter,
     extract_launch_resource_info,
@@ -285,7 +284,6 @@ class AutoTuner:
         self.ref_input_tensors = None
         self.jit_compile = None
         self.jit_elaborate = None
-        self.resource_filter_args = AutotuneResourceFilterConfig()
         self.filter_args = AutotuneFilterConfig()
         self._filter_report_initialized = False
         self.benchmark_report_path: str | None = None
@@ -371,27 +369,6 @@ class AutoTuner:
 
         return self
 
-    def set_resource_filter_args(
-        self,
-        resource_filter: bool | dict[str, Any] | AutotuneResourceFilterConfig | None = None,
-        **kwargs: Any,
-    ):
-        """Accept deprecated CUDA resource-filtering arguments.
-
-        Hard launch-resource filtering is no longer part of autotune dispatch.
-        Use ``filter`` for PTXAS/source checks such as spills,
-        registers, and local memory.
-        """
-        config = AutotuneResourceFilterConfig.from_value(resource_filter)
-        if kwargs:
-            if resource_filter is None:
-                config = replace(config, enabled=True)
-            config = replace(config, **kwargs)
-        self.resource_filter_args = config
-        if config.enabled:
-            logger.warning("Autotune resource_filter is deprecated and ignored; use filter for resource-usage checks.")
-        return self
-
     def set_filter_args(
         self,
         filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None,
@@ -401,7 +378,7 @@ class AutoTuner:
 
         The pre-compile stage evaluates exact IR features before CUDA codegen.
         The post-compile stage evaluates exact PTXAS/source features such as
-        spills, local memory, C_local footprint, WGMMA shape, K-loop trip count,
+        spills, local memory, accumulator pressure, K-loop trip count,
         and TMA/store patterns.
         """
         config = AutotuneFilterConfig.from_value(filter)
@@ -1669,7 +1646,6 @@ class AutoTuneImpl(Generic[_P, _T]):
     do_not_specialize: tuple[str, ...] | list[str] | None = None
     early_stop: bool = False
     early_stop_factor: float = 2.0
-    resource_filter: bool | dict[str, Any] | AutotuneResourceFilterConfig | None = None
     filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None
 
     def __post_init__(self):
@@ -1725,7 +1701,6 @@ class AutoTuneImpl(Generic[_P, _T]):
                 verbose=self.jit_impl.verbose,
                 pass_configs=self.jit_impl.pass_configs,
             )
-            .set_resource_filter_args(self.resource_filter)
             .set_filter_args(self.filter)
         )
         autotuner.run = partial(
@@ -1810,7 +1785,6 @@ def autotune(  # This is the new public interface
     do_not_specialize: tuple[str, ...] | list[str] | None = None,
     early_stop: bool = False,
     early_stop_factor: float = 2.0,
-    resource_filter: bool | dict[str, Any] | AutotuneResourceFilterConfig | None = None,
     filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None,
 ):
     """
@@ -1890,7 +1864,6 @@ def autotune(  # This is the new public interface
                 do_not_specialize=do_not_specialize,
                 early_stop=early_stop,
                 early_stop_factor=early_stop_factor,
-                resource_filter=resource_filter,
                 filter=filter,
             )
 

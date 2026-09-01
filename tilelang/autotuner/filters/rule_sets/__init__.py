@@ -15,7 +15,7 @@ from tilelang.autotuner.filters.rules import AutotuneVerifyRule
 
 
 def make_default_filter_rules() -> list[AutotuneVerifyRule]:
-    """Return built-in rules in the same evaluation order as the old registry."""
+    """Return built-in rules in stable evaluation order."""
     return [
         *make_attention_post_compile_filter_rules(),
         *make_common_filter_rules(),

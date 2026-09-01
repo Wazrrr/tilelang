@@ -153,33 +153,28 @@ def _json_cell(row: dict[str, str], key: str) -> dict:
 
 
 def summarize_filter_effect(out_dir: Path, total_configs: int) -> dict:
-    resource_rows = _read_tsv(out_dir / "resource.tsv")
-    quality_rows = _read_tsv(out_dir / "quality.tsv")
+    filter_rows = _read_tsv(out_dir / "filter.tsv")
     perf_rows = _read_tsv(out_dir / "perf.tsv")
 
-    resource_by_stage = Counter((row["stage"], row["verdict"]) for row in resource_rows)
-    resource_reasons = Counter((row["stage"], row["verdict"], row["reason"]) for row in resource_rows)
-    quality_by_verdict = Counter(row["verdict"] for row in quality_rows)
-    quality_reasons = Counter(row["reason"] for row in quality_rows)
-    quality_violations = Counter()
-    quality_advisories = Counter()
-    for row in quality_rows:
+    filter_by_stage = Counter((row["stage"], row["verdict"]) for row in filter_rows)
+    filter_reasons = Counter((row["stage"], row["verdict"], row["reason"]) for row in filter_rows)
+    filter_violations = Counter()
+    filter_advisories = Counter()
+    for row in filter_rows:
         details = _json_cell(row, "details")
         for violation in details.get("violations", []) or []:
-            quality_violations[str(violation.get("reason", ""))] += 1
+            filter_violations[str(violation.get("reason", ""))] += 1
         for advisory in details.get("advisories", []) or []:
-            quality_advisories[str(advisory.get("reason", ""))] += 1
+            filter_advisories[str(advisory.get("reason", ""))] += 1
 
     perf_statuses = Counter(row["status"] for row in perf_rows)
-    pre_seen = {int(row["index"]) for row in resource_rows if row["stage"] == "pre_compile"}
-    post_seen = {int(row["index"]) for row in resource_rows if row["stage"] == "post_compile"}
-    pre_reject = {int(row["index"]) for row in resource_rows if row["stage"] == "pre_compile" and row["verdict"] == "reject"}
-    post_reject = {int(row["index"]) for row in resource_rows if row["stage"] == "post_compile" and row["verdict"] == "reject"}
-    quality_seen = {int(row["index"]) for row in quality_rows}
-    quality_reject = {int(row["index"]) for row in quality_rows if row["verdict"] == "reject"}
+    pre_seen = {int(row["index"]) for row in filter_rows if row["stage"] == "pre_compile"}
+    post_seen = {int(row["index"]) for row in filter_rows if row["stage"] == "post_compile"}
+    pre_reject = {int(row["index"]) for row in filter_rows if row["stage"] == "pre_compile" and row["verdict"] == "reject"}
+    post_reject = {int(row["index"]) for row in filter_rows if row["stage"] == "post_compile" and row["verdict"] == "reject"}
     benchmark_seen = {int(row["index"]) for row in perf_rows}
     benchmark_ok = {int(row["index"]) for row in perf_rows if row["status"] == "ok"}
-    compile_or_lower_failed = set(range(total_configs)) - pre_reject - post_reject - quality_seen
+    compile_or_lower_failed = (set(range(total_configs)) - pre_seen) | ((pre_seen - pre_reject) - post_seen)
 
     return {
         "total_configs": total_configs,
@@ -190,25 +185,20 @@ def summarize_filter_effect(out_dir: Path, total_configs: int) -> dict:
             "post_compile_seen": len(post_seen),
             "post_compile_filtered": len(post_reject),
             "remaining_after_post_compile": total_configs - len(pre_reject) - len(post_reject),
-            "quality_seen": len(quality_seen),
-            "quality_filtered": len(quality_reject),
-            "remaining_after_quality": total_configs - len(pre_reject) - len(post_reject) - len(quality_reject),
             "benchmarked": len(benchmark_seen),
             "benchmark_ok": len(benchmark_ok),
             "compile_or_lower_failed": len(compile_or_lower_failed),
         },
-        "resource_stage_verdicts": {str(key): value for key, value in resource_by_stage.items()},
-        "resource_reasons": {str(key): value for key, value in resource_reasons.items()},
-        "quality_verdicts": dict(quality_by_verdict),
-        "quality_reasons": dict(quality_reasons),
-        "quality_violations": dict(quality_violations),
-        "quality_advisories": dict(quality_advisories),
+        "filter_stage_verdicts": {str(key): value for key, value in filter_by_stage.items()},
+        "filter_reasons": {str(key): value for key, value in filter_reasons.items()},
+        "filter_violations": dict(filter_violations),
+        "filter_advisories": dict(filter_advisories),
         "benchmark_statuses": dict(perf_statuses),
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Survey exact post-compile quality targets for flash attention.")
+    parser = argparse.ArgumentParser(description="Survey autotune filter targets for flash attention.")
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--heads", type=int, default=16)
     parser.add_argument("--seq-q", type=int, default=1024)
@@ -219,7 +209,7 @@ def main() -> None:
     parser.add_argument("--rep", type=int, default=3)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--group-compile-size", type=int, default=8)
-    parser.add_argument("--quality-action", choices=["reject", "report"], default="report")
+    parser.add_argument("--filter-action", choices=["reject", "report"], default="report")
     parser.add_argument("--max-configs", type=int, default=None, help="Debug only: cap the config space after generation.")
     args = parser.parse_args()
 
@@ -239,11 +229,10 @@ def main() -> None:
             pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
         )
         .set_profile_args(supply_type=tilelang.TensorSupplyType.Integer, skip_check=True)
-        .set_resource_filter_args(True, report_path=str(args.out_dir / "resource.tsv"), kernel_type="attention")
-        .set_quality_filter_args(
+        .set_filter_args(
             True,
-            action=args.quality_action,
-            report_path=str(args.out_dir / "quality.tsv"),
+            action=args.filter_action,
+            report_path=str(args.out_dir / "filter.tsv"),
             kernel_type="attention",
         )
         .set_benchmark_report_path(args.out_dir / "perf.tsv")
@@ -261,7 +250,7 @@ def main() -> None:
         )
     except Exception as exc:
         tuner_error = f"{type(exc).__name__}: {exc}"
-    rows, violations, advisories = summarize_report(args.out_dir / "quality.tsv")
+    rows, violations, advisories = summarize_report(args.out_dir / "filter.tsv")
     summary = summarize_filter_effect(args.out_dir, len(configs))
     summary["best_config"] = None if result is None else result.config
     summary["best_latency_ms"] = None if result is None else result.latency
@@ -272,9 +261,9 @@ def main() -> None:
     print(f"best_config={summary['best_config']}")
     print(f"best_latency_ms={summary['best_latency_ms']}")
     print(f"elapsed_s={summary['elapsed_s']:.3f}")
-    print(f"quality_rows={rows}")
-    print(f"quality_violations={dict(sorted(violations.items()))}")
-    print(f"quality_advisories={dict(sorted(advisories.items()))}")
+    print(f"filter_rows={rows}")
+    print(f"filter_violations={dict(sorted(violations.items()))}")
+    print(f"filter_advisories={dict(sorted(advisories.items()))}")
     print(f"stage_reductions={summary['stage_reductions']}")
     if tuner_error is not None:
         print(f"tuner_error={tuner_error}")

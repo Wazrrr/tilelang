@@ -95,6 +95,7 @@ def make_gemm_filter_rules() -> list[AutotuneVerifyRule]:
             limit_attr="max_c_local_floats",
             reason="c_local_floats_over_limit",
             exclude_kernel_type_tags=ATTENTION_KERNEL_TYPE_TAGS,
+            exclude_kernel_traits=frozenset({"uses_wgmma"}),
             stages=PRE_COMPILE_STAGES,
         ),
     ]

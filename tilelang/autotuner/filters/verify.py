@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 from tvm.tirx.stmt_functor import post_order_visit
 
@@ -12,7 +12,7 @@ from tilelang.autotuner.filters.common import (
     AutotuneBaseFilterConfig,
     AutotuneFilterDecision,
     FilterAction,
-    FilterVerdict,
+    FilterStage,
     KernelType,
 )
 from tilelang.autotuner.filters.classifier import (
@@ -37,10 +37,10 @@ from tilelang.autotuner.filters.rules import (
     RuleFindingKind,
     RuleLayer,
 )
-
-FilterEvalStage = Literal["pre_compile", "post_compile"]
-FilterEvalVerdict = FilterVerdict
-FilterEvalAction = FilterAction
+from tilelang.autotuner.filters.wgmma_pressure import (
+    WgmmaRegisterPressureInfo,
+    analyze_wgmma_register_pressure,
+)
 
 __all__ = [
     "AutotuneFilterConfig",
@@ -48,6 +48,7 @@ __all__ = [
     "AutotuneFilterResult",
     "CudaKernelFilterInfo",
     "KernelClassification",
+    "WgmmaRegisterPressureInfo",
     "classify_kernel_filter_info",
     "evaluate_post_compile_filter",
     "evaluate_pre_compile_filter",
@@ -66,8 +67,8 @@ class AutotuneFilterConfig(AutotuneBaseFilterConfig):
 
     Rules are classified as common, primitive-specific, or kernel-specific.
     The verifier rejects or reports candidates whose pre-compile IR, emitted CUDA,
-    or PTXAS usage has exact performance risk signals such as spills, local memory,
-    high accumulator footprint, or bad WGMMA/TMA shape choices.
+    or PTXAS usage has performance risk signals such as spills, local memory,
+    high accumulator pressure, or inefficient TMA/K-loop choices.
     """
 
     enabled: bool = False
@@ -89,8 +90,7 @@ class AutotuneFilterConfig(AutotuneBaseFilterConfig):
     check_output_elements_per_thread: bool = True
     max_output_elements_per_thread: int | None = 256
 
-    check_wgmma_n: bool = True
-    max_wgmma_n: int | None = 128
+    check_wgmma_register_pressure: bool = True
 
     check_k_loop: bool = True
     max_k_loop_iterations: int | None = 64
@@ -151,7 +151,7 @@ class CudaKernelFilterInfo:
     attention_state_elements_per_thread: int | None = None
     attention_cast_elements_per_thread: int | None = None
     wgmma_shapes: list[tuple[int, int, int]] = field(default_factory=list)
-    max_wgmma_n: int | None = None
+    wgmma_register_pressure: WgmmaRegisterPressureInfo | None = None
     max_k_loop_iterations: int | None = None
     tma_load_count: int = 0
     tma_store_count: int = 0
@@ -172,6 +172,8 @@ class CudaKernelFilterInfo:
         data["detected_kernel_traits"] = list(self.detected_kernel_traits)
         data["classification_evidence"] = list(self.classification_evidence)
         data["wgmma_shapes"] = [list(shape) for shape in self.wgmma_shapes]
+        if self.wgmma_register_pressure is not None:
+            data["wgmma_register_pressure"] = self.wgmma_register_pressure.to_dict()
         return data
 
 
@@ -182,7 +184,7 @@ class AutotuneFilterResult(AutotuneFilterDecision):
     def keep_decision(
         cls,
         reason: str,
-        stage: FilterEvalStage = "post_compile",
+        stage: FilterStage = "post_compile",
         **details: Any,
     ) -> AutotuneFilterResult:
         return cls("keep", stage, reason, details)
@@ -191,7 +193,7 @@ class AutotuneFilterResult(AutotuneFilterDecision):
     def reject_decision(
         cls,
         reason: str,
-        stage: FilterEvalStage = "post_compile",
+        stage: FilterStage = "post_compile",
         **details: Any,
     ) -> AutotuneFilterResult:
         return cls("reject", stage, reason, details)
@@ -203,11 +205,9 @@ class AutotuneFilterReject(RuntimeError):
     def __init__(
         self,
         decision: AutotuneFilterResult,
-        resource_decisions: list[AutotuneFilterDecision] | None = None,
         filter_decisions: list[AutotuneFilterResult] | None = None,
     ):
         self.decision = decision
-        self.resource_decisions = list(resource_decisions) if resource_decisions is not None else []
         self.filter_decisions = list(filter_decisions) if filter_decisions is not None else [decision]
         super().__init__(f"{decision.stage}:{decision.reason}:{decision.details}")
 
@@ -335,7 +335,6 @@ def extract_cuda_kernel_filter_info(
         attention_state_elements_per_thread=attention_state_elements,
         attention_cast_elements_per_thread=attention_cast_elements,
         wgmma_shapes=wgmma_shapes,
-        max_wgmma_n=max((shape[1] for shape in wgmma_shapes), default=None),
         max_k_loop_iterations=max(k_loop_counts) if k_loop_counts else config_metrics["max_k_loop_iterations"],
         tma_load_count=tma_load_count,
         tma_store_count=tma_store_count,
@@ -368,6 +367,7 @@ def extract_pre_compile_filter_info(
     """
     config = config or {}
     wgmma_shapes = _extract_pre_compile_wgmma_shapes(device_mod, function_name)
+    wgmma_register_pressure = analyze_wgmma_register_pressure(device_mod, function_name)
     op_names = _extract_pre_compile_op_names(device_mod, function_name)
     traits, evidence = detect_pre_compile_kernel_traits(
         wgmma_shapes=wgmma_shapes,
@@ -383,7 +383,7 @@ def extract_pre_compile_filter_info(
         detected_kernel_traits=traits,
         classification_evidence=evidence,
         wgmma_shapes=wgmma_shapes,
-        max_wgmma_n=max((shape[1] for shape in wgmma_shapes), default=None),
+        wgmma_register_pressure=wgmma_register_pressure,
         max_k_loop_iterations=config_metrics["max_k_loop_iterations"],
         output_elements_per_thread=config_metrics["output_elements_per_thread"],
         tile_area=config_metrics["tile_area"],
@@ -459,9 +459,7 @@ def _combine_pre_compile_filter_info(
     source_info: CudaKernelFilterInfo,
 ) -> CudaKernelFilterInfo:
     source_type = source_info.detected_kernel_type
-    detected_kernel_type = (
-        source_type if source_type not in ("auto", "generic") else ir_info.detected_kernel_type
-    )
+    detected_kernel_type = source_type if source_type not in ("auto", "generic") else ir_info.detected_kernel_type
     wgmma_shapes = _merge_wgmma_shapes(ir_info.wgmma_shapes, source_info.wgmma_shapes)
     return CudaKernelFilterInfo(
         function_name=ir_info.function_name,
@@ -479,11 +477,9 @@ def _combine_pre_compile_filter_info(
         attention_state_elements_per_thread=source_info.attention_state_elements_per_thread,
         attention_cast_elements_per_thread=source_info.attention_cast_elements_per_thread,
         wgmma_shapes=wgmma_shapes,
-        max_wgmma_n=max((shape[1] for shape in wgmma_shapes), default=None),
+        wgmma_register_pressure=ir_info.wgmma_register_pressure,
         max_k_loop_iterations=(
-            source_info.max_k_loop_iterations
-            if source_info.max_k_loop_iterations is not None
-            else ir_info.max_k_loop_iterations
+            source_info.max_k_loop_iterations if source_info.max_k_loop_iterations is not None else ir_info.max_k_loop_iterations
         ),
         tma_load_count=source_info.tma_load_count,
         tma_store_count=source_info.tma_store_count,
@@ -491,9 +487,7 @@ def _combine_pre_compile_filter_info(
         mbarrier_count=source_info.mbarrier_count,
         syncthreads_count=source_info.syncthreads_count,
         output_elements_per_thread=(
-            ir_info.output_elements_per_thread
-            if ir_info.output_elements_per_thread is not None
-            else source_info.output_elements_per_thread
+            ir_info.output_elements_per_thread if ir_info.output_elements_per_thread is not None else source_info.output_elements_per_thread
         ),
         tile_area=ir_info.tile_area if ir_info.tile_area is not None else source_info.tile_area,
         num_stages=ir_info.num_stages if ir_info.num_stages is not None else source_info.num_stages,
@@ -515,10 +509,11 @@ def _merge_wgmma_shapes(*groups: list[tuple[int, int, int]]) -> list[tuple[int, 
 def _evaluate_filter_infos(
     infos: list[CudaKernelFilterInfo],
     filter_config: AutotuneFilterConfig,
-    stage: FilterEvalStage,
+    stage: FilterStage,
 ) -> AutotuneFilterResult:
     violations = []
     advisories = []
+    observations = []
     classifications = []
     for info in infos:
         classification = classify_kernel_filter_info(info, filter_config)
@@ -534,6 +529,7 @@ def _evaluate_filter_infos(
         )
         violations.extend(_run_filter_rules(context, finding_kind="violation"))
         advisories.extend(_run_filter_rules(context, finding_kind="advisory"))
+        observations.extend(_run_filter_rules(context, finding_kind="observation"))
 
     details = {
         "action": filter_config.action,
@@ -541,6 +537,7 @@ def _evaluate_filter_infos(
         "classifications": [classification.to_dict() for classification in classifications],
         "violations": violations,
         "advisories": advisories,
+        "observations": observations,
     }
     if violations:
         return AutotuneFilterResult.reject_decision("filter_hard_violation", stage=stage, **details)

@@ -34,6 +34,8 @@ class LimitFilterRule(AutotuneVerifyRule):
         reason: str,
         match_kernel_type_tags: frozenset[str] | None = None,
         exclude_kernel_type_tags: frozenset[str] = frozenset(),
+        required_kernel_traits: frozenset[str] | None = None,
+        exclude_kernel_traits: frozenset[str] = frozenset(),
         stages: frozenset[str] | None = None,
     ):
         self.name = name
@@ -45,6 +47,8 @@ class LimitFilterRule(AutotuneVerifyRule):
         self.reason = reason
         self.match_kernel_type_tags = match_kernel_type_tags
         self.exclude_kernel_type_tags = exclude_kernel_type_tags
+        self.required_kernel_traits = required_kernel_traits
+        self.exclude_kernel_traits = exclude_kernel_traits
         self.stages = stages
 
     def check(self, context: AutotuneRuleContext) -> list[dict[str, Any]]:

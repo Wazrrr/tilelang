@@ -29,19 +29,20 @@ Built-in rule definitions are split by layer:
 
 `filter.action` only controls advisory rules. Hard rules always reject when they fire.
 
-## Violation vs Advisory Rules
+## Finding Kinds
 
 Each rule has one `finding_kind`:
 
 - `violation`: a hard filter. It writes to `details["violations"]` and rejects the candidate.
 - `advisory`: an advice filter. It writes to `details["advisories"]`.
+- `observation`: diagnostic data. It writes to `details["observations"]` and never changes the verdict.
 
 For advisory rules:
 
 - `filter.action="reject"` applies the advice and rejects matching candidates.
 - `filter.action="report"` records the advice but keeps matching candidates.
 
-This removes duplicated hard/advisory rule pairs. For example, there is one `primitive.wgmma_n` rule. It is advisory by property, so the same threshold can be used either as a pruning rule or as a report-only warning.
+This avoids duplicated hard/advisory rule pairs. For example, `primitive.k_loop` is advisory by property, so the same threshold can be used either as a pruning rule or as a report-only warning.
 
 ## Classification
 
@@ -110,8 +111,9 @@ Primitive filters use IR, CUDA source, and config-derived metrics, so they run a
 
 | Rule name | Kind | Where | Applies to | Detects | Config fields | Default threshold | Meaning | How to decide threshold |
 |---|---|---|---|---|---|---|---|---|
-| `primitive.output_elements_per_thread` | Advisory | `rule_sets/primitive.py` | Non-attention kernels | `output_elements_per_thread = block_M * block_N / threads` when exactly divisible | `check_output_elements_per_thread`, `max_output_elements_per_thread` | `256` | Flags candidates that assign too much output tile work to each thread. This is a rough pressure signal for accumulators and stores. | Set by family and dtype. Use report mode to find when large per-thread output work correlates with slow or failed candidates. |
-| `primitive.wgmma_n` | Advisory | `rule_sets/primitive.py` | All kernels using WGMMA | `max_wgmma_n`, extracted from IR WGMMA op text and CUDA/PTX WGMMA shapes | `check_wgmma_n`, `max_wgmma_n` | `128` | Flags large WGMMA-N choices. These can be inefficient or register-heavy, but are not universally invalid. | Default is a warning/pruning heuristic. Tune per architecture and family. |
+| `primitive.wgmma_register_pressure_over_budget` | Advisory | `rule_sets/primitive.py` | Lowered WGMMA kernels with an explicit warp-specialized register budget | Canonical simultaneous-live accumulator lower bound versus the consumer-warp `set_max_nreg(..., 1)` budget | `check_wgmma_register_pressure` | Enabled; no guessed numeric threshold | Rejects in `action="reject"` only when the accumulator lower bound exceeds the explicit register budget. Unknown and ambiguous budgets do not trigger it. | This is the default WGMMA accumulator-pressure rule. Keep PTXAS spill/local-memory filtering enabled for unknown budgets and non-accumulator pressure. |
+| `primitive.wgmma_register_pressure` | Observation | `rule_sets/primitive.py` | Lowered WGMMA kernels | Canonical accumulator bounds, register budget, confidence, status, and supporting evidence | `check_wgmma_register_pressure` | Enabled | Records pressure analysis for every analyzable WGMMA kernel without adding another verdict. | Use the observation to audit `over_budget`, `ambiguous`, and `budget_unknown` populations. |
+| `primitive.output_elements_per_thread` | Advisory | `rule_sets/primitive.py` | Non-attention, non-WGMMA kernels | `output_elements_per_thread = block_M * block_N / threads` when exactly divisible | `check_output_elements_per_thread`, `max_output_elements_per_thread` | `256` | Flags candidates that assign too much output tile work to each thread. WGMMA kernels use the canonical accumulator-budget rule instead. | Set by family and dtype. Use report mode to find when large per-thread output work correlates with slow or failed candidates. |
 | `primitive.k_loop` | Advisory | `rule_sets/primitive.py` | All kernels with detected K-loop or config K/block_K | `max_k_loop_iterations`, from CUDA `for (int k = 0; k < N; ...)` or `ceildiv(K, block_K)` | `check_k_loop`, `max_k_loop_iterations` | `64` | Flags very long K loops. Too many iterations can imply poor `block_K` choice and loop/synchronization overhead. | Pick from family sweeps over `K` and `block_K`. |
 | `primitive.tma_store_count` | Advisory | `rule_sets/primitive.py` | Non-attention kernels | `tma_store_count`, counted from CUDA source `tl::tma_store(` | `check_tma_store_count`, `max_tma_store_count` | `None` | Optional cap on the number of TMA stores in a kernel. | No global default. Only set for kernels where too many TMA stores clearly create overhead or scheduling pressure. |
 | `primitive.tma_tiny_tile` | Advisory | `rule_sets/primitive.py`, `TmaTinyTileRule` | Kernels using TMA load | `tile_area = block_M * block_N`, `tma_load_count`, and `num_stages` | `check_tma_tiny_tile`, `max_tma_tiny_tile_area`, `tma_tiny_tile_num_stages` | `tile_area <= 4096` and `num_stages == 1` | Flags tiny TMA tiles with shallow pipelines. TMA setup cost is often not worthwhile for very small tiles. | Start from the default as a conservative heuristic. Recalibrate if small-tile TMA is useful on a backend or family. |
@@ -122,13 +124,13 @@ Primitive filters use IR, CUDA source, and config-derived metrics, so they run a
 
 | Rule name | Kind | Where | Applies to | Detects | Config fields | Default threshold | Meaning | How to decide threshold |
 |---|---|---|---|---|---|---|---|---|
-| `gemm.c_local` | Advisory | `rule_sets/kernel_family.py` | Non-attention kernels, including GEMM-like kernels | `c_local_floats`, the largest CUDA local array matching `C_local` or `Ct_local` | `check_c_local`, `max_c_local_floats` | `256` | Flags candidates with large accumulator fragments per thread. This is a strong register-pressure/spill-risk signal. | Start at `256` for dense GEMM. For new GEMM variants, run report mode and verify that larger accumulator fragments do not produce top latency. |
+| `gemm.c_local` | Advisory | `rule_sets/kernel_family.py` | Non-attention, non-WGMMA GEMM-like kernels | `c_local_floats`, the largest CUDA local array matching `C_local` or `Ct_local` | `check_c_local`, `max_c_local_floats` | `256` | Flags large accumulator fragments when the canonical WGMMA analysis does not apply. | Start at `256` for non-WGMMA GEMM. For new variants, run report mode and verify that larger fragments do not produce top latency. |
 
 Dense GEMM currently relies on:
 
 - `gemm.c_local`
 - common post-compile spill/local-memory/register rules
-- primitive WGMMA/TMA/K-loop/tile-area rules
+- canonical WGMMA pressure plus primitive TMA/K-loop/tile-area rules
 
 There is no separate `dense_gemm.*` rule yet beyond the generic GEMM accumulator rule.
 
@@ -167,7 +169,7 @@ Conv is classified by `uses_im2col` / `im2col` source signals and gets the `conv
 Current behavior:
 
 - Uses common post-compile filters.
-- Uses primitive filters such as `primitive.output_elements_per_thread`, `primitive.wgmma_n`, `primitive.k_loop`, and TMA rules when their metrics exist.
+- Uses primitive filters such as WGMMA register pressure, `primitive.output_elements_per_thread`, `primitive.k_loop`, and TMA rules when their metrics exist.
 - Does not yet have a `conv.*` kernel-family rule.
 
 Potential future conv-specific rules:
@@ -238,7 +240,7 @@ Potential future linear-attention rules:
 | `attention_output_elements_per_thread` | CUDA local array `acc_o` |
 | `attention_softmax_elements_per_thread` | CUDA local arrays like `logsum`, `scores_max`, `scores_sum`, and related online-softmax state |
 | `attention_state_elements_per_thread` | `acc_s + acc_o + attention_softmax_state` |
-| `max_wgmma_n` | Max N dimension from WGMMA shape in device IR or CUDA/PTX source |
+| `wgmma_register_pressure` | Simultaneous-live WGMMA accumulator register bounds, explicit consumer budget, status, confidence, and evidence from lowered device TIR |
 | `max_k_loop_iterations` | CUDA K-loop bound or `ceildiv(K, block_K)` from config |
 | `tma_load_count` | Count of `tl::tma_load(` in CUDA source |
 | `tma_store_count` | Count of `tl::tma_store(` in CUDA source |
@@ -266,7 +268,3 @@ Potential future linear-attention rules:
 | Linear attention/KDA/GDN | No | common only |
 
 The framework now has the tags needed to add family-specific filters without changing hardcoded dispatch. The missing pieces are empirical thresholds and family-specific metrics for conv, GEMV, TopK, and linear attention.
-
-## Deprecated Names
-
-`tilelang/autotuner/filters/quality.py` only provides compatibility aliases for old names such as `evaluate_tir_quality_filter` and `set_quality_filter_args` style usage. New code should use `filter`, `pre_compile`, and `post_compile` naming.

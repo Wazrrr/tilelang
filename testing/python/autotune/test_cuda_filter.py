@@ -116,7 +116,6 @@ def test_cuda_filter_info_extracts_exact_features():
     )
 
     assert info.c_local_floats == 512
-    assert info.max_wgmma_n == 256
     assert info.max_k_loop_iterations == 128
     assert info.output_elements_per_thread == 512
     assert info.tma_store_count == 4
@@ -134,7 +133,8 @@ def test_filter_rules_are_classified_by_layer():
 
     assert "common.spills" in common_names
     assert "common.local_memory" in common_names
-    assert "primitive.wgmma_n" in primitive_names
+    assert "primitive.wgmma_register_pressure" in primitive_names
+    assert "primitive.wgmma_register_pressure_over_budget" in primitive_names
     assert "primitive.tma_tiny_tile" in primitive_names
     assert "gemm.c_local" in kernel_names
     assert "attention.state_elements" in kernel_names
@@ -195,7 +195,6 @@ def test_filter_rule_registry_accepts_trait_plugin_rule():
                 check_c_local=False,
                 check_output_elements_per_thread=False,
                 check_tma_tiny_tile=False,
-                check_wgmma_n=False,
                 check_k_loop=False,
                 kernel_traits=["has_custom_trait"],
             ),
@@ -250,34 +249,11 @@ def test_pre_compile_info_extracts_resolved_wgmma_shape_before_codegen():
 
     assert info.source_available is False
     assert info.wgmma_shapes == [(64, 256, 16)]
-    assert info.max_wgmma_n == 256
     assert info.output_elements_per_thread == 512
     assert info.max_k_loop_iterations == 64
     assert info.detected_kernel_type == "generic"
     assert "uses_wgmma" in info.detected_kernel_traits
     assert "uses_gemm" in info.detected_kernel_traits
-
-
-def test_pre_compile_filter_rejects_large_wgmma_before_codegen():
-    decision = evaluate_pre_compile_filter(
-        launch_infos=[LaunchResourceInfo("pre_compile_kernel", block_dims=(128, 1, 1))],
-        device_mod=_make_wgmma_pre_compile_module(),
-        config={"block_M": 256, "block_N": 256, "thread_num": 128},
-        filter_config=AutotuneFilterConfig(
-            enabled=True,
-            check_spills=False,
-            check_local_memory=False,
-            check_c_local=False,
-            check_output_elements_per_thread=False,
-            check_tma_tiny_tile=False,
-            max_wgmma_n=128,
-        ),
-    )
-
-    assert decision.stage == "pre_compile"
-    assert decision.verdict == "reject"
-    reasons = {advisory["reason"] for advisory in decision.details["advisories"]}
-    assert "wgmma_n_over_limit" in reasons
 
 
 def _make_dense_gemm_kernel(M=512, N=512, K=512, dtype=T.float16, accum_dtype=T.float32):
@@ -308,7 +284,7 @@ def _filter_shapes(infos):
     return sorted(shape for info in infos for shape in info.wgmma_shapes)
 
 
-def test_pre_compile_wgmma_matches_cuda_source_filter_before_nvcc():
+def test_pre_compile_wgmma_shapes_match_cuda_source_before_nvcc():
     target = Target({"kind": "cuda", "arch": "sm_90"})
     kernel = _make_dense_gemm_kernel()
     configs = [
@@ -316,19 +292,6 @@ def test_pre_compile_wgmma_matches_cuda_source_filter_before_nvcc():
         {"block_M": 64, "block_N": 128, "block_K": 64, "num_stages": 1, "thread_num": 128},
         {"block_M": 128, "block_N": 256, "block_K": 64, "num_stages": 2, "thread_num": 256},
     ]
-    filter_config = AutotuneFilterConfig(
-        enabled=True,
-        kernel_type="dense_gemm",
-        check_spills=False,
-        check_local_memory=False,
-        check_registers=False,
-        check_c_local=False,
-        check_output_elements_per_thread=False,
-        check_tma_tiny_tile=False,
-        check_k_loop=False,
-        max_wgmma_n=64,
-    )
-
     for config in configs:
         program = kernel(**config)
         with tvm.transform.PassContext(opt_level=3), target:
@@ -371,23 +334,11 @@ def test_pre_compile_wgmma_matches_cuda_source_filter_before_nvcc():
 
         assert _filter_shapes(pre_compile_infos) == _filter_shapes(cuda_infos)
         assert _filter_shapes(combined_pre_compile_infos) == _filter_shapes(cuda_infos)
-
-        pre_compile_decision = evaluate_pre_compile_filter(
-            launch_infos=launch_infos,
-            device_mod=device_mod,
-            config=config,
-            filter_config=filter_config,
-            kernel_source=cuda_source,
+        assert all(info.wgmma_register_pressure is not None for info in pre_compile_infos)
+        assert all(
+            info.wgmma_register_pressure.confidence == "exact" and info.wgmma_register_pressure.register_budget == 240
+            for info in pre_compile_infos
         )
-
-        assert pre_compile_decision.stage == "pre_compile"
-        if any(shape[1] > 64 for shape in _filter_shapes(combined_pre_compile_infos)):
-            assert pre_compile_decision.verdict == "reject"
-            assert pre_compile_decision.reason == "filter_advisory_applied"
-            reasons = {advisory["reason"] for advisory in pre_compile_decision.details["advisories"]}
-            assert "wgmma_n_over_limit" in reasons
-        else:
-            assert pre_compile_decision.verdict == "keep"
 
 
 def test_attention_filter_info_extracts_exact_fragment_state():
@@ -509,8 +460,9 @@ def test_filter_rejects_enabled_targets():
     assert pre_compile_decision.stage == "pre_compile"
     assert pre_compile_decision.verdict == "reject"
     pre_compile_reasons = {advisory["reason"] for advisory in pre_compile_decision.details["advisories"]}
-    assert "c_local_floats_over_limit" in pre_compile_reasons
-    assert "output_elements_per_thread_over_limit" in pre_compile_reasons
+    assert "k_loop_iterations_over_limit" in pre_compile_reasons
+    assert "c_local_floats_over_limit" not in pre_compile_reasons
+    assert "output_elements_per_thread_over_limit" not in pre_compile_reasons
 
     assert post_compile_decision.stage == "post_compile"
     assert post_compile_decision.verdict == "reject"
@@ -519,6 +471,32 @@ def test_filter_rejects_enabled_targets():
     assert "local_memory_over_limit" in post_compile_reasons
     assert "c_local_floats_over_limit" not in post_compile_reasons
     assert "output_elements_per_thread_over_limit" not in post_compile_reasons
+
+
+def test_non_wgmma_kernels_keep_accumulator_pressure_fallbacks():
+    kernel_source = r"""
+extern "C" __global__ void mma_kernel() {
+  float C_local[512];
+  C_local[threadIdx.x] = 0.0f;
+}
+"""
+    decision = evaluate_pre_compile_filter(
+        launch_infos=[LaunchResourceInfo("mma_kernel", block_dims=(128, 1, 1))],
+        device_mod=tvm.IRModule({}),
+        config={"block_M": 256, "block_N": 256, "thread_num": 128},
+        filter_config=AutotuneFilterConfig(
+            enabled=True,
+            check_k_loop=False,
+            check_tma_tiny_tile=False,
+        ),
+        kernel_source=kernel_source,
+    )
+
+    assert decision.verdict == "reject"
+    reasons = {advisory["reason"] for advisory in decision.details["advisories"]}
+    assert "c_local_floats_over_limit" in reasons
+    assert "output_elements_per_thread_over_limit" in reasons
+    assert "uses_wgmma" not in decision.details["classifications"][0]["traits"]
 
 
 def test_attention_filter_profile_uses_thresholded_spill_and_state_targets():
@@ -547,9 +525,8 @@ def test_attention_filter_profile_uses_thresholded_spill_and_state_targets():
     )
 
     assert pre_compile_decision.verdict == "keep"
-    assert pre_compile_decision.reason == "filter_advisory_report_only"
-    pre_compile_advisories = {advisory["reason"] for advisory in pre_compile_decision.details["advisories"]}
-    assert "wgmma_n_over_limit" in pre_compile_advisories
+    assert pre_compile_decision.reason == "filter_targets_passed"
+    assert not pre_compile_decision.details["advisories"]
 
     assert post_compile_decision.verdict == "keep"
     assert post_compile_decision.reason == "filter_targets_passed"
@@ -653,7 +630,6 @@ def test_filter_targets_can_be_disabled_independently():
             check_c_local=False,
             check_output_elements_per_thread=False,
             check_tma_tiny_tile=False,
-            check_wgmma_n=False,
             check_k_loop=False,
         ),
     )
@@ -682,11 +658,10 @@ def test_filter_report_action_keeps_advisory_findings():
     assert decision.verdict == "keep"
     assert decision.reason == "filter_advisory_report_only"
     reasons = {advisory["reason"] for advisory in decision.details["advisories"]}
-    assert "wgmma_n_over_limit" in reasons
     assert "k_loop_iterations_over_limit" in reasons
 
 
-def test_filter_strict_wgmma_and_k_loop_can_reject():
+def test_filter_k_loop_limit_can_reject():
     decision = evaluate_pre_compile_filter(
         launch_infos=[LaunchResourceInfo("main_kernel", block_dims=(128, 1, 1))],
         device_mod=tvm.IRModule({}),
@@ -698,7 +673,6 @@ def test_filter_strict_wgmma_and_k_loop_can_reject():
             check_c_local=False,
             check_output_elements_per_thread=False,
             check_tma_tiny_tile=False,
-            max_wgmma_n=128,
             max_k_loop_iterations=64,
         ),
         kernel_source=SLOW_KERNEL_SOURCE,
@@ -707,7 +681,6 @@ def test_filter_strict_wgmma_and_k_loop_can_reject():
     assert decision.verdict == "reject"
     assert decision.reason == "filter_advisory_applied"
     reasons = {advisory["reason"] for advisory in decision.details["advisories"]}
-    assert "wgmma_n_over_limit" in reasons
     assert "k_loop_iterations_over_limit" in reasons
 
 

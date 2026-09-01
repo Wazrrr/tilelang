@@ -16,21 +16,12 @@ from .launch import (  # noqa: F401
     LaunchResourceInfo,
     extract_launch_resource_info,
 )
-from .resources import (  # noqa: F401
-    AutotuneResourceFilterConfig,
-    AutotuneResourceFilterReject,
-    CompiledResourceInfo,
-    CudaDeviceLimits,
-    compiled_resource_info_from_usage,
-    evaluate_post_compile_resource_filter,
-    evaluate_pre_compile_resource_filter,
-    query_cuda_device_limits,
-)
 from .verify import (  # noqa: F401
     AutotuneFilterConfig,
     AutotuneFilterResult,
     AutotuneFilterReject,
     CudaKernelFilterInfo,
+    WgmmaRegisterPressureInfo,
     evaluate_post_compile_filter,
     evaluate_pre_compile_filter,
     extract_cuda_function_source,

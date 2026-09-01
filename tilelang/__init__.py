@@ -210,7 +210,6 @@ if not env.is_light_import():
     from .language import dtypes  # noqa: F401
     from .autotuner import (  # noqa: F401
         autotune,
-        AutotuneResourceFilterConfig,
         AutotuneFilterConfig,
     )
     from .transform import PassConfigKey  # noqa: F401

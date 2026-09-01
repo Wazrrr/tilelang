@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 RuleLayer = Literal["common", "primitive", "kernel"]
-RuleFindingKind = Literal["violation", "advisory"]
+RuleFindingKind = Literal["violation", "advisory", "observation"]
 
 
 @dataclass(frozen=True)

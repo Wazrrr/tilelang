@@ -49,9 +49,56 @@ class TmaTinyTileRule(AutotuneVerifyRule):
         ]
 
 
+class WgmmaRegisterPressureObservation(AutotuneVerifyRule):
+    """Record bounded accumulator pressure without changing the filter verdict."""
+
+    name = "primitive.wgmma_register_pressure"
+    layer: RuleLayer = "primitive"
+    finding_kind: RuleFindingKind = "observation"
+    stages = PRE_COMPILE_STAGES
+
+    def check(self, context: AutotuneRuleContext) -> list[dict[str, Any]]:
+        pressure = context.info.wgmma_register_pressure
+        if not context.config.check_wgmma_register_pressure or pressure is None:
+            return []
+        return [
+            {
+                "reason": "wgmma_register_pressure_observed",
+                "function": context.info.function_name,
+                **pressure.to_dict(),
+            }
+        ]
+
+
+class WgmmaRegisterPressureOverBudgetRule(AutotuneVerifyRule):
+    """Flag WGMMA candidates whose live accumulators exceed their warp budget."""
+
+    name = "primitive.wgmma_register_pressure_over_budget"
+    layer: RuleLayer = "primitive"
+    finding_kind: RuleFindingKind = "advisory"
+    required_kernel_traits = frozenset({"uses_wgmma"})
+    stages = PRE_COMPILE_STAGES
+
+    def check(self, context: AutotuneRuleContext) -> list[dict[str, Any]]:
+        pressure = context.info.wgmma_register_pressure
+        if not context.config.check_wgmma_register_pressure or pressure is None or pressure.status != "over_budget":
+            return []
+        return [
+            {
+                "reason": "wgmma_register_pressure_over_budget",
+                "function": context.info.function_name,
+                "observed": pressure.lower_bound_registers,
+                "limit": pressure.register_budget,
+                **pressure.to_dict(),
+            }
+        ]
+
+
 def make_primitive_filter_rules() -> list[AutotuneVerifyRule]:
     """Return primitive-level filters that are independent of one kernel family."""
     return [
+        WgmmaRegisterPressureOverBudgetRule(),
+        WgmmaRegisterPressureObservation(),
         LimitFilterRule(
             name="primitive.output_elements_per_thread",
             layer="primitive",
@@ -61,16 +108,7 @@ def make_primitive_filter_rules() -> list[AutotuneVerifyRule]:
             limit_attr="max_output_elements_per_thread",
             reason="output_elements_per_thread_over_limit",
             exclude_kernel_type_tags=ATTENTION_KERNEL_TYPE_TAGS,
-            stages=PRE_COMPILE_STAGES,
-        ),
-        LimitFilterRule(
-            name="primitive.wgmma_n",
-            layer="primitive",
-            finding_kind="advisory",
-            info_attr="max_wgmma_n",
-            enabled_attr="check_wgmma_n",
-            limit_attr="max_wgmma_n",
-            reason="wgmma_n_over_limit",
+            exclude_kernel_traits=frozenset({"uses_wgmma"}),
             stages=PRE_COMPILE_STAGES,
         ),
         LimitFilterRule(
