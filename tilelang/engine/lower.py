@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
@@ -21,6 +22,7 @@ from tilelang.backend.target import determine_target
 from tilelang.backend.pass_pipeline import resolve_pipeline
 from tilelang.contrib import cuda_resource_info
 from tilelang.contrib.resource_info import usage_from_json_dict, usage_to_json_dict
+from tilelang.utils.autotune_timing import record_autotune_timing, timed_autotune_stage
 
 
 def is_cpu_device_backend(target: Target):
@@ -102,6 +104,8 @@ def tilelang_callback_cuda_validate(device_mod):
 
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
+    callback_start = time.perf_counter()
+    code_bytes = len(code.encode("utf-8"))
     target_arch, target_code = nvcc.get_target_arch_and_code(target)
     target_code_list = nvcc.get_target_code_list(target_code)
     gencode_code = nvcc.format_target_code_for_gencode(target_code)
@@ -144,8 +148,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     verbose = env.get_default_verbose()
     capture_cuda_resources = bool(
-        cfg.get(cuda_resource_info.CUDA_RESOURCE_CAPTURE_CONFIG_KEY, False)
-        or cuda_resource_info.is_capture_enabled()
+        cfg.get(cuda_resource_info.CUDA_RESOURCE_CAPTURE_CONFIG_KEY, False) or cuda_resource_info.is_capture_enabled()
     )
     if enable_fast_math:
         options.append("--use_fast_math")
@@ -159,22 +162,50 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 
-    cache_key = CUDABinaryCache.make_key(
-        code=code,
-        target_kind=target.kind.name,
+    with timed_autotune_stage(
+        "cuda.compile_callback.make_key",
+        source_bytes=code_bytes,
         target_arch=target_arch,
-        target_code=target_code_list,
         compile_format=compile_format,
-        options=options,
-    )
-    cached_binary = CUDABinaryCache.load(cache_key, compile_format)
+    ):
+        cache_key = CUDABinaryCache.make_key(
+            code=code,
+            target_kind=target.kind.name,
+            target_arch=target_arch,
+            target_code=target_code_list,
+            compile_format=compile_format,
+            options=options,
+        )
+    with timed_autotune_stage(
+        "cuda.compile_callback.load_cache",
+        source_bytes=code_bytes,
+        target_arch=target_arch,
+        compile_format=compile_format,
+    ):
+        cached_binary = CUDABinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
         if capture_cuda_resources:
             cached_usage = CUDABinaryCache.load_metadata(cache_key, "resource_usage")
             if cached_usage is not None:
                 cuda_resource_info.record_usage(usage_from_json_dict(cached_usage))
+                record_autotune_timing(
+                    "cuda.compile_callback.total",
+                    time.perf_counter() - callback_start,
+                    source_bytes=code_bytes,
+                    target_arch=target_arch,
+                    compile_format=compile_format,
+                    cache_hit=True,
+                )
                 return bytearray(cached_binary)
         else:
+            record_autotune_timing(
+                "cuda.compile_callback.total",
+                time.perf_counter() - callback_start,
+                source_bytes=code_bytes,
+                target_arch=target_arch,
+                compile_format=compile_format,
+                cache_hit=True,
+            )
             return bytearray(cached_binary)
 
     compile_kwargs = {
@@ -183,23 +214,49 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     }
     if capture_cuda_resources:
         compile_kwargs["return_output"] = True
-    compile_result = nvcc.compile_cuda(
-        code,
-        compile_format,
-        arch,
-        **compile_kwargs,
-    )
+    with timed_autotune_stage(
+        "cuda.compile_callback.nvcc",
+        source_bytes=code_bytes,
+        target_arch=target_arch,
+        compile_format=compile_format,
+    ):
+        compile_result = nvcc.compile_cuda(
+            code,
+            compile_format,
+            arch,
+            **compile_kwargs,
+        )
     if capture_cuda_resources:
         ptx, compiler_output = compile_result
-        usage = cuda_resource_info.parse_ptxas_output(compiler_output)
+        with timed_autotune_stage(
+            "cuda.compile_callback.parse_ptxas",
+            source_bytes=code_bytes,
+            target_arch=target_arch,
+            compile_format=compile_format,
+        ):
+            usage = cuda_resource_info.parse_ptxas_output(compiler_output)
         if usage:
             cuda_resource_info.record_usage(usage)
             CUDABinaryCache.save_metadata(cache_key, "resource_usage", usage_to_json_dict(usage))
     else:
         ptx = compile_result
 
-    CUDABinaryCache.save(cache_key, compile_format, ptx)
+    with timed_autotune_stage(
+        "cuda.compile_callback.save_cache",
+        source_bytes=code_bytes,
+        target_arch=target_arch,
+        compile_format=compile_format,
+    ):
+        CUDABinaryCache.save(cache_key, compile_format, ptx)
 
+    record_autotune_timing(
+        "cuda.compile_callback.total",
+        time.perf_counter() - callback_start,
+        source_bytes=code_bytes,
+        target_arch=target_arch,
+        compile_format=compile_format,
+        cache_hit=False,
+    )
     return ptx
 
 

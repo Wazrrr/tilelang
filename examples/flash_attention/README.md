@@ -1,5 +1,27 @@
 # FlashAttention
 
+Analyze all 128 supplied configurations with a reusable device profile:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m examples.flash_attention.example_mha_new_carver \
+  --device-profile device.json --output noncausal_carver.json
+CUDA_VISIBLE_DEVICES=0 python -m examples.flash_attention.example_mha_new_carver --causal \
+  --device-profile device.json --output causal_carver.json
+```
+
+Defaults are B1 H16 S4096 D128 with FP16 inputs/output. The example profiles fixed
+device primitives, analyzes the full grid, then checks and benchmarks one
+reference config. That reference only scales latency; it cannot change ranking.
+No cutoff is applied. Attention allows PTXAS spills/local memory and a soft
+32-register modeled-demand margin per consumer, independently of strict physical
+SM capacity. Set `--spill-budget-registers-per-thread` to change the margin.
+
+See [the portable experiments](../../benchmark/autotune/README.md) to benchmark
+all configurations in both causal modes on A100 or Hopper, and
+[New Carver documentation](../../docs/new_carver.md) for formulas and coverage.
+A100 positive-stage pipeline scores currently remain unknown; measurements and
+traffic×waves analysis still cover the full grid.
+
 Using tile-lang, we can define buffers at different memory layers. For instance, `Q_shared`, `K_shared`, and `V_shared` can be defined in shared memory, while `acc_s` and `acc_o` can be placed in registers. This flexibility allows us to represent a complex fusion pattern like FlashAttention in a simple way.
 
 ```python

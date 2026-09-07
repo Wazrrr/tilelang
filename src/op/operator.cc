@@ -10,6 +10,7 @@
 
 #include "builtin.h"
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op_attr_types.h>
 
@@ -103,6 +104,25 @@ Var GetVarFromAccessPtr(const PrimExpr &expr) {
   LOG(FATAL) << "GetVarFromAccessPtr expects a tvm_access_ptr or tl.access_ptr "
                 "call, but got: "
              << tvm::ffi::GetRef<Call>(call);
+}
+
+// Read-only adapter: retain the registered operator's reflected metadata and
+// access semantics without invoking layout inference or a lowering pass.
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+      .def("tl.new_carver.ParseOperator",
+           [](const Call &call, const BlockAnnotations &annotations) {
+             if (!call->op.as<Op>().has_value()) {
+               return TileOperator();
+             }
+             return ParseOperator(call, annotations);
+           })
+      .def("tl.new_carver.GetAccessRegions", [](const TileOperator &op) {
+        AccessRegions regions = op->GetAccessRegions();
+        return ffi::Array<ffi::Array<BufferRegion>>{regions.reads,
+                                                    regions.writes};
+      });
 }
 
 } // namespace tl

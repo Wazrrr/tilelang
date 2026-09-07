@@ -98,6 +98,7 @@ def parse_ptxas_output(output: str) -> dict[str, KernelResourceUsage]:
             regs_match = _REGS_RE.search(item_text)
             if regs_match is not None:
                 item.n_regs = int(regs_match.group("value"))
+                item.extra.setdefault("observed_fields", []).append("n_regs")
             for bytes_match in _BYTES_RE.finditer(item_text):
                 value = int(bytes_match.group("value"))
                 kind = bytes_match.group("kind")
@@ -114,6 +115,7 @@ def parse_ptxas_output(output: str) -> dict[str, KernelResourceUsage]:
             item = usage.setdefault(current_name, KernelResourceUsage())
             if kind == "stack frame":
                 item.local_size_bytes = max(item.local_size_bytes, value)
+                item.extra.setdefault("observed_fields", []).append("local_size_bytes")
             elif kind == "spill stores":
                 item.extra["spill_stores_bytes"] = value
                 item.n_spills += value // 4

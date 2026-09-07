@@ -12,20 +12,21 @@ def calc_diff(x, y):
 
 
 @tilelang.jit
-def matmul(A, B, block_M, block_N, block_K, dtype, accum_dtype=T.float32):
+def matmul(A, B, block_M, block_N, block_K, dtype, accum_dtype=T.float32, num_stages=3, threads=128, enable_rasteration=False):
     M, N, K = T.const("M, N, K")
 
     A: T.Tensor((M, K), dtype)
     B: T.Tensor((N, K), dtype)
     C = T.empty((M, N), dtype)
 
-    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
         A_shared = T.alloc_shared((block_M, block_K), dtype)
         B_shared = T.alloc_shared((block_N, block_K), dtype)
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        T.use_swizzle(panel_size=10, enable=enable_rasteration)
 
         T.clear(C_local)
-        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
             T.copy(A[by * block_M, k * block_K], A_shared)
             T.copy(B[bx * block_N, k * block_K], B_shared)
             T.gemm(A_shared, B_shared, C_local, transpose_B=True)

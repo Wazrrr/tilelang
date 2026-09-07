@@ -21,6 +21,7 @@ from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
+from tilelang.utils.autotune_timing import timed_autotune_stage
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
 
@@ -125,10 +126,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def _make_executable(self) -> tvm.runtime.Executable:
         if self.rt_mod is None:
             raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
-        executable = runtime.Executable(self.rt_mod)
+        with timed_autotune_stage(
+            "tvm_ffi.make_executable",
+            group_size=getattr(self, "_autotune_group_size", None),
+            config_idx=getattr(self, "_autotune_config_idx", None),
+        ):
+            executable = runtime.Executable(self.rt_mod)
         if COMPILE_ARGS:
             # Precompile jit module with extra arguments.
-            executable.jit(**COMPILE_ARGS)
+            with timed_autotune_stage(
+                "tvm_ffi.executable_jit",
+                group_size=getattr(self, "_autotune_group_size", None),
+                config_idx=getattr(self, "_autotune_config_idx", None),
+            ):
+                executable.jit(**COMPILE_ARGS)
         return executable
 
     def _get_executable(self) -> tvm.runtime.Executable:

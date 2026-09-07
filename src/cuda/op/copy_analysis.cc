@@ -11,6 +11,7 @@
 #include "op/builtin.h"
 #include "op/utils.h"
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
 
 #include <optional>
@@ -853,6 +854,26 @@ bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target) {
     return false;
   }
   return facts.can_cp_async;
+}
+
+// Read-only pre-layout query. Keep Carver on the scheduler's copy policy,
+// including copy annotations and the current PassContext.
+TVM_FFI_STATIC_INIT_BLOCK() {
+  reflection::GlobalDef().def(
+      "tl.new_carver.ClassifyProducerCopy",
+      [](const Copy &op, const Target &target) {
+        CopyInstSelection result =
+            ClassifyWarpSpecializedProducerCopy(*op.operator->(), target);
+        String kind = "sync";
+        if (CopyInstIsTMA(result.inst)) {
+          kind = "tma";
+        } else if (CopyInstIsCPAsync(result.inst)) {
+          kind = "cp_async";
+        }
+        return Map<String, Any>{{"kind", kind},
+                                {"supported", result.supported},
+                                {"reason", String(result.reason)}};
+      });
 }
 
 } // namespace cuda

@@ -10,6 +10,8 @@ from collections.abc import Callable
 
 import torch
 
+from tilelang.utils.autotune_timing import record_autotune_timing, timed_autotune_stage
+
 logger = logging.getLogger(__name__)
 
 
@@ -183,28 +185,51 @@ def _do_bench_impl(
     cache_size: int,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
+    timing_target = getattr(fn, "func", None)
+    timing_group_size = getattr(timing_target, "_autotune_group_size", None)
+    timing_config_idx = getattr(timing_target, "_autotune_config_idx", None)
+
     # Initial function call and synchronization
-    fn()
-    _cuda_synchronize(device_idx)
+    with timed_autotune_stage(
+        "profiler.initial_call_sync",
+        group_size=timing_group_size,
+        config_idx=timing_config_idx,
+        backend=backend,
+    ):
+        fn()
+        _cuda_synchronize(device_idx)
 
     # Create L2 cache flush buffer (`cache_size` MB)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
     cache_bytes = cache_size * 1024 * 1024
     cache_numel = cache_bytes // 4 if fast_flush else cache_bytes
     cache_dtype = torch.int if fast_flush else torch.int8
-    cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
+    with timed_autotune_stage(
+        "profiler.cache_alloc",
+        group_size=timing_group_size,
+        config_idx=timing_config_idx,
+        backend=backend,
+        cache_bytes=cache_bytes,
+    ):
+        cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
 
     # Estimate kernel runtime with 5 iterations
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5):
-        cache.zero_()
-        fn()
-    end_event.record()
-    start_event.synchronize()
-    end_event.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
+    with timed_autotune_stage(
+        "profiler.estimate",
+        group_size=timing_group_size,
+        config_idx=timing_config_idx,
+        backend=backend,
+    ):
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for _ in range(5):
+            cache.zero_()
+            fn()
+        end_event.record()
+        start_event.synchronize()
+        end_event.synchronize()
+        estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # Early stop: skip full benchmark if estimate exceeds baseline
     if early_stop_baseline is not None and estimate_ms > early_stop_baseline:
@@ -220,18 +245,56 @@ def _do_bench_impl(
     # Calculate warmup and repeat counts (minimum 1 iteration each)
     n_warmup = _n_warmup if _n_warmup > 0 else max(1, int(warmup / estimate_ms))
     n_repeat = _n_repeat if _n_repeat > 0 else max(1, int(rep / estimate_ms))
+    record_autotune_timing(
+        "profiler.repeat_counts",
+        0.0,
+        group_size=timing_group_size,
+        config_idx=timing_config_idx,
+        backend=backend,
+        estimate_ms=estimate_ms,
+        n_warmup=n_warmup,
+        n_repeat=n_repeat,
+    )
 
     # Warmup phase
-    for _ in range(n_warmup):
-        fn()
+    with timed_autotune_stage(
+        "profiler.warmup",
+        group_size=timing_group_size,
+        config_idx=timing_config_idx,
+        backend=backend,
+        n_warmup=n_warmup,
+    ):
+        for _ in range(n_warmup):
+            fn()
 
     # Benchmarking phase
     if backend == "event":
-        return _bench_with_cuda_events(fn, cache, n_repeat, quantiles, return_mode, device_idx)
+        with timed_autotune_stage(
+            "profiler.measure_event",
+            group_size=timing_group_size,
+            config_idx=timing_config_idx,
+            backend=backend,
+            n_repeat=n_repeat,
+        ):
+            return _bench_with_cuda_events(fn, cache, n_repeat, quantiles, return_mode, device_idx)
     elif backend == "cupti":
-        return _bench_with_cupti(fn, cache, n_repeat)
+        with timed_autotune_stage(
+            "profiler.measure_cupti",
+            group_size=timing_group_size,
+            config_idx=timing_config_idx,
+            backend=backend,
+            n_repeat=n_repeat,
+        ):
+            return _bench_with_cupti(fn, cache, n_repeat)
     elif backend == "cudagraph":
-        return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode, device_idx)
+        with timed_autotune_stage(
+            "profiler.measure_cudagraph",
+            group_size=timing_group_size,
+            config_idx=timing_config_idx,
+            backend=backend,
+            n_repeat=n_repeat,
+        ):
+            return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode, device_idx)
     else:
         raise ValueError(f"Unknown profiler backend: {backend}")
 

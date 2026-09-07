@@ -24,3 +24,5 @@ from .filters import (
     register_filter_rule,  # noqa: F401
     unregister_filter_rule,  # noqa: F401
 )
+
+from tilelang.new_carver import CarverConfig  # noqa: F401
