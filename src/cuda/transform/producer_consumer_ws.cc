@@ -1691,13 +1691,12 @@ private:
     }
 
     // --- Compute arrive_counts (after producer_extent is finalized) ---
-    // Forward arrive_count:
-    //   - Pure TMA (possibly merged): 1 (leader thread only)
-    //   - Mixed TMA with SIMT/cp.async: producer_extent (all producer threads)
-    PrimExpr fwd_arrive_count = (can_merge_tma_barriers ||
-                                 (!has_simt_producer && !has_cp_async_producer))
-                                    ? IntImm(DataType::Int(32), 1)
-                                    : producer_extent;
+    // Every producer waits on back-pressure barriers, so every producer must
+    // also contribute a forward arrival. A leader-only arrival lets an idle
+    // producer warp fall behind while the leader and consumers reuse a barrier
+    // through multiple phases. Parity waits cannot distinguish those old
+    // phases and can hang even after all other warps have exited.
+    PrimExpr fwd_arrive_count = producer_extent;
     Array<PrimExpr> arrive_counts;
     for (int i = 0; i < num_fwd; ++i) {
       arrive_counts.push_back(fwd_arrive_count);
@@ -1757,7 +1756,6 @@ private:
     // Second pass: build the producer body with correct ordering.
     Array<Stmt> producer_stmts;
     int tma_idx = 0;
-    int last_tma_idx = num_producer_groups - 1;
     bool simt_stmts_emitted = false;
     for (size_t i = 0; i < flat_stmts.size(); ++i) {
       if (kinds[i] == TileStmtKind::kTmaProducer) {
@@ -1800,14 +1798,6 @@ private:
         Call tile_call = Downcast<Call>(eval->value);
         auto tile_op = ParseOperator(tile_call);
         PrimExpr tma_call;
-        // For pure TMA, tell LowerTileOp to emit arrive inside the same
-        // tl_shuffle_elect block (via emit_arrive annotation), producing
-        // arrive_and_expect_tx instead of separate expect_tx + arrive.
-        // When merged barriers, only the last TMA copy should arrive.
-        bool emit_arrive_on_this =
-            !has_simt_producer && !has_cp_async_producer &&
-            (!can_merge_tma_barriers || tma_idx == last_tma_idx);
-
         if (tile_op.defined() && tile_op.as<CopyNode>()) {
           tma_call = RewriteCopyToTmaCopy(tile_call, barrier_buf, fwd_id);
         } else {
@@ -1815,13 +1805,14 @@ private:
           // barrier so Lower() uses the WS barrier instead of its own.
           tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
         }
-        if (emit_arrive_on_this) {
-          auto call = Downcast<Call>(tma_call);
-          auto annos = call->annotations;
-          annos.Set("emit_arrive", IntImm(DataType::Int(32), 1));
-          tma_call = Call(call->dtype, call->op, call->args, annos, call->span);
-        }
         producer_stmts.push_back(Evaluate(tma_call));
+        // Keep each independent TMA group's early release, but require all
+        // producer waiters to arrive. Merged groups release after the last
+        // copy.
+        if (!has_simt_producer && !has_cp_async_producer &&
+            (!can_merge_tma_barriers || tma_idx == num_producer_groups - 1)) {
+          producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
+        }
         ++tma_idx;
       }
       // SIMT/cp.async producers are handled above (after first bp_wait).
