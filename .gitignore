@@ -52,6 +52,14 @@ doc/doxygen/latex/*
 doc/doxygen/xml/*
 doc/doxygen/html/*
 
+# Generated autotuning experiment results (keep standalone documentation tracked)
+/docs/new_carver_*/
+/docs/autotune_filter_experiments/
+/docs/autotune_filter_wgmma_register_pressure/
+/docs/autotune_filter_full_experiment_report.md
+/docs/autotune_progress_presentation_report.md
+/docs/autotune_technical_report.md
+
 # git merge
 *.orig
 \#*
