@@ -856,11 +856,11 @@ bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target) {
   return facts.can_cp_async;
 }
 
-// Read-only pre-layout query. Keep Carver on the scheduler's copy policy,
+// Read-only pre-layout query. Keep TileTune on the scheduler's copy policy,
 // including copy annotations and the current PassContext.
 TVM_FFI_STATIC_INIT_BLOCK() {
   reflection::GlobalDef().def(
-      "tl.new_carver.ClassifyProducerCopy",
+      "tl.tiletune.ClassifyProducerCopy",
       [](const Copy &op, const Target &target) {
         CopyInstSelection result =
             ClassifyWarpSpecializedProducerCopy(*op.operator->(), target);

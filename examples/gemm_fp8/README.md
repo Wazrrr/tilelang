@@ -4,12 +4,12 @@
 accumulator. It computes `A @ B.T`. The compiler selects the matrix instruction
 for the target; on Hopper the supported configurations use WGMMA.
 
-## New Carver with one reference benchmark
+## TileTune with one reference benchmark
 
 Run from the repository root on an idle Hopper GPU:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 python -m examples.gemm_fp8.example_gemm_fp8_new_carver \
+CUDA_VISIBLE_DEVICES=1 python -m examples.gemm_fp8.example_gemm_fp8_tiletune \
   --size 4096 --dtype float8_e4m3fn \
   --device-profile h200_device.json --output fp8_ranking.json
 ```
@@ -39,5 +39,5 @@ Device probes support Hopper WGMMA with FP16/BF16/FP8 inputs and FP32
 accumulation, and A100 MMA with FP16/BF16. A100 has no FP8 tensor-core instructions;
 the portable runner records FP8 workloads as unsupported. Dtype/instruction mismatches produce unknown timing scores. The
 default profile measures warm cached traffic, matching the CUDA-graph benchmark
-here. See [New Carver documentation](../../docs/new_carver.md) for the streaming
+here. See [TileTune documentation](../../docs/tiletune.md) for the streaming
 profile option, API usage and limitations.

@@ -54,6 +54,7 @@ doc/doxygen/html/*
 
 # Generated autotuning experiment results (keep standalone documentation tracked)
 /docs/new_carver_*/
+/docs/tiletune_*/
 /docs/autotune_filter_experiments/
 /docs/autotune_filter_wgmma_register_pressure/
 /docs/autotune_filter_full_experiment_report.md

@@ -45,7 +45,7 @@ def compile_grouped_unit_tvm_ffi(
     compile_args: CompileArgs,
     elaborate_func: Callable[..., PrimFunc],
     filter_config: AutotuneFilterConfig | None = None,
-    carver_session=None,
+    tiletune_session=None,
     _prepared_programs=None,
 ) -> list[CompileUnitResult]:
     """Compile one grouped unit for CUDA+tvm_ffi backend.
@@ -58,20 +58,20 @@ def compile_grouped_unit_tvm_ffi(
     5. Construct per-config JITKernel objects that dispatch to named entries in the shared executable.
     """
 
-    if carver_session is not None and _prepared_programs is None:
+    if tiletune_session is not None and _prepared_programs is None:
         # Function attributes are available only after elaboration. Split groups
         # by effective settings before lowering, keeping the same PrimFunc.
         buckets = {}
         results = []
         for idx, config_arg in unit_items:
             try:
-                program = carver_session.elaborate(
+                program = tiletune_session.elaborate(
                     idx, config_arg, elaborate_func, target=compile_args.target, pass_configs=compile_args.pass_configs
                 )
                 attrs = program.attrs or {}
                 effective_pc = dict(attrs.get("tilelang_pass_configs", {}))
                 effective_pc.update(compile_args.pass_configs or {})
-                flags = list(attrs.get("tilelang_compile_flags", [])) + carver_session.compile_flags
+                flags = list(attrs.get("tilelang_compile_flags", [])) + tiletune_session.compile_flags
                 if flags:
                     key = PassConfigKey.TL_DEVICE_COMPILE_FLAGS
                     effective_pc[key] = list(effective_pc.get(key, [])) + flags
@@ -85,12 +85,14 @@ def compile_grouped_unit_tvm_ffi(
                 bucket = buckets.setdefault(key, (effective, [], {}))
                 bucket[1].append((idx, config_arg))
                 bucket[2][idx] = program
-                carver_session.records[idx]["effective_pass_configs"] = effective_pc
+                tiletune_session.records[idx]["effective_pass_configs"] = effective_pc
             except Exception as error:
                 results.append((idx, config_arg, None, error))
         for effective, items, programs in buckets.values():
             results.extend(
-                compile_grouped_unit_tvm_ffi(items, effective, elaborate_func, carver_session=carver_session, _prepared_programs=programs)
+                compile_grouped_unit_tvm_ffi(
+                    items, effective, elaborate_func, tiletune_session=tiletune_session, _prepared_programs=programs
+                )
             )
         return results
 
@@ -137,7 +139,7 @@ def compile_grouped_unit_tvm_ffi(
             config_instruments, timing_inst = create_pass_instruments()
 
             with (
-                carver_session.stage(idx, "lower") if carver_session is not None else contextlib.nullcontext(),
+                tiletune_session.stage(idx, "lower") if tiletune_session is not None else contextlib.nullcontext(),
                 timed_autotune_stage(
                     "grouped.lower",
                     group_size=unit_group_size,
@@ -259,7 +261,7 @@ def compile_grouped_unit_tvm_ffi(
 
         reference_target = lowered_items[0]["target"]
         device_instruments, device_timing_inst = create_pass_instruments()
-        capture_cuda_resources = requested_resource_capture or filter_config.needs_cuda_resource_usage() or carver_session is not None
+        capture_cuda_resources = requested_resource_capture or filter_config.needs_cuda_resource_usage() or tiletune_session is not None
         if capture_cuda_resources:
             cuda_reset_recorder()
         capture_context = cuda_resource_info.capture_resource_usage() if capture_cuda_resources else contextlib.nullcontext()
@@ -282,10 +284,10 @@ def compile_grouped_unit_tvm_ffi(
                 grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
         finally:
             grouped_resource_usage = cuda_pop_recorded() if capture_cuda_resources else {}
-            if carver_session is not None:
+            if tiletune_session is not None:
                 duration = (time.perf_counter() - device_start) * 1000 / len(lowered_items)
                 for item in lowered_items:
-                    carver_session.records[item["idx"]]["timings_ms"]["device_compile"] = duration
+                    tiletune_session.records[item["idx"]]["timings_ms"]["device_compile"] = duration
 
         with timed_autotune_stage(
             "grouped.inspect_source",
@@ -299,8 +301,8 @@ def compile_grouped_unit_tvm_ffi(
             idx = item["idx"]
             config_arg = item["config_arg"]
             try:
-                if carver_session is not None:
-                    carver_session.post_compile(idx, grouped_resource_usage, item["launch_infos"], target=compile_args.target)
+                if tiletune_session is not None:
+                    tiletune_session.post_compile(idx, grouped_resource_usage, item["launch_infos"], target=compile_args.target)
                 if filter_config.enabled:
                     with timed_autotune_stage(
                         "grouped.post_compile_filter",
@@ -382,10 +384,10 @@ def compile_grouped_unit_tvm_ffi(
                 target=runtime_items[0]["target"],
             )
 
-        if carver_session is not None:
+        if tiletune_session is not None:
             duration = (time.perf_counter() - host_start) * 1000 / len(runtime_items)
             for item in runtime_items:
-                carver_session.records[item["idx"]]["timings_ms"]["host_compile"] = duration
+                tiletune_session.records[item["idx"]]["timings_ms"]["host_compile"] = duration
 
         with timed_autotune_stage(
             "grouped.import_module",

@@ -7,13 +7,13 @@ Add `--run-name v2` for a named version; an existing name is rejected.
 
 Both experiment types use [kernel.py](kernel.py): the advanced-autotune
 `A @ B.T` GEMM, with FP32 accumulation, a shared-memory epilogue, and the same
-288 configurations. The system experiments default to BF16; New Carver supports
+288 configurations. The system experiments default to BF16; TileTune supports
 both FP16 and BF16.
 
 ## System experiments: five cases
 
 [system/run.py](system/run.py) measures autotuning wall time and the measured
-winner's kernel latency. New Carver and legacy filtering are disabled.
+winner's kernel latency. TileTune and legacy filtering are disabled.
 
 | Case | Compile/benchmark pipeline | Grouped compilation | Multi-GPU benchmarking |
 | --- | --- | --- | --- |
@@ -102,9 +102,9 @@ Existing results directly in `grouped/` stay in place. `--variant all` writes
 `comparison.json` inside its run directory alongside `baseline/`, `pipeline/`,
 `grouped/`, `multi_gpu/`, and `combined/`.
 
-## New Carver experiments
+## TileTune experiments
 
-[new_carver/run.py](new_carver/run.py) uses `pipeline_time` to rank all 288
+[tiletune/run.py](tiletune/run.py) uses `pipeline_time` to rank all 288
 configurations and prints the measured winner's predicted rank and tie range.
 It runs in `report_only` mode with correctness checks and no early stopping.
 The winner is selected from the candidates that successfully compile and
@@ -112,16 +112,16 @@ benchmark; all candidate outcomes remain in the report.
 
 ```bash
 # FP16 GEMM.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm.new_carver.run \
+CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm.tiletune.run \
     --m 4096 --n 4096 --k 4096 --dtype float16 \
-    --device-profile experiments/profiles/h200.json \
-    --output experiments/results/gemm/new_carver_fp16
+    --device-profile experiments/profiles/h200-tiletune.json \
+    --output experiments/results/gemm/tiletune_fp16
 
 # BF16 GEMM: same datatype as the system experiments.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm.new_carver.run \
+CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm.tiletune.run \
     --m 4096 --n 4096 --k 4096 --dtype bfloat16 \
-    --device-profile experiments/profiles/h200.json \
-    --output experiments/results/gemm/new_carver_bf16
+    --device-profile experiments/profiles/h200-tiletune.json \
+    --output experiments/results/gemm/tiletune_bf16
 ```
 
 The device profile is measured if needed, then reused. Profiling time is
@@ -132,13 +132,13 @@ use a separate profile path for each incompatible device/build fingerprint.
 The final output prints the winner's configuration, latency, and one-based
 `pipeline_time` rank. Ties include their full rank interval. An unscored or
 pressure-rejected winner is labeled `rank: unavailable`, with its report position.
-Results include `carver.json` and `summary.json` with these fields.
+Results include `tiletune.json` and `summary.json` with these fields.
 
 ## Run options
 
 Both runners accept `--workers`, `--warmup`, `--rep`, `--timeout`, `--seed`, and
 `--config-indices`. For example, `--config-indices 0 8 16 24` runs a four-config
-subset; its winner and rank refer only to that subset. New Carver's `--group-size`
+subset; its winner and rank refer only to that subset. TileTune's `--group-size`
 defaults to 1, disabling grouping; use 2 or more to enable it.
 
 See the [shared experiment guide](../README.md) for profile options, rank

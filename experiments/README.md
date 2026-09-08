@@ -8,14 +8,14 @@ experiments/
 ├── gemm/
 │   ├── kernel.py             Advanced-autotune GEMM and its 288-config grid
 │   ├── system/run.py         Pipeline, grouped compilation, multi-GPU comparison
-│   └── new_carver/run.py     pipeline_time ranking and measured winner's rank
+│   └── tiletune/run.py       pipeline_time ranking and measured winner's rank
 ├── gemm_fp8/
 │   ├── kernel.py             FP8 example adapter for concurrent compilation
-│   └── new_carver/run.py     FP8 GEMM, 288 configs
+│   └── tiletune/run.py       FP8 GEMM, 288 configs
 ├── flash_attention/
-│   └── new_carver/run.py     FlashAttention, 128 configs, causal or noncausal
+│   └── tiletune/run.py       FlashAttention, 128 configs, causal or noncausal
 ├── _common.py               Run arguments and result files
-└── _new_carver.py           Shared New Carver experiment and rank reporting
+└── _tiletune.py             Shared TileTune experiment and rank reporting
 ```
 
 GEMM uses the tiled `A @ B.T` kernel from the advanced autotune example, with
@@ -29,17 +29,17 @@ Each kernel folder documents its own runnable cases:
 
 | Kernel | Experiment commands |
 | --- | --- |
-| [GEMM](gemm/README.md) | Five system cases: baseline, pipeline, grouped compilation, multi-GPU, and combined; FP16/BF16 New Carver runs |
-| [FP8 GEMM](gemm_fp8/README.md) | E4M3 and E5M2 New Carver runs |
-| [FlashAttention](flash_attention/README.md) | Noncausal and causal New Carver runs |
+| [GEMM](gemm/README.md) | Five system cases: baseline, pipeline, grouped compilation, multi-GPU, and combined; FP16/BF16 TileTune runs |
+| [FP8 GEMM](gemm_fp8/README.md) | E4M3 and E5M2 TileTune runs |
+| [FlashAttention](flash_attention/README.md) | Noncausal and causal TileTune runs |
 
-## New Carver ranking experiments
+## TileTune ranking experiments
 
 Each run obtains a reusable device profile, uses **`ranking_metric="pipeline_time"`**,
 and exhaustively tunes the supplied grid with `early_stop=False`. The mode is
 `report_only`: pressure decisions are recorded, and every successfully analyzed
 candidate proceeds to compilation. Correctness checks remain enabled. Failed
-candidates stay in `carver.json`; the winner is the fastest successful candidate.
+candidates stay in `tiletune.json`; the winner is the fastest successful candidate.
 
 Primitive rates are measured or loaded before candidate timing. Candidate
 latencies are used to identify the measured winner, not to fit the model or
@@ -48,7 +48,7 @@ The existing profiler supports A100 and Hopper; FP8 requires Hopper.
 
 ## Read the winner's rank
 
-Every New Carver run ends with lines in this form (illustrative values):
+Every TileTune run ends with lines in this form (illustrative values):
 
 ```text
 Measured winner: 0.123456 ms, original config #42
@@ -72,7 +72,7 @@ device or build change.
 ## Run sizes and output files
 
 All runners accept `--workers`, `--warmup`, `--rep`, `--timeout`, and `--seed`.
-New Carver accepts `--group-size` (default 1, grouping disabled).
+TileTune accepts `--group-size` (default 1, grouping disabled).
 `--config-indices 0 8 16 24` runs an explicit subset for a shorter experiment;
 the default is the entire grid. Subset reports preserve original indices and
 label their grid size. They do not claim an exhaustive full-grid winner.
@@ -90,9 +90,9 @@ and profiles under `experiments/profiles/` are ignored by Git.
 
 | File | Contents |
 | --- | --- |
-| `experiment.json` | Arguments, devices, original indices, grid, and New Carver's fixed profile/source hashes |
+| `experiment.json` | Arguments, devices, original indices, grid, and TileTune's fixed profile/source hashes |
 | `benchmarks.tsv` | Per-candidate benchmark outcomes and latencies |
 | `timings.tsv` | Compilation and autotuning stage measurements |
-| `summary.json` | Tuning duration and measured winner; New Carver also records its predicted rank and ties |
-| `carver.json` | New Carver's analysis, resource decisions, ranking, and outcome for every supplied candidate |
+| `summary.json` | Tuning duration and measured winner; TileTune also records its predicted rank and ties |
+| `tiletune.json` | TileTune's analysis, resource decisions, ranking, and outcome for every supplied candidate |
 | `comparison.json` | System `--variant all` results and speedups; each variant has its own subdirectory |

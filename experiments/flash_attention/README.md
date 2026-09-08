@@ -6,11 +6,11 @@ subdirectory under `--output`; repeat the command to retain multiple versions.
 Add `--run-name v2` for a named version; an existing name is rejected. Use a
 device-profile path appropriate to the selected GPU.
 
-[new_carver/run.py](new_carver/run.py) elaborates the existing FlashAttention
+[tiletune/run.py](tiletune/run.py) elaborates the existing FlashAttention
 forward example with FP16 BSHD inputs and a chunked FP32 reference. Both causal
 and noncausal experiments use the full 128-config grid.
 
-## New Carver experiments
+## TileTune experiments
 
 Both cases rank with `pipeline_time`, use `report_only` mode, and disable early
 stopping. Every successfully analyzed and compiled candidate is benchmarked with
@@ -19,15 +19,15 @@ rank, and tie range are printed at the end.
 
 ```bash
 # Noncausal FlashAttention.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.flash_attention.new_carver.run \
+CUDA_VISIBLE_DEVICES=0 python -m experiments.flash_attention.tiletune.run \
     --batch 1 --heads 16 --sequence 4096 --dim 128 \
-    --device-profile experiments/profiles/h200.json \
+    --device-profile experiments/profiles/h200-tiletune.json \
     --output experiments/results/flash_attention/noncausal
 
 # Causal FlashAttention.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.flash_attention.new_carver.run \
+CUDA_VISIBLE_DEVICES=0 python -m experiments.flash_attention.tiletune.run \
     --batch 1 --heads 16 --sequence 4096 --dim 128 --causal \
-    --device-profile experiments/profiles/h200.json \
+    --device-profile experiments/profiles/h200-tiletune.json \
     --output experiments/results/flash_attention/causal
 ```
 
@@ -49,7 +49,7 @@ the full rank interval. An unscored or pressure-rejected winner is labeled
 `rank: unavailable`, with its tier and report position. Failed candidates remain
 in the report; the measured winner is the fastest successful candidate.
 
-`summary.json` contains the winner and rank. `carver.json` retains the complete
+`summary.json` contains the winner and rank. `tiletune.json` retains the complete
 analysis, ranking, and candidate outcomes. `experiment.json` records the workload,
 grid, device, fixed profile, and source hashes. `benchmarks.tsv` and `timings.tsv`
 record measurements and stage costs.

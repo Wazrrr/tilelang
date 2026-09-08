@@ -2,7 +2,7 @@
 
 from threading import Lock
 
-from examples.gemm_fp8.example_gemm_fp8_new_carver import get_configs as get_configs
+from examples.gemm_fp8.example_gemm_fp8_tiletune import get_configs as get_configs
 from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
 
 

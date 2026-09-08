@@ -1,7 +1,7 @@
-# Reproducing New Carver experiments
+# Reproducing TileTune experiments
 
 Run commands from a checkout of this commit. The portable entry point is
-`python -m benchmark.autotune.validate_new_carver_generalization`. It uses actual
+`python -m benchmark.autotune.validate_tiletune_generalization`. It uses actual
 GEMM/attention PrimFuncs, fixed device probes and the full original config grids.
 No candidate timing fits the model and no top-K pruning is applied.
 
@@ -39,14 +39,14 @@ also measures FP8 WGMMA. It does not benchmark any candidate kernel.
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
-python -m benchmark.autotune.validate_new_carver_generalization profile \
-  --profile /tmp/carver-a100-device.json
-python -m benchmark.autotune.validate_new_carver_generalization freeze \
-  --profile /tmp/carver-a100-device.json --root /tmp/carver-a100-all --split all
-python -m benchmark.autotune.validate_new_carver_generalization worker \
-  --root /tmp/carver-a100-all
-python -m benchmark.autotune.validate_new_carver_generalization evaluate \
-  --root /tmp/carver-a100-all
+python -m benchmark.autotune.validate_tiletune_generalization profile \
+  --profile /tmp/tiletune-a100-device.json
+python -m benchmark.autotune.validate_tiletune_generalization freeze \
+  --profile /tmp/tiletune-a100-device.json --root /tmp/tiletune-a100-all --split all
+python -m benchmark.autotune.validate_tiletune_generalization worker \
+  --root /tmp/tiletune-a100-all
+python -m benchmark.autotune.validate_tiletune_generalization evaluate \
+  --root /tmp/tiletune-a100-all
 ```
 
 Use persistent storage instead of `/tmp` for results you want to retain. A profile
@@ -76,8 +76,8 @@ For only the original 4096³ and attention experiment, use `--split baseline` wh
 freezing. For a single case from a frozen experiment:
 
 ```bash
-python -m benchmark.autotune.validate_new_carver_generalization run \
-  --root /tmp/carver-a100-all --case gemm_4096
+python -m benchmark.autotune.validate_tiletune_generalization run \
+  --root /tmp/tiletune-a100-all --case gemm_4096
 ```
 
 Workers skip completed cases, making interrupted suites resumable. A failed case
@@ -92,10 +92,10 @@ a workload's config grid. Launch these commands concurrently in separate shells
 or jobs, after checking both devices are idle:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 python -m benchmark.autotune.validate_new_carver_generalization worker \
-  --root /tmp/carver-a100-all --shard 0 --shards 2
-CUDA_VISIBLE_DEVICES=2 python -m benchmark.autotune.validate_new_carver_generalization worker \
-  --root /tmp/carver-a100-all --shard 1 --shards 2
+CUDA_VISIBLE_DEVICES=1 python -m benchmark.autotune.validate_tiletune_generalization worker \
+  --root /tmp/tiletune-a100-all --shard 0 --shards 2
+CUDA_VISIBLE_DEVICES=2 python -m benchmark.autotune.validate_tiletune_generalization worker \
+  --root /tmp/tiletune-a100-all --shard 1 --shards 2
 ```
 
 For disabled/report-only/rejection comparisons, freeze separate roots with
@@ -107,7 +107,7 @@ the measured set, so use report-only results to evaluate pruning accuracy.
 ## Outputs and interpretation
 
 - `freeze.json`, `device.json`, `sources/`: immutable experiment inputs.
-- `<case>/summary.json`, `carver.json`: every original config, pressure evidence,
+- `<case>/summary.json`, `tiletune.json`: every original config, pressure evidence,
   compiler resources, correctness/benchmark status, measured winner and latency.
 - `<case>/config_<index>.cu`, `compiled_<index>.json`, `result_<index>.json`:
   generated code and per-config checkpoints.
@@ -134,7 +134,7 @@ rates to an A100 or interpret cross-compilation as A100 performance validation.
 ## Tests and individual examples
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m pytest testing/python/new_carver/ -q
+CUDA_VISIBLE_DEVICES=0 python -m pytest testing/python/tiletune/ -q
 CUDA_VISIBLE_DEVICES=0 python -m pytest \
   testing/python/transform/test_tilelang_transform_ws_phase_lag.py -q
 ```
@@ -142,10 +142,10 @@ CUDA_VISIBLE_DEVICES=0 python -m pytest \
 The phase-lag test requires Hopper and skips on A100. The portability tests include
 CPU analysis with explicit A100 limits and sm_80 device cross-compilation.
 
-`benchmark_new_carver_gemm.py`, `benchmark_new_carver_attention.py`, and
-`benchmark_new_carver_fp8.py` provide individual-case comparisons, including
+`benchmark_tiletune_gemm.py`, `benchmark_tiletune_attention.py`, and
+`benchmark_tiletune_fp8.py` provide individual-case comparisons, including
 selected-index debugging. The FP8 script/example requires Hopper. See
-[the model documentation](../../docs/new_carver.md) for API use and formulas, and
-[the preceding H200 findings](../../docs/new_carver_validation.md) for known model
+[the model documentation](../../docs/tiletune.md) for API use and formulas, and
+[the preceding H200 findings](../../docs/tiletune_validation.md) for known model
 weaknesses. Historical fitted-profile scripts and raw experiment artifacts are
 not dependencies of this workflow.

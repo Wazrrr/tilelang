@@ -2,8 +2,8 @@
 
 import pytest
 
-from experiments._new_carver import winner_summary
-from tilelang.new_carver.ranking import rank_records
+from experiments._tiletune import winner_summary
+from tilelang.tiletune.ranking import rank_records
 
 
 def report(scores):

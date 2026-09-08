@@ -10,24 +10,24 @@ accumulation and output in the input datatype. The grid contains 288
 configurations. Kernel construction is serialized because the eager builder
 mutates shared state; lowering and compilation remain parallel.
 
-## New Carver experiments
+## TileTune experiments
 
-[new_carver/run.py](new_carver/run.py) ranks the full grid with `pipeline_time`,
+[tiletune/run.py](tiletune/run.py) ranks the full grid with `pipeline_time`,
 benchmarks every successfully analyzed and compiled candidate, and prints the
 measured winner's predicted rank. It uses `report_only` mode, no early stopping,
 and the example's `calc_diff < 1e-3` correctness criterion.
 
 ```bash
 # FP8 E4M3.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm_fp8.new_carver.run \
+CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm_fp8.tiletune.run \
     --m 4096 --n 4096 --k 4096 --dtype float8_e4m3fn \
-    --device-profile experiments/profiles/h200.json \
+    --device-profile experiments/profiles/h200-tiletune.json \
     --output experiments/results/gemm_fp8/e4m3
 
 # FP8 E5M2.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm_fp8.new_carver.run \
+CUDA_VISIBLE_DEVICES=0 python -m experiments.gemm_fp8.tiletune.run \
     --m 4096 --n 4096 --k 4096 --dtype float8_e5m2 \
-    --device-profile experiments/profiles/h200.json \
+    --device-profile experiments/profiles/h200-tiletune.json \
     --output experiments/results/gemm_fp8/e5m2
 ```
 
@@ -48,7 +48,7 @@ Each run prints the measured winner's configuration, latency, and one-based
 winner unscored or marks it pressure-rejected, the output says
 `rank: unavailable` and supplies its report position and tier.
 
-`summary.json` contains the winner and rank. `carver.json` retains the ranking,
+`summary.json` contains the winner and rank. `tiletune.json` retains the ranking,
 analysis, and every candidate outcome, including failures. `experiment.json`
 records the grid, input settings, device, fixed profile, and source hashes.
 `benchmarks.tsv` and `timings.tsv` record measurements and stage costs.

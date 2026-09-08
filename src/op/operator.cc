@@ -111,14 +111,14 @@ Var GetVarFromAccessPtr(const PrimExpr &expr) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
-      .def("tl.new_carver.ParseOperator",
+      .def("tl.tiletune.ParseOperator",
            [](const Call &call, const BlockAnnotations &annotations) {
              if (!call->op.as<Op>().has_value()) {
                return TileOperator();
              }
              return ParseOperator(call, annotations);
            })
-      .def("tl.new_carver.GetAccessRegions", [](const TileOperator &op) {
+      .def("tl.tiletune.GetAccessRegions", [](const TileOperator &op) {
         AccessRegions regions = op->GetAccessRegions();
         return ffi::Array<ffi::Array<BufferRegion>>{regions.reads,
                                                     regions.writes};

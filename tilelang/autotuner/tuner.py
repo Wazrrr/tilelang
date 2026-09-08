@@ -35,8 +35,8 @@ import time
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
-from tilelang.new_carver import CarverConfig
-from tilelang.new_carver.runtime import CarverSession
+from tilelang.tiletune import TileTuneConfig
+from tilelang.tiletune.runtime import TileTuneSession
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.autotuner.filters import (
     AutotuneFilterConfig,
@@ -288,12 +288,12 @@ class AutoTuner:
         self.ref_input_tensors = None
         self.jit_compile = None
         self.jit_elaborate = None
-        self.carver_args = CarverConfig()
-        self.carver_session = None
-        self.carver_report = None
-        self._carver_device_limits = None
-        self._carver_standard_jit = False
-        self._carver_compile_flags = None
+        self.tiletune_args = TileTuneConfig()
+        self.tiletune_session = None
+        self.tiletune_report = None
+        self._tiletune_device_limits = None
+        self._tiletune_standard_jit = False
+        self._tiletune_compile_flags = None
         self.filter_args = AutotuneFilterConfig()
         self._filter_report_initialized = False
         self.benchmark_report_path: str | None = None
@@ -379,9 +379,9 @@ class AutoTuner:
 
         return self
 
-    def set_carver_args(self, carver=None, **kwargs):
+    def set_tiletune_args(self, tiletune=None, **kwargs):
         """Enable exhaustive pre-lowering analysis and pressure-only compiler checks."""
-        self.carver_args = CarverConfig.from_value(carver, **kwargs)
+        self.tiletune_args = TileTuneConfig.from_value(tiletune, **kwargs)
         return self
 
     def set_filter_args(
@@ -555,9 +555,9 @@ class AutoTuner:
             "compile_args": hash(self.compile_args),
             "profile_args": hash(self.profile_args),
             "filter_args": self.filter_args.to_cache_key_dict(),
-            "carver_args": self.carver_args.to_cache_key_dict(),
-            "carver_compile_flags": self._carver_compile_flags if self.carver_args.enabled else None,
-            "carver_device_limits": self._carver_device_limits if self.carver_args.enabled else None,
+            "tiletune_args": self.tiletune_args.to_cache_key_dict(),
+            "tiletune_compile_flags": self._tiletune_compile_flags if self.tiletune_args.enabled else None,
+            "tiletune_device_limits": self._tiletune_device_limits if self.tiletune_args.enabled else None,
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
@@ -923,7 +923,7 @@ class AutoTuner:
                         compile_args=effective_compile_args,
                         elaborate_func=get_elaborate_func(),
                         filter_config=self.filter_args if filter_active else None,
-                        carver_session=self.carver_session,
+                        tiletune_session=self.tiletune_session,
                     )
             compile_impl = get_compile_func()
             elaborate_impl = get_elaborate_func()
@@ -936,10 +936,10 @@ class AutoTuner:
                         config_idx=idx,
                         configs=str(idx),
                     ):
-                        if self.carver_session is not None:
+                        if self.tiletune_session is not None:
                             effective_args = self._merge_pass_configs_into_compile_args(config_arg.get(_PASS_CONFIGS_KEY))
                             results = compile_grouped_unit_tvm_ffi(
-                                [(idx, config_arg)], effective_args, elaborate_impl, carver_session=self.carver_session
+                                [(idx, config_arg)], effective_args, elaborate_impl, tiletune_session=self.tiletune_session
                             )
                             unit_results.extend(results)
                             continue
@@ -959,7 +959,9 @@ class AutoTuner:
             for i, cfg in enumerate(config_args):
                 pc = cfg.pop(_PASS_CONFIGS_KEY, None)
                 key = (
-                    (json.dumps(pc, sort_keys=True, default=str) if self.carver_args.enabled else tuple(sorted(pc.items()))) if pc else None
+                    (json.dumps(pc, sort_keys=True, default=str) if self.tiletune_args.enabled else tuple(sorted(pc.items())))
+                    if pc
+                    else None
                 )
                 buckets.setdefault(key, []).append((i, cfg, pc))
             for bucket_items in buckets.values():
@@ -1333,22 +1335,22 @@ class AutoTuner:
         """
         _init_logger_handlers()
 
-        if self.carver_args.enabled:
+        if self.tiletune_args.enabled:
             if self.filter_args.enabled:
-                raise ValueError("New Carver and legacy autotune filters cannot be enabled together")
+                raise ValueError("TileTune and legacy autotune filters cannot be enabled together")
             if early_stop:
-                raise ValueError("Exhaustive new Carver requires early_stop=False")
+                raise ValueError("Exhaustive TileTune requires early_stop=False")
             target_kind = getattr(getattr(self.compile_args.target, "kind", None), "name", str(self.compile_args.target))
             if target_kind != "cuda" or self.compile_args.execution_backend != "tvm_ffi":
-                raise ValueError("New Carver supports only CUDA with the tvm_ffi execution backend")
-            if self.jit_compile is not None and not self._carver_standard_jit and self.jit_compile != self._default_compile:
-                raise ValueError("New Carver cannot analyze opaque custom jit_compile hooks; use the standard JIT path")
-            from tilelang.new_carver import query_device_limits
+                raise ValueError("TileTune supports only CUDA with the tvm_ffi execution backend")
+            if self.jit_compile is not None and not self._tiletune_standard_jit and self.jit_compile != self._default_compile:
+                raise ValueError("TileTune cannot analyze opaque custom jit_compile hooks; use the standard JIT path")
+            from tilelang.tiletune import query_device_limits
 
-            self._carver_device_limits = self.carver_args.device_limits
+            self._tiletune_device_limits = self.tiletune_args.device_limits
             # Physical register checks also need SM capacity when ranking is disabled.
-            if self._carver_device_limits is None:
-                self._carver_device_limits = query_device_limits(self.compile_args.target)
+            if self._tiletune_device_limits is None:
+                self._tiletune_device_limits = query_device_limits(self.compile_args.target)
 
         if early_stop and early_stop_factor < 1.0:
             raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
@@ -1382,7 +1384,7 @@ class AutoTuner:
 
         key = self.generate_cache_key(parameters, extra_parameters)
         filter_report_requested = self._filter_report_path() is not None or (
-            self.carver_args.enabled and (self.carver_args.report_path is not None or self.carver_args.trace_path is not None)
+            self.tiletune_args.enabled and (self.tiletune_args.report_path is not None or self.tiletune_args.trace_path is not None)
         )
         benchmark_report_requested = self._benchmark_report_path() is not None
 
@@ -1438,15 +1440,15 @@ class AutoTuner:
 
         if len(config_args) == 0:
             raise ValueError("No configurations to tune, please check your `@autotune` decorator")
-        self.carver_session = (
-            CarverSession(
-                self.carver_args,
+        self.tiletune_session = (
+            TileTuneSession(
+                self.tiletune_args,
                 self.configs,
-                self._carver_compile_flags,
+                self._tiletune_compile_flags,
                 target=self.compile_args.target,
-                device_limits=self._carver_device_limits,
+                device_limits=self._tiletune_device_limits,
             )
-            if self.carver_args.enabled
+            if self.tiletune_args.enabled
             else None
         )
         self._init_filter_report()
@@ -1486,9 +1488,9 @@ class AutoTuner:
             if any(key in top_config for key, _ in key_kwargs_tuple) or any(
                 check_tunable_argument_value(key, self._function_parameters, key_args_tuple) for key in tunable_arguments
             ):
-                if self.carver_args.enabled:
+                if self.tiletune_args.enabled:
                     raise ValueError(
-                        "New Carver requires every supplied configuration to be tuned; remove explicitly bound tunable arguments"
+                        "TileTune requires every supplied configuration to be tuned; remove explicitly bound tunable arguments"
                     )
                 logger.warning(
                     f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
@@ -1505,7 +1507,7 @@ class AutoTuner:
         # Build the prim_func from a concrete config so tunable parameters are
         # bound to real values instead of their ``None`` defaults, which would
         # otherwise crash inside TVM (e.g. ceildiv with a None extent).
-        if self.carver_session is None:
+        if self.tiletune_session is None:
             prim_func_for_validation = elaborate_func(**top_config)
             self._validate_input_supply_requirements(prim_func_for_validation, self.compile_args.out_idx)
         else:
@@ -1581,8 +1583,8 @@ class AutoTuner:
             progress_bar.update(1)
             status_text = status or "ok"
             self._write_benchmark_result(idx, status_text, latency, error_text)
-            if self.carver_session is not None:
-                self.carver_session.benchmark_result(idx, status_text, latency, error_text)
+            if self.tiletune_session is not None:
+                self.tiletune_session.benchmark_result(idx, status_text, latency, error_text)
 
             if status == "timeout":
                 logger.warning(f"A timeout occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
@@ -1651,17 +1653,17 @@ class AutoTuner:
                         unit_results = future.result()
                     except Exception as e:
                         compile_progress.update(len(unit_items))
-                        if self.carver_session is not None:
+                        if self.tiletune_session is not None:
                             for idx, _ in unit_items:
-                                self.carver_session.compilation_result(idx, e)
+                                self.tiletune_session.compilation_result(idx, e)
                         unit_indexes = [idx for idx, _ in unit_items]
                         logger.debug("Compilation unit failed for indexes %s with error: %s", unit_indexes, e)
                         continue
 
                     compile_progress.update(len(unit_results))
                     for idx, config, jit_kernel, error in unit_results:
-                        if self.carver_session is not None:
-                            self.carver_session.compilation_result(idx, error)
+                        if self.tiletune_session is not None:
+                            self.tiletune_session.compilation_result(idx, error)
                         if error is not None:
                             if isinstance(error, AutotuneFilterReject):
                                 for decision in error.filter_decisions:
@@ -1705,8 +1707,8 @@ class AutoTuner:
             compile_progress.close()
             progress_bar.close()
             pool.shutdown()
-            if self.carver_session is not None:
-                self.carver_report = self.carver_session.finish()
+            if self.tiletune_session is not None:
+                self.tiletune_report = self.tiletune_session.finish()
 
         self.jit_input_tensors = main_thread_benchmark_state.jit_input_tensors
         self.ref_input_tensors = main_thread_benchmark_state.ref_input_tensors
@@ -1778,7 +1780,7 @@ class AutoTuneImpl(Generic[_P, _T]):
     early_stop: bool = False
     early_stop_factor: float = 2.0
     filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None
-    carver: bool | dict[str, Any] | CarverConfig | None = None
+    tiletune: bool | dict[str, Any] | TileTuneConfig | None = None
 
     def __post_init__(self):
         self._tuner_cache = {}
@@ -1834,12 +1836,12 @@ class AutoTuneImpl(Generic[_P, _T]):
                 pass_configs=self.jit_impl.pass_configs,
             )
             .set_filter_args(self.filter)
-            .set_carver_args(self.carver)
+            .set_tiletune_args(self.tiletune)
         )
-        if autotuner.carver_args.enabled and self.jit_impl.compile_flags:
+        if autotuner.tiletune_args.enabled and self.jit_impl.compile_flags:
             flags = self.jit_impl.compile_flags
             flags = [flags] if isinstance(flags, str) else list(flags)
-            autotuner._carver_compile_flags = flags
+            autotuner._tiletune_compile_flags = flags
         autotuner.run = partial(
             autotuner.run,
             self.warmup,
@@ -1870,8 +1872,8 @@ class AutoTuneImpl(Generic[_P, _T]):
             norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache or (
-            autotuner.carver_args.enabled
-            and (autotuner.carver_args.report_path is not None or autotuner.carver_args.trace_path is not None)
+            autotuner.tiletune_args.enabled
+            and (autotuner.tiletune_args.report_path is not None or autotuner.tiletune_args.trace_path is not None)
         ):
 
             def jit_elaborate(**config_arg):
@@ -1882,11 +1884,11 @@ class AutoTuneImpl(Generic[_P, _T]):
 
             autotuner.jit_compile = self._make_jit_compile_func(mode, args, kwargs)
             autotuner.jit_elaborate = jit_elaborate
-            autotuner._carver_standard_jit = True
+            autotuner._tiletune_standard_jit = True
             autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
 
             artifact = autotuner.run()
-            self.carver_report = autotuner.carver_report
+            self.tiletune_report = autotuner.tiletune_report
             self._tuner_cache[key] = artifact.kernel, artifact.config
 
         best_kernel, best_config = self._tuner_cache[key]
@@ -1928,7 +1930,7 @@ def autotune(  # This is the new public interface
     early_stop: bool = False,
     early_stop_factor: float = 2.0,
     filter: bool | dict[str, Any] | AutotuneFilterConfig | None = None,
-    carver: bool | dict[str, Any] | CarverConfig | None = None,
+    tiletune: bool | dict[str, Any] | TileTuneConfig | None = None,
 ):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
@@ -2008,7 +2010,7 @@ def autotune(  # This is the new public interface
                 early_stop=early_stop,
                 early_stop_factor=early_stop_factor,
                 filter=filter,
-                carver=carver,
+                tiletune=tiletune,
             )
 
         return decorator

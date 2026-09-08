@@ -25,4 +25,4 @@ from .filters import (
     unregister_filter_rule,  # noqa: F401
 )
 
-from tilelang.new_carver import CarverConfig  # noqa: F401
+from tilelang.tiletune import TileTuneConfig  # noqa: F401
