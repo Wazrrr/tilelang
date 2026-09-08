@@ -86,7 +86,10 @@ def main():
         profile=profile,
         profile_seconds=profile_seconds,
         analysis_seconds=analysis_seconds,
-        analysis_source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in Path("tilelang/new_carver").glob("*.py")},
+        analysis_source_sha256={
+            p.relative_to("tilelang/new_carver").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in Path("tilelang/new_carver").rglob("*.py")
+        },
         records=records,
         ranking=ranking,
         reference_config=reference_config,

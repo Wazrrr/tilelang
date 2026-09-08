@@ -39,7 +39,10 @@ def main():
     # Persist exactly what the ranker knew before any candidate was benchmarked.
     frozen = dict(
         profile=profile,
-        source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in Path("tilelang/new_carver").glob("*.py")},
+        source_sha256={
+            p.relative_to("tilelang/new_carver").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in Path("tilelang/new_carver").rglob("*.py")
+        },
     )
     (args.output / "frozen.json").write_text(json.dumps(frozen, indent=2) + "\n")
     torch.manual_seed(123)

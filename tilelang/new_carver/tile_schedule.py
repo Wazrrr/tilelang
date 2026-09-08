@@ -71,7 +71,7 @@ def collect_producer_buffers(col, loop):
     from math import prod
     from tilelang import tvm
     from .analysis import _int
-    from .specializations import in_loop
+    from .ir_utils import in_loop
 
     inside = [op for op in col.operations if in_loop(op, loop)]
     producers = [

@@ -7,6 +7,13 @@ lower bound (or a resolved physical constraint) can justify rejection.
 
 
 def analyze_register_policy(pressure, config, specialization, device_limits=None):
+    """Resolve physical capacity, then family demand policy, then rejection.
+
+    The family supplies only its soft allowance. Every family obeys the same
+    physical register limits and uses the same distinction between estimated
+    live demand and a proven accumulator lower bound.
+    """
+    # 1. Validate the predicted producer/consumer partition and its reservation.
     limits = device_limits or {}
     ws = pressure.get("warp_specialization", {})
     fields = ("producer_threads", "consumer_threads", "producer_register_request", "consumer_register_request")
@@ -40,7 +47,8 @@ def analyze_register_policy(pressure, config, specialization, device_limits=None
             "logical tile demand and spill allowances never enlarge physical capacity",
         ],
     }
-    allowance = config.attention_spill_budget_registers_per_thread if specialization.name == "attention" and specialization.matched else 0
+    # 2. Compare logical demand with consumer capacity plus the family margin.
+    allowance = specialization.register_spill_allowance(config)
     capacity, basis = pressure.get("budget"), pressure.get("budget_source")
     if known and (capacity is None or ws["consumer_register_request"] <= capacity):
         capacity, basis = ws["consumer_register_request"], "warp-specialization consumer register request"
@@ -77,6 +85,7 @@ def analyze_register_policy(pressure, config, specialization, device_limits=None
             "pipeline timing excludes spill traffic when the score relies on the allowance",
         ],
     }
+    # 3. Reject only on physical constraints or a proven demand lower bound.
     reasons = list(physical_reasons)
     if proven_exceeds:
         reasons.append(f"proven tile demand {lower} exceeds demand limit {capacity} + allowance {allowance} = {threshold}")

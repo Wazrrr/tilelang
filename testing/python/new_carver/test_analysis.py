@@ -139,7 +139,7 @@ def test_tensor_memory_accumulator_is_not_register_storage():
             T.copy(c, C)
 
     result = analyze_prim_func(main, {"register_cap": 1})
-    assert not result["propagation"]["unknown"]
+    assert not result["tile_propagation"]["unknown"]
     assert result["pressure"]["modeled_lower_bound"] is None
     assert result["pressure"]["decision"]["keep"]
 
@@ -163,7 +163,8 @@ def test_overwrite_and_broadcast():
             for i, j in T.Parallel(16, 16):
                 C[i, j] = T.cast(tmp[j], "float32")
 
-    result = propagate_inputs(main)
+    output = main.buffer_map[main.params[2]]
+    result = propagate_inputs(main, [tir.BufferRegion(output, [Range.from_min_extent(0, 16), Range.from_min_extent(0, 16)])])
     assert {r.buffer.name for r in result.per_iteration_inputs} == {"B"}
 
 
@@ -181,8 +182,8 @@ def test_branches_and_opaque_remain_eligible():
 
     result = analyze_prim_func(main, {"register_cap": 1})
     assert result["pressure"]["decision"]["keep"]
-    assert result["propagation"]["unknown"]
-    assert {r["buffer"] for r in result["propagation"]["per_iteration_inputs"]} == {"A", "B"}
+    assert result["tile_propagation"]["unknown"]
+    assert {r["buffer"] for r in result["tile_propagation"]["per_iteration_inputs"]} == {"A", "B"}
 
 
 def test_reduce():
@@ -210,7 +211,8 @@ def test_boundary_copy():
             T.copy(A[16:32], tmp)
             T.copy(tmp, C[0:16])
 
-    result = propagate_inputs(main)
+    output = main.buffer_map[main.params[1]]
+    result = propagate_inputs(main, [tir.BufferRegion(output, [Range.from_min_extent(0, 16)])])
     assert int(result.per_iteration_inputs[0].ranges[0].extent) == 3
     assert result.per_iteration_inputs[0].precision == "conservative"
 
@@ -241,7 +243,8 @@ def test_partial_overwrite_keeps_unwritten_inputs():
             T.copy(B, tmp[8:16])
             T.copy(tmp, C)
 
-    result = propagate_inputs(main)
+    output = main.buffer_map[main.params[2]]
+    result = propagate_inputs(main, [tir.BufferRegion(output, [Range.from_min_extent(0, 16)])])
     assert {r.buffer.name for r in result.per_iteration_inputs} == {"A", "B"}
 
 
@@ -255,7 +258,9 @@ def test_strided_writes_do_not_kill_unwritten_values():
                 tmp[2 * i] = B[i]
             T.copy(tmp, C)
 
-    assert {r.buffer.name for r in propagate_inputs(main).per_iteration_inputs} == {"A", "B"}
+    output = main.buffer_map[main.params[2]]
+    result = propagate_inputs(main, [tir.BufferRegion(output, [Range.from_min_extent(0, 16)])])
+    assert {r.buffer.name for r in result.per_iteration_inputs} == {"A", "B"}
 
 
 def test_global_initialization_is_not_an_external_input():
@@ -265,7 +270,8 @@ def test_global_initialization_is_not_an_external_input():
             T.fill(A, 0)
             T.copy(A, C)
 
-    assert not propagate_inputs(main).per_iteration_inputs
+    output = main.buffer_map[main.params[1]]
+    assert not propagate_inputs(main, [tir.BufferRegion(output, [Range.from_min_extent(0, 16)])]).per_iteration_inputs
 
 
 def test_explicit_replication():
@@ -289,8 +295,30 @@ def test_explicit_replication():
     assert pressure["modeled_lower_bound"] == 8
 
 
-def test_region_query_does_not_change_pressure():
+def test_region_query_is_separate_from_kernel_pressure():
     func = gemm(explicit=True)
     out = func.buffer_map[func.params[2]]
     demand = tir.BufferRegion(out, [Range.from_min_extent(8, 1), Range.from_min_extent(16, 1)])
-    assert analyze_prim_func(func, {"register_cap": 1}, [demand])["pressure"] == analyze_prim_func(func, {"register_cap": 1})["pressure"]
+    before = analyze_prim_func(func, {"register_cap": 1})["pressure"]
+    query = propagate_inputs(func, [demand])
+    assert all(any(int(r.extent) == 1 for r in region.ranges) for region in query.per_iteration_inputs)
+    assert analyze_prim_func(func, {"register_cap": 1})["pressure"] == before
+    with pytest.raises(TypeError, match="outputs"):
+        analyze_prim_func(func, outputs=[demand])
+
+
+@pytest.mark.parametrize("outputs,error", [(None, TypeError), ([], ValueError)])
+def test_region_query_requires_outputs(outputs, error):
+    with pytest.raises(error, match="output"):
+        propagate_inputs(gemm(), outputs)
+
+
+def test_analysis_requires_global_output():
+    @T.prim_func
+    def main(A: T.Tensor((16,), "float32")):
+        with T.Kernel(1, threads=32):
+            tmp = T.alloc_fragment((16,), "float32")
+            T.copy(A, tmp)
+
+    with pytest.raises(ValueError, match="global output write"):
+        analyze_prim_func(main)

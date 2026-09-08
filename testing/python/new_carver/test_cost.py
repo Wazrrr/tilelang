@@ -92,15 +92,13 @@ def test_shared_and_thread_limits_control_waves():
     assert cost["num_waves_estimate"] == 16
 
 
-def test_cost_failure_does_not_erase_pressure(monkeypatch):
+def test_cost_errors_reach_the_caller(monkeypatch):
     def fail(*args):
         raise RuntimeError("cost failure")
 
     monkeypatch.setattr("tilelang.new_carver.cost.analyze_tile_cost", fail)
-    result = analyze_prim_func(gemm(), {"register_cap": 1})
-    assert result["pressure"]["decision"]["would_reject"]
-    assert result["tile_cost"]["score"] is None
-    assert result["tile_cost"]["analysis_error"] == "cost failure"
+    with pytest.raises(RuntimeError, match="cost failure"):
+        analyze_prim_func(gemm(), {"register_cap": 1})
 
 
 def test_ranking_preserves_unknowns_ties_and_ignores_timings():

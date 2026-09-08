@@ -149,7 +149,10 @@ def main():
         profile=profile,
         profile_seconds=profile_seconds,
         analysis_seconds=time.perf_counter() - start,
-        source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in Path("tilelang/new_carver").glob("*.py")},
+        source_sha256={
+            p.relative_to("tilelang/new_carver").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in Path("tilelang/new_carver").rglob("*.py")
+        },
         configs=configs,
         records=records,
         ranking=rank_records(records),

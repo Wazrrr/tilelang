@@ -26,34 +26,80 @@ tuner.set_carver_args(
 # Offline analysis takes an already elaborated PrimFunc; it never runs a kernel.
 analysis = analyze_prim_func(func, CarverConfig(), target=target,
                             device_limits=device_limits, pass_configs=pass_configs)
-inputs = propagate_inputs(func)
+# A separate dependency query requires explicit Region/BufferRegion roots.
+inputs = propagate_inputs(func, requested_output_regions)
+
+# Optional intermediate snapshots for learning/debugging the analysis.
+analysis = analyze_prim_func(func, CarverConfig(trace_path="/tmp/carver_trace.log"),
+                            target=target, device_limits=device_limits)
 ```
 
 Autotuner integration requires CUDA, `tvm_ffi`, and `early_stop=False`. New Carver
 cannot run alongside legacy filters or opaque custom compilation hooks. Single
 and grouped compilation reuse the analyzed PrimFunc, including normal JIT binding
 and per-config pass settings. `report_only` records pressure decisions while
-compiling all elaborated candidates; `reject` applies proven pressure failures.
+compiling candidates that analyze successfully; `reject` applies proven pressure failures.
 Correctness checks and benchmarking still run normally.
 
-The standalone APIs accept optional output `tirx.BufferRegion` or New Carver
-`Region` demands. Propagation keeps offsets and extents, and labels exact regions,
-conservative bounds and unknowns. Per-iteration inputs remain separate from the
-union across a loop. Queries never shrink the actual allocations or computation.
+`analyze_prim_func` always analyzes every captured global output write. It has no
+output-region override, and a kernel without captured global output writes raises
+`ValueError`. For a separate dependency query, `propagate_inputs` requires an
+explicit, nonempty list of `tirx.BufferRegion` or New Carver `Region` demands.
+Propagation keeps offsets and extents; per-iteration inputs remain separate from
+coverage across loops. Region queries do not participate in resource ranking.
+
+Invalid inputs and unexpected analysis errors propagate to the caller. During
+autotuning the affected candidate is recorded as `analysis_failed` and does not
+reach lowering or benchmarking. Explicit model uncertainty, such as symbolic
+tile sizes or an unsupported schedule, remains an `unknown` result. Callers must
+fix invalid kernels/settings or handle exceptions around standalone analysis.
+
+## Fundamental contract
+
+The analysis unit is an actual tile access: buffer identity, symbolic offsets,
+extents, dtype, predicates, and its operation/loop context. Each candidate is
+elaborated once and its output tiles are propagated once. The resulting
+`tile_propagation` supplies the demands used for accumulator evidence, memory
+analysis and reporting. There is no separate full-launch propagation mode.
+
+The shared graph supports distinct calculations: simultaneous live tile storage
+for register pressure, actual accesses and loop visits for traffic, dependencies
+and stage buffers for overlap, and grid/residency for waves. Full-loop address
+coverage is derived from input tile regions within a CTA, keeping launch offsets
+symbolic. Coverage is not access count, and neither is simultaneous storage.
+
+Family specializations interpret the captured graph. Device profiles supply
+reusable primitive rates; candidate measurements evaluate the model. Missing
+model evidence remains unknown. Unexpected implementation errors remain errors.
+Reject only from justified pressure evidence, keep all supplied config outcomes,
+and apply no implicit cutoff. Add a model branch only for an observed semantic
+or scheduling difference; do not duplicate an analysis for a second report view.
+
+Analysis version 15 replaces the report field `propagation` with
+`tile_propagation`. The standalone `propagate_inputs(func, outputs)` query uses
+the same tile algorithm, with explicit region roots and no pressure/ranking.
 
 ## Common modules and specializations
 
 ```text
-Actual PrimFunc → collection and backward input propagation
-               → graph-based GEMM / attention / generic specialization
-               → register_pressure.py and register_policy.py
+Actual PrimFunc → collection and one backward tile propagation
+               → register_pressure.py coordinates storage and accumulator bounds
+               → GEMM / attention / generic recognition
+               → liveness.py adds family-loop tile estimates
                → warp_specialization.py
+               → register_policy.py
                → memory.py and shared_storage.py
-               → pipeline.py, reduction.py and tile_schedule.py
-               → waves.py and ranking.py
+               → waves.py
+               → operation_work.py, reduction.py and service.py
+               → pipeline.py and tile_schedule.py
+               → cta_work.py and ranking.py
 ```
 
-`engine.py` orchestrates these modules through `specializations.py`. Dense GEMM
+`engine.py` orchestrates these modules through the shared contract in
+`families/base.py`. GEMM policy lives in `families/gemm.py`, and attention policy
+lives in `families/attention.py`; `specializations.py` preserves the old import
+path. See the [code review guide](../tilelang/new_carver/README.md) for the source
+map, family differences, and suggested reading order. Dense GEMM
 has a single matrix operation. Forward attention requires connected QK and PV
 operations with intervening max, exponential and sum operations. Recognition
 uses the operation graph, not buffer names or configuration names. Set
@@ -207,7 +253,7 @@ full 4096³ GEMM, causal/noncausal attention, and varied workloads, with no cuto
 
 ## Reporting, timing and validation
 
-Each config record includes propagation, pressure evidence, pre-lowering and
+Each config record includes `tile_propagation`, pressure evidence, pre-lowering and
 post-compile decisions, compiler resources and eventual benchmark status.
 `tuner.carver_report` exposes the completed report. An explicit `report_path`
 bypasses winner-only cache shortcuts. Settings, device limits, profile and
@@ -228,7 +274,9 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 python -m pytest testing/python/new_carver/ -q
 ```
 
-Analysis version 13 adds A100 profile selection and MMA reduction-map prediction
-to the version-12 model. The [v12 H200 findings](new_carver_validation.md) summarize
+Analysis version 14 simplifies the API and error contracts: whole-kernel analysis,
+explicit region queries, one register decision, and analysis errors that stop the
+candidate. Version 13 added A100 profile selection and MMA reduction-map prediction.
+The [v12 H200 findings](new_carver_validation.md) summarize
 the preceding experiments and known limitations. A100 runtime/performance results
 must be collected on an A100 node; cross-compilation alone is not that validation.

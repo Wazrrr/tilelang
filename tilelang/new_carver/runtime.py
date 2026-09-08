@@ -91,7 +91,7 @@ class CarverSession:
                 "index": i,
                 "config": dict(c),
                 "analysis_version": ANALYSIS_VERSION,
-                "propagation": None,
+                "tile_propagation": None,
                 "pressure": None,
                 "compiler_resources": None,
                 "pre_lowering": None,
@@ -128,13 +128,13 @@ class CarverSession:
                     target=target if target is not None else self.target,
                     device_limits=self.device_limits,
                     pass_configs=pass_configs,
+                    trace_context={"config_index": idx, "config": record["config"]} if self.config.trace_path else None,
                 )
                 record.update(result)
                 record["pre_lowering"] = result["pressure"]["decision"]
             except Exception as error:
-                # Analysis is not compilation: a failure supplies no rejection evidence.
-                record["analysis_error"] = str(error)
-                record["pre_lowering"] = {"keep": True, "would_reject": False, "status": "unknown"}
+                record.update(status="analysis_failed", analysis_error=str(error))
+                raise
         if not record["pre_lowering"]["keep"]:
             record["status"] = "pre_lowering_rejected"
             reasons = "; ".join(record["pre_lowering"].get("reasons", [])) or "register pressure exceeds the configured limit"
@@ -162,7 +162,7 @@ class CarverSession:
         record = self.records[idx]
         if error is None:
             record["status"] = "compiled"
-        elif record["status"] not in ("elaboration_failed", "pre_lowering_rejected", "post_compile_rejected"):
+        elif record["status"] not in ("elaboration_failed", "analysis_failed", "pre_lowering_rejected", "post_compile_rejected"):
             record.update(status="compilation_failed", error=str(error))
 
     def benchmark_result(self, idx, status, latency, error):

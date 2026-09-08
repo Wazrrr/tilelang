@@ -155,7 +155,7 @@ def freeze(root, profile, split, *, mode="report_only", group_size=1):
     root.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(profile, root / "device.json")
     paths = [
-        *Path("tilelang/new_carver").glob("*.py"),
+        *Path("tilelang/new_carver").rglob("*.py"),
         Path(__file__),
         Path("benchmark/autotune/benchmark_new_carver_attention.py"),
         Path("benchmark/autotune/benchmark_new_carver_gemm.py"),

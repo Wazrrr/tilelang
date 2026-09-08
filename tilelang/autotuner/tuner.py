@@ -1382,7 +1382,7 @@ class AutoTuner:
 
         key = self.generate_cache_key(parameters, extra_parameters)
         filter_report_requested = self._filter_report_path() is not None or (
-            self.carver_args.enabled and self.carver_args.report_path is not None
+            self.carver_args.enabled and (self.carver_args.report_path is not None or self.carver_args.trace_path is not None)
         )
         benchmark_report_requested = self._benchmark_report_path() is not None
 
@@ -1869,7 +1869,10 @@ class AutoTuneImpl(Generic[_P, _T]):
             norm_args = _normalize_value(args, sort_dict_items=True)
             norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
-        if key not in self._tuner_cache or (autotuner.carver_args.enabled and autotuner.carver_args.report_path is not None):
+        if key not in self._tuner_cache or (
+            autotuner.carver_args.enabled
+            and (autotuner.carver_args.report_path is not None or autotuner.carver_args.trace_path is not None)
+        ):
 
             def jit_elaborate(**config_arg):
                 config_arg.pop(_PASS_CONFIGS_KEY, None)

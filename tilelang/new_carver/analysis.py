@@ -239,26 +239,20 @@ class _Collector:
             self.add("elementwise", reads, writes, node, loops, predicates, branches, bool(opaque))
         elif isinstance(node, tir.Evaluate) and isinstance(node.value, tir.Call):
             call = resolve(node.value)
-            try:
-                op = self.parse(call, annotations)
-                if op is None:
-                    self.add(str(call.op), [], [], None, loops, predicates, branches, True)
-                else:
-                    reads, writes = self.access(op)
-                    self.add(
-                        op.__class__.__name__ if hasattr(op, "__class__") else str(call.op),
-                        [Region.from_ir(r) for r in reads],
-                        [Region.from_ir(r) for r in writes],
-                        op,
-                        loops,
-                        predicates,
-                        branches,
-                    )
-                    # Generic FFI objects have no useful Python subclass name.
-                    self.operations[-1].kind = str(call.op.name).split(".")[-1]
-            except Exception as error:
+            op = self.parse(call, annotations)
+            if op is None:
                 self.add(str(call.op), [], [], None, loops, predicates, branches, True)
-                self.unknown.append(str(error))
+            else:
+                reads, writes = self.access(op)
+                self.add(
+                    str(call.op.name).split(".")[-1],
+                    [Region.from_ir(r) for r in reads],
+                    [Region.from_ir(r) for r in writes],
+                    op,
+                    loops,
+                    predicates,
+                    branches,
+                )
         elif hasattr(node, "body"):
             # Let/Bind substitutions and unusual scopes require conservative handling.
             self.unknown.append(f"unmodeled scope: {type(node).__name__}")
@@ -352,11 +346,12 @@ def _domains(loops):
     return {v: tvm.arith.IntervalSet(r.min, r.min + r.extent - 1) for v, r, _ in loops}
 
 
-def _store_axes(op, tile_scope=False):
+def _store_axes(op):
     """Recognize dense separable stores; a bounding box may contain holes."""
     ana = Analyzer()
     axes, used = [], set()
-    loop_vars = {v for v, _, kind in op.loops if not tile_scope or kind != "4"}
+    # ForKind.THREAD_BINDING (4) supplies launch coordinates, not tile axes.
+    loop_vars = {v for v, _, kind in op.loops if kind != "4"}
     for index in op.metadata.indices:
         variables = set()
         tir.stmt_functor.post_order_visit(index, lambda n, variables=variables: variables.add(n) if isinstance(n, tir.Var) else None)
@@ -379,7 +374,7 @@ def _store_axes(op, tile_scope=False):
     return axes
 
 
-def _map_inputs(op, demand, tile_scope=False):
+def _map_inputs(op, demand):
     meta = op.metadata
     ana = Analyzer()
     if op.kind in ("copy", "async_copy") and len(op.reads) == 1 and len(op.writes) == 1:
@@ -439,8 +434,8 @@ def _map_inputs(op, demand, tile_scope=False):
                     j += 1
             return [src] + ([demand] if not meta.clear else [])
     if op.kind == "elementwise":
-        domains = _domains(tuple(loop for loop in op.loops if not tile_scope or loop[2] != "4"))
-        axes = _store_axes(op, tile_scope)
+        domains = _domains(tuple(loop for loop in op.loops if loop[2] != "4"))
+        axes = _store_axes(op)
         if axes is not None:
             loop_ranges = {v: r for v, r, _ in op.loops}
             for axis, requested in zip(axes, demand.ranges):
@@ -456,6 +451,8 @@ def _map_inputs(op, demand, tile_scope=False):
 
 @dataclass
 class PropagationResult:
+    """One tile-demand graph and its derived per-CTA loop coverage."""
+
     operations: list[Operation]
     per_iteration_inputs: list[Region]
     full_loop_inputs: list[Region]
@@ -471,85 +468,132 @@ class PropagationResult:
         }
 
 
-def _propagate(col, outputs, tile_scope=False):
+def _written_region(op, region):
+    """Expand scalar tile axes while retaining symbolic launch coordinates.
+
+    Native copy/GEMM/reduction operators already carry tile regions. Launch
+    domains are used separately for ownership, boundary checks and grid cost.
+    """
+    if op.kind == "elementwise":
+        return _bound(region, _domains(tuple(loop for loop in op.loops if loop[2] != "4")))
+    return region
+
+
+def _kernel_outputs(col):
+    """Capture the kernel's global writes as propagation roots."""
+    outputs = [_written_region(op, region) for op in col.operations for region in op.writes if region.buffer.scope() == "global"]
+    if not outputs:
+        raise ValueError("New Carver requires at least one captured global output write")
+    return outputs
+
+
+def _propagate_tiles(col, outputs):
+    """Trace output tiles once, recording the demands used by every analysis.
+
+    Regions retain symbolic launch/iteration offsets. Loop coverage is derived
+    from these inputs; it does not require another backward traversal.
+    """
     for op in col.operations:
         op.demands.clear()
-    if outputs is None:
-        outputs = [
-            (_bound(r, _domains(tuple(loop for loop in op.loops if not tile_scope or loop[2] != "4"))) if op.kind == "elementwise" else r)
-            for op in col.operations
-            for r in op.writes
-            if r.buffer.scope() == "global"
-        ]
-    demands = [r if isinstance(r, Region) else Region.from_ir(r) for r in outputs]
+    demands = list(outputs)
     origins = {id(region): () for region in demands}
     for op in reversed(col.operations):
         matched = []
         for write in op.writes:
-            bounded_write = (
-                _bound(write, _domains(tuple(loop for loop in op.loops if not tile_scope or loop[2] != "4")))
-                if op.kind == "elementwise"
-                else write
-            )
+            bounded_write = _written_region(op, write)
             for demand in list(demands):
                 overlap = _intersect(bounded_write, demand)
                 if overlap is not None:
                     op.demands.append(overlap)
-                    matched.extend(_map_inputs(op, overlap, tile_scope))
+                    matched.extend(_map_inputs(op, overlap))
                     # Subtract overwritten rectangles; conditional writes retain
                     # both reaching versions. Unknown overlap keeps a bound.
-                    if not op.predicates and (op.kind != "elementwise" or _store_axes(op, tile_scope) is not None):
+                    if not op.predicates and (op.kind != "elementwise" or _store_axes(op) is not None):
                         remaining = _subtract(demand, bounded_write)
                         for region in remaining:
-                            origins[id(region)] = origins.get(id(demand), ())
+                            origins[id(region)] = origins[id(demand)]
                         demands = [r for r in demands if r is not demand] + remaining
         for region in matched:
             demands.append(region)
-            origins[id(region)] = () if tile_scope and op.kind == "elementwise" else op.loops
+            # Elementwise mapping already bounds its scalar axes, so do not
+            # multiply their extents into the mapped tile a second time.
+            origins[id(region)] = () if op.kind == "elementwise" else op.loops
     inputs, coverage, input_loops = [], [], []
     for region in demands:
         if region.buffer.scope() == "global":
-            loops = origins.get(id(region), ())
+            loops = origins[id(region)]
             region = _clip_global(region, loops)
             inputs.append(region)
             input_loops.append(loops)
-            coverage.append(_bound(region, _domains(loops)))
+            coverage.append(_bound(region, _domains(tuple(loop for loop in loops if loop[2] != "4"))))
     return PropagationResult(col.operations, inputs, coverage, col.unknown, input_loops)
 
 
-def propagate_inputs(func, outputs=None):
-    """Propagate BufferRegion (or Region) output demands through an elaborated PrimFunc.
+def propagate_inputs(func, outputs):
+    """Query explicit, nonempty BufferRegion (or Region) output tiles.
 
-    Omit outputs to query all global stores. Conservative boxes can overestimate
-    traffic; they do not change the kernel's actual allocations or work.
+    Both APIs use the same tile propagation. This query does not estimate
+    pressure or timing; use analyze_prim_func for whole-kernel resource analysis.
+    Launch offsets stay symbolic; full_loop_inputs covers loops within a CTA.
     """
     if not isinstance(func, tir.PrimFunc):
         raise TypeError("propagate_inputs expects an elaborated PrimFunc")
-    return _propagate(_Collector(func), outputs)
+    if outputs is None:
+        raise TypeError("propagate_inputs requires explicit output regions")
+    regions = [r if isinstance(r, Region) else Region.from_ir(r) for r in outputs]
+    if not regions:
+        raise ValueError("propagate_inputs requires at least one output region")
+    return _propagate_tiles(_Collector(func), regions)
 
 
-def analyze_prim_func(func, config=None, outputs=None, *, target=None, device_limits=None, pass_configs=None):
-    """Analyze without lowering; resolve register limits from target, function attrs, or target scope."""
+def analyze_prim_func(func, config=None, *, target=None, device_limits=None, pass_configs=None, trace_context=None):
+    """Analyze all captured global outputs; invalid inputs and stage errors raise."""
     if not isinstance(func, tir.PrimFunc):
         raise TypeError("analyze_prim_func expects an elaborated PrimFunc")
     config = CarverConfig.from_value(config)
     if target is None and func.attrs is not None:
         target = func.attrs.get("target")
-    col = _Collector(func)
-    propagation = _propagate(col, outputs).to_dict()
-    if outputs is not None:
-        # Pressure always models the actual kernel, regardless of query size.
-        _propagate(col, None)
-    pressure = _pressure(col, config, target)
     from .engine import AnalysisContext, run_modules
+    from .ir_utils import resolve_pass_configs
+    from .trace import AnalysisTrace, collector_snapshot, propagation_snapshot
 
-    context = AnalysisContext(func, col, _propagate(col, None, tile_scope=True), config, pass_configs)
-    results = run_modules(context, pressure, device_limits or config.device_limits)
-    return {
-        **results,
-        "propagation": propagation,
-        "ir_context": {
-            "launch_threads": {k: str(v) for k, v in col.threads.items()},
-            "explicit_layouts": {str(k): str(v) for k, v in col.layouts.items()},
-        },
-    }
+    device_limits = config.device_limits if device_limits is None else device_limits
+    pass_configs = resolve_pass_configs(func, pass_configs)
+    with AnalysisTrace(config.trace_path) as trace:
+        trace.record(
+            "inputs",
+            lambda: {
+                "trace_context": trace_context,
+                "target": str(target),
+                "settings": config.to_cache_key_dict(),
+                "device_limits": device_limits,
+                "pass_configs": pass_configs,
+            },
+        )
+        trace.record("prim_func", lambda: func.script())
+        col = _Collector(func)
+        trace.record("col", lambda: collector_snapshot(col))
+        tile_propagation = _propagate_tiles(col, _kernel_outputs(col))
+        trace.record("tile_propagation", lambda: propagation_snapshot(tile_propagation))
+        pressure = _pressure(col)
+        trace.record("pressure.accumulator", lambda: pressure)
+        context = AnalysisContext(
+            func=func,
+            collector=col,
+            tile_propagation=tile_propagation,
+            config=config,
+            target=target,
+            device_limits=device_limits,
+            pass_configs=pass_configs,
+            trace=trace,
+        )
+        results = run_modules(context, pressure)
+        trace.record("tile_cost", lambda: results["tile_cost"])
+        return {
+            **results,
+            "tile_propagation": tile_propagation.to_dict(),
+            "ir_context": {
+                "launch_threads": {k: str(v) for k, v in col.threads.items()},
+                "explicit_layouts": {str(k): str(v) for k, v in col.layouts.items()},
+            },
+        }

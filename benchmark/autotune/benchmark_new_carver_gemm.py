@@ -241,7 +241,8 @@ def main():
         "ranking_metric": args.ranking_metric,
         "performance_model": profile,
         "analysis_source_sha256": {
-            path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(Path("tilelang/new_carver").glob("*.py"))
+            path.relative_to("tilelang/new_carver").as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(Path("tilelang/new_carver").rglob("*.py"))
         },
         "gpu_before": before,
         "gpu_after": after,

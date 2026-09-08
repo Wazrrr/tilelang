@@ -1,11 +1,10 @@
 """Physical occupancy is strict; conservative tile demand has a separate margin."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from tilelang.new_carver import CarverConfig, analyze_prim_func, check_compiler_resources
 from tilelang.new_carver.register_policy import analyze_register_policy
+from tilelang.new_carver.families import AttentionSpecialization, GemmSpecialization
 from tilelang.autotuner.filters.launch import LaunchResourceInfo
 from tilelang.contrib.cuda_resource_info import parse_ptxas_output
 from examples.flash_attention.example_mha_new_carver import TARGET, make_attention
@@ -25,7 +24,7 @@ POLICY = dict(
 )
 
 
-def policy_result(budget=32, *, policy=None, tile=65920, lower=128, limits=None, family="attention"):
+def policy_result(budget=32, *, policy=None, tile=65920, lower=128, limits=None, family="attention", matched=True):
     return analyze_register_policy(
         dict(
             warp_specialization=POLICY if policy is None else policy,
@@ -36,7 +35,7 @@ def policy_result(budget=32, *, policy=None, tile=65920, lower=128, limits=None,
             tile_liveness=dict(peak_registers_per_block_estimate=tile, computing_threads_estimate=256),
         ),
         CarverConfig(attention_spill_budget_registers_per_thread=budget),
-        SimpleNamespace(name=family, matched=True),
+        (AttentionSpecialization if family == "attention" else GemmSpecialization)(name=family, matched=matched),
         LIMITS if limits is None else limits,
     )
 
@@ -162,6 +161,15 @@ def test_gemm_margin_is_zero_and_attention_setting_has_cache_identity():
     assert not policy_result(1000, family="gemm", lower=256)["decision"]["keep"]
     assert policy_result(1000, family="gemm")["register_demand"]["allowance_registers_per_thread"] == 0
     assert CarverConfig(attention_spill_budget_registers_per_thread=32).to_cache_key_dict() != CarverConfig().to_cache_key_dict()
+
+
+def test_unmatched_attention_cannot_use_the_family_spill_allowance():
+    matched = policy_result(32, lower=256)
+    unmatched = policy_result(32, lower=256, matched=False)
+    assert matched["decision"]["keep"]
+    assert not unmatched["decision"]["keep"]
+    assert unmatched["register_demand"]["allowance_registers_per_thread"] == 0
+    assert unmatched["physical_register_allocation"] == matched["physical_register_allocation"]
 
 
 @pytest.mark.parametrize("registers,reject", [(168, False), (172, True)])

@@ -86,7 +86,7 @@ def main():
     grid = get_configs()
     indices = list(map(int, args.indices.split(","))) if args.indices else list(range(len(grid)))
     configs = [grid[i] for i in indices]
-    source_paths = list(Path("tilelang/new_carver").glob("*.py")) + [
+    source_paths = list(Path("tilelang/new_carver").rglob("*.py")) + [
         Path(__file__),
         Path("examples/flash_attention/example_mha_new_carver.py"),
         Path("examples/flash_attention/example_mha_fwd_bshd.py"),

@@ -46,12 +46,12 @@ def query_device_limits(target=None):
     return {k: int(v) for k, v in values.items() if v is not None and v > 0}
 
 
-def analyze_tile_cost(col, propagated, pressure, device_limits=None, context=None, specialization=None):
-    from .memory import analyze_memory
+def analyze_tile_cost(context, specialization, pressure):
+    """Combine the selected family's memory accounting with CTA occupancy."""
     from .waves import analyze_waves
 
-    memory = specialization.memory_traffic(context) if specialization is not None else analyze_memory(col, propagated)
-    waves = analyze_waves(col, memory, pressure, device_limits)
+    memory = specialization.memory_traffic(context)
+    waves = analyze_waves(context.collector, memory, pressure, context.device_limits)
     return {**combine_tile_cost(memory, waves), "_memory": memory, "_waves": waves}
 
 

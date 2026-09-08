@@ -101,6 +101,28 @@ def test_experiment_grids_and_unsupported_workloads():
     assert {w["causal"] for w in SPLITS["baseline"] if w["family"] == "attention"} == {True, False}
 
 
+def test_experiment_freeze_includes_family_sources(tmp_path, monkeypatch):
+    from benchmark.autotune import validate_new_carver_generalization as experiment
+    from tilelang.cache.kernel_cache import KernelCache
+
+    monkeypatch.chdir(experiment.REPO_ROOT)
+    monkeypatch.setattr(experiment, "current_target", lambda: {"kind": "cuda", "arch": "sm_90a"})
+    monkeypatch.setattr(experiment, "_identity", lambda: {})
+    monkeypatch.setattr(experiment, "load_device_profile", lambda *args, **kwargs: {})
+    monkeypatch.setattr("tilelang.new_carver.cost.query_device_limits", lambda target: LIMITS)
+    monkeypatch.setattr(KernelCache, "_get_tilelang_lib_stamp", lambda: "test-native-build")
+    profile = tmp_path / "profile.json"
+    profile.write_text("{}")
+    frozen = tmp_path / "frozen"
+    experiment.freeze(frozen, profile, "baseline")
+    report = experiment.verify(frozen)
+    for relative in ("__init__.py", "families/__init__.py", "families/base.py", "families/gemm.py", "families/attention.py"):
+        source = experiment.REPO_ROOT / "tilelang/new_carver" / relative
+        key = f"tilelang/new_carver/{relative}"
+        assert report["source_sha256"][key] == experiment.digest(source)
+        assert (frozen / "sources" / key).read_bytes() == source.read_bytes()
+
+
 def test_unknown_scores_do_not_claim_top_k_performance():
     from benchmark.autotune.new_carver_experiment_utils import evaluate_ranking
     from tilelang.new_carver import rank_records

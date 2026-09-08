@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 13
+ANALYSIS_VERSION = 15
 
 
 @dataclass(frozen=True)
@@ -21,14 +21,17 @@ class CarverConfig:
     specialization: str = "auto"
     ranking_metric: str = "traffic_waves"
     performance_model: dict | None = None
+    trace_path: str | None = None  # Append intermediate analysis snapshots for manual review.
 
     def __post_init__(self):
+        if self.trace_path is not None and (not isinstance(self.trace_path, str) or not self.trace_path.strip()):
+            raise ValueError("trace_path must be a nonempty string or None")
         if self.specialization not in ("auto", "generic", "gemm", "attention"):
             raise ValueError("specialization must be auto, generic, gemm, or attention")
         if self.ranking_metric not in ("traffic_waves", "pipeline_time"):
             raise ValueError("ranking_metric must be traffic_waves or pipeline_time")
         if self.performance_model is not None:
-            from .pipeline import validate_performance_model
+            from .profile_schema import validate_performance_model
 
             validate_performance_model(self.performance_model)
         if not isinstance(self.ranking, bool):
@@ -67,6 +70,7 @@ class CarverConfig:
     def to_cache_key_dict(self):
         values = asdict(self)
         values.pop("report_path")
+        values.pop("trace_path")
         return {"analysis_version": ANALYSIS_VERSION, **values}
 
 

@@ -12,12 +12,10 @@ from tvm.target import Target
 from tilelang.transform import PassContext
 
 
-def predict_warp_specialization(func, col, pressure, pass_configs=None, *, specialization=None):
+def predict_warp_specialization(func, col, pressure, pass_configs, *, specialization):
     from .analysis import _int
 
-    effective = dict(PassContext.current().config)
-    effective.update(dict((func.attrs or {}).get("tilelang_pass_configs", {})))
-    effective.update(pass_configs or {})
+    effective = pass_configs
     result = {
         "status": "not_applicable",
         "applies": False,
@@ -65,11 +63,11 @@ def predict_warp_specialization(func, col, pressure, pass_configs=None, *, speci
     if isinstance(body, tir.SBlockRealize):
         body = body.block.body
     statements = list(body.seq) if isinstance(body, tir.SeqStmt) else [body]
-    attention = specialization is not None and specialization.name == "attention"
-    if not attention and not all(isinstance(s, tir.Evaluate) and isinstance(s.value, tir.Call) for s in statements):
+    policy = specialization.warp_specialization_policy()
+    if policy.require_tile_calls and not all(isinstance(s, tir.Evaluate) and isinstance(s.value, tir.Call) for s in statements):
         return unknown("pipeline body is not a straight-line sequence of tile operations")
     pipeline = [op for op in col.operations if any(v.same_as(loop.loop_var) for v, _, _ in op.loops)]
-    if (not attention and len(pipeline) != len(statements)) or not any(hasattr(op.metadata, "cRegion") for op in pipeline):
+    if (policy.require_tile_calls and len(pipeline) != len(statements)) or not any(hasattr(op.metadata, "cRegion") for op in pipeline):
         return unknown("unresolved pipeline structure or consumer tile")
     domains = {tuple(sorted((k, str(v)) for k, v in op.launch_threads.items())) for op in col.operations}
     threads = _int(col.threads.get("threadIdx.x"))
@@ -88,24 +86,13 @@ def predict_warp_specialization(func, col, pressure, pass_configs=None, *, speci
         and op.metadata.dst.scope().startswith("shared")
     ]
     consumers = [op for op in pipeline if not any(op is copy for copy in copies)]
-    if attention:
-        allowed = all(
-            op.kind in ("gemm", "reduce", "fill", "copy", "elementwise")
-            and all(r.buffer.scope() != "global" for r in op.reads + op.writes)
-            and not (op.kind == "elementwise" and any(r.buffer.scope().startswith("shared") for r in op.writes))
-            and all(kind in ("4", "1") or var.same_as(loop.loop_var) for var, _, kind in op.loops)
-            for op in consumers
-        )
-    else:
-        allowed = all(hasattr(op.metadata, "cRegion") for op in consumers)
+    allowed = all(policy.accepts_consumer(op, loop) for op in consumers)
     if not copies or not allowed:
         return unknown("pipeline includes consumer operations outside the modeled dense GEMM path")
     globals_ = list(func.buffer_map.values())
     if any(not any(op.metadata.src.same_as(b) for b in globals_) or not op.metadata.dst.scope().startswith("shared") for op in copies):
         return unknown("producer copies require direct parameter-buffer to shared-buffer access")
-    classify = tvm_ffi.get_global_func("tl.new_carver.ClassifyProducerCopy", allow_missing=True)
-    if classify is None:
-        return unknown("native producer classifier unavailable; rebuild the development library")
+    classify = tvm_ffi.get_global_func("tl.new_carver.ClassifyProducerCopy")
     registered = PassContext.list_configs()
     with PassContext(config={k: v for k, v in effective.items() if k in registered}):
         target = Target({"kind": "cuda", "arch": pressure["target_arch"]})
@@ -130,7 +117,7 @@ def predict_warp_specialization(func, col, pressure, pass_configs=None, *, speci
         register_reservation_per_block=128 * producer + threads * consumer,
     )
     result["evidence"] += [
-        "pure-TMA pipeline with automatic layouts and recognized " + ("attention tile consumers" if attention else "dense GEMM consumers"),
+        "pure-TMA pipeline with automatic layouts and recognized " + policy.consumer_description,
         "ProducerConsumerWSRewriter: one added producer warpgroup, original threads remain consumers",
         "AnnotateWarpGroupRegAlloc: default partition-dependent producer/consumer register requests",
         "reservation = producer_threads * producer_request + consumer_threads * consumer_request",

@@ -192,7 +192,7 @@ def test_decorator_binding_and_fresh_report(monkeypatch, tmp_path):
     assert tuned.carver_report["configs"][0]["effective_pass_configs"]["tl.disable_wgmma"]
 
 
-def test_analysis_failure_still_reaches_lowering(monkeypatch):
+def test_analysis_failure_stops_before_lowering(monkeypatch):
     from tilelang.new_carver.runtime import CarverSession
     from tilelang.autotuner import grouped_compile as gc
     from tilelang.autotuner.param import CompileArgs
@@ -213,8 +213,11 @@ def test_analysis_failure_still_reaches_lowering(monkeypatch):
     results = gc.compile_grouped_unit_tvm_ffi(
         [(0, {"block": 32}), (1, {"block": 64})], CompileArgs(target=Target("cuda")), kernel, carver_session=session
     )
-    assert len(reached) == len(results) == 2
-    assert all(r["pre_lowering"]["keep"] and r["pre_lowering"]["status"] == "unknown" for r in session.records)
+    assert len(results) == 2
+    assert not reached
+    assert all(error is not None for _, _, _, error in results)
+    assert all(r["status"] == "analysis_failed" and r["pre_lowering"] is None for r in session.records)
+    assert all(r["analysis_error"] == "unsupported analysis" for r in session.records)
 
 
 @pytest.mark.parametrize("grouped", [False, True])

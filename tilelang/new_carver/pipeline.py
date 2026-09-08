@@ -6,164 +6,11 @@ and reuse events model producer overlap. Instruction scheduling and CUDA
 dispatch remain estimates.
 """
 
-from math import isfinite, prod
-from tilelang import tvm
-from tvm import tirx as tir
+from .operation_work import compute_participants, consumer_threads, operation_work
+from .service import estimate_phase_cycles
 
-
-RATE_FIELDS = {
-    "global_bytes_per_cycle",
-    "shared_bytes_per_cycle",
-    "gemm_flops_per_cycle",
-    "wgmma_flops_per_cycle_per_warpgroup",
-    "latency_scale",
-    "reference_clock_mhz",
-    "elementwise_ops_per_cycle",
-    "exp_ops_per_cycle",
-    "reduction_ops_per_cycle",  # Legacy profile field; not used for mapped tile reductions.
-    "reduction_local_sum_per_cycle",
-    "reduction_local_max_per_cycle",
-    "reduction_shuffle_sum_per_cycle",
-    "reduction_shuffle_max_per_cycle",
-}
-LATENCY_FIELDS = {"copy_latency_cycles", "barrier_cycles"}
-CONSUMER_RATE_FIELDS = {
-    "elementwise_ops_per_cycle",
-    "exp_ops_per_cycle",
-    "reduction_local_sum_per_cycle",
-    "reduction_local_max_per_cycle",
-    "reduction_shuffle_sum_per_cycle",
-    "reduction_shuffle_max_per_cycle",
-}
-PROFILE_METADATA_FIELDS = {"gemm_signature", "profile_target", "profile_id", "memory_regime", "reduction_dtype"}
-
-
-def validate_performance_model(profile):
-    if not isinstance(profile, dict) or set(profile) - RATE_FIELDS - LATENCY_FIELDS - PROFILE_METADATA_FIELDS - {"consumer_rates"}:
-        raise ValueError("performance_model contains unsupported fields")
-    for key, value in profile.items():
-        if key == "consumer_rates":
-            if not isinstance(value, dict) or not value:
-                raise ValueError("consumer_rates requires measured thread-count rows")
-            for threads, rates in value.items():
-                if not isinstance(threads, str) or not threads.isdigit() or not 0 < int(threads) <= 1024 or int(threads) % 32:
-                    raise ValueError("consumer_rates keys must be positive warp-multiple thread counts")
-                if not isinstance(rates, dict) or not rates or set(rates) - CONSUMER_RATE_FIELDS:
-                    raise ValueError("consumer_rates contains unsupported primitives")
-                validate_performance_model(rates)
-            continue
-        if key in PROFILE_METADATA_FIELDS:
-            if key == "gemm_signature":
-                if (
-                    not isinstance(value, dict)
-                    or set(value) != {"instruction", "a_dtype", "b_dtype", "accum_dtype"}
-                    or not all(isinstance(v, str) and v for v in value.values())
-                ):
-                    raise ValueError("gemm_signature requires instruction, a_dtype, b_dtype and accum_dtype strings")
-            elif key == "memory_regime" and value not in ("cached", "streaming"):
-                raise ValueError("memory_regime must be cached or streaming")
-            elif not isinstance(value, str) or not value:
-                raise ValueError(f"{key} must be a nonempty string")
-            continue
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, float | int)
-            or not isfinite(value)
-            or value < 0
-            or (key in RATE_FIELDS and value == 0)
-        ):
-            raise ValueError("performance_model requires finite positive rates and nonnegative latencies")
-
-
-def operation_work(op):
-    from .analysis import _int
-    from .specializations import call_names
-
-    work = dict(gemm_flops=0, elementwise_ops=0, exp_ops=0, reduction_ops=0, shared_bytes=0)
-
-    def size(region):
-        dims = [_int(r.extent) for r in region.region]
-        return prod(dims) if all(v is not None for v in dims) else None
-
-    meta = op.metadata
-    if hasattr(meta, "cRegion"):
-        elements = size(meta.cRegion)
-        k = _int(meta.aRegion.region[0 if meta.transA else 1].extent)
-        work["gemm_flops"] = 2 * elements * k if elements is not None and k is not None else None
-        for region in (meta.aRegion, meta.bRegion):
-            if region.buffer.scope().startswith("shared"):
-                elements = size(region)
-                dtype = tvm.DataType(region.buffer.dtype)
-                if elements is None or work["shared_bytes"] is None:
-                    work["shared_bytes"] = None
-                else:
-                    work["shared_bytes"] += (elements * dtype.bits * dtype.lanes + 7) // 8
-    elif hasattr(meta, "dim") and hasattr(meta, "srcRegion"):
-        src, dst = size(meta.srcRegion), size(meta.dstRegion)
-        work["reduction_ops"] = src - dst if src is not None and dst is not None else None
-    elif op.kind == "elementwise":
-        # Parallel loops define one logical tile, not work per launch thread.
-        dims = [_int(r.extent) for _, r, kind in op.loops if kind == str(tir.ForKind.PARALLEL)]
-        elements = prod(dims) if all(v is not None for v in dims) else None
-        names = call_names(op)
-        exps = sum(name in ("tirx.exp", "tirx.exp2") for name in names)
-        scalar_ops = []
-        types = (tir.Add, tir.Sub, tir.Mul, tir.Div, tir.FloorDiv, tir.Max, tir.Min, tir.Cast, tir.Select)
-        tir.stmt_functor.post_order_visit(op.metadata.value, lambda n: scalar_ops.append(n) if isinstance(n, types) else None)
-        work["exp_ops"] = elements * exps if elements is not None else None
-        work["elementwise_ops"] = elements * max(len(scalar_ops), 1) if elements is not None else None
-        if any(name not in ("tirx.exp", "tirx.exp2", "tirx.if_then_else", "tirx.likely", "tl.infinity") for name in names):
-            work["elementwise_ops"] = None
-    elif op.kind in ("copy", "fill") and op.writes:
-        # Register casts, initialization and epilogue stores are consumer work.
-        # External read copies are charged to the producer separately.
-        if not any(r.buffer.scope() == "global" for r in op.reads):
-            dims = [_int(r.extent) for r in op.writes[0].ranges]
-            work["elementwise_ops"] = prod(dims) if all(v is not None for v in dims) else None
-    return work
-
-
-def compute_participants(op, pressure, pass_configs=None):
-    """Query instruction selection without lowering or modifying operator policy.
-
-    A throughput ceiling per active warpgroup is distinct from the aggregate
-    per-SM throughput ceiling. Automatic layout is not needed to count groups.
-    """
-    from .analysis import _int
-    from tilelang.transform import PassContext
-    from tvm.target import Target
-
-    if not hasattr(op.metadata, "cRegion"):
-        return None
-    threads = [_int(v) for k, v in op.launch_threads.items() if k.startswith("threadIdx.")]
-    if not threads or any(v is None or v <= 0 for v in threads) or not pressure.get("target_arch"):
-        return {"precision": "unknown"}
-    try:
-        target = Target({"kind": "cuda", "arch": pressure["target_arch"]})
-        effective = dict(PassContext.current().config)
-        effective.update(pass_configs or {})
-        registered = PassContext.list_configs()
-        with PassContext(config={k: v for k, v in effective.items() if k in registered}):
-            instruction = op.metadata._select_gemm_instruction(prod(threads), target)
-        return {
-            "instruction": instruction,
-            "consumer_threads": prod(threads),
-            "a_dtype": str(op.metadata.a.dtype),
-            "b_dtype": str(op.metadata.b.dtype),
-            "accum_dtype": str(op.metadata.c.dtype),
-            "warpgroups": prod(threads) // 128 if instruction == "cuda.wgmma" and prod(threads) % 128 == 0 else None,
-            "precision": "predicted",
-            "evidence": ["native GemmGetGemmInstructionKey on the original consumer thread domain; no lowering or layout inference"],
-        }
-    except Exception as error:
-        return {"precision": "unknown", "reason": str(error)}
-
-
-def _consumer_threads(op):
-    from .analysis import _int
-
-    values = [_int(v) for k, v in op.launch_threads.items() if k.startswith("threadIdx.")]
-    return prod(values) if values and all(v is not None and v > 0 for v in values) else None
+# Preserve the existing profile-validation import path for external callers.
+from .profile_schema import validate_performance_model as validate_performance_model
 
 
 def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
@@ -179,77 +26,7 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
     if not global_rate or latency is None or barrier is None or n is None or stages is None:
         return None
 
-    def phase_time(phase):
-        terms = {}
-
-        def service(amount, rate_key):
-            if not amount:
-                return 0
-            rate = profile.get(rate_key)
-            if not rate:
-                return None
-            aggregate = amount * concurrent_ctas / rate
-            if rate_key not in CONSUMER_RATE_FIELDS or not profile.get("consumer_rates"):
-                return aggregate
-            # A CTA cannot use all SM issue capacity when too few consumer
-            # warps are ready. Producer warps do not execute these operations.
-            row = profile["consumer_rates"].get(str(phase.get("consumer_threads")), {})
-            single = row.get(rate_key)
-            return max(aggregate, amount / single) if single else None
-
-        for key, amount in phase["work"].items():
-            if key == "reduction_ops":
-                terms[key] = 0
-                continue
-            if amount is None:
-                return None
-            rate_key = {
-                "gemm_flops": "gemm_flops_per_cycle",
-                "shared_bytes": "shared_bytes_per_cycle",
-                "elementwise_ops": "elementwise_ops_per_cycle",
-                "exp_ops": "exp_ops_per_cycle",
-                "reduction_ops": "reduction_ops_per_cycle",
-            }[key]
-            if amount and not profile.get(rate_key):
-                return None
-            terms[key] = service(amount, rate_key)
-            if terms[key] is None:
-                return None
-        if phase["work"]["reduction_ops"]:
-            reduction = phase.get("reduction") or {}
-            if reduction.get("precision") != "predicted" or reduction["dtype"] != profile.get("reduction_dtype", "float32"):
-                return None
-            kind = reduction["operator"]
-            for operation in ("local", "shuffle"):
-                amount = reduction[f"{operation}_pairs"]
-                rate = profile.get(f"reduction_{operation}_{kind}_per_cycle")
-                if amount and not rate:
-                    return None
-                cycles = service(amount, f"reduction_{operation}_{kind}_per_cycle")
-                if cycles is None:
-                    return None
-                terms["reduction_ops"] += cycles
-        # Matrix instructions consume tensor-core and shared-memory service;
-        # scalar/reduction/exp phases execute in program order.
-        group_service = 0
-        group_rate = profile.get("wgmma_flops_per_cycle_per_warpgroup")
-        if group_rate and phase["work"]["gemm_flops"]:
-            participants = phase.get("compute_participants") or {}
-            if participants.get("precision") != "predicted":
-                return None
-            if participants["instruction"] == "cuda.wgmma":
-                groups = participants.get("warpgroups")
-                if not groups:
-                    return None
-                group_service = phase["work"]["gemm_flops"] / (groups * group_rate)
-        return (
-            max(terms["gemm_flops"], terms["shared_bytes"], group_service)
-            + terms["elementwise_ops"]
-            + terms["exp_ops"]
-            + terms["reduction_ops"]
-        )
-
-    times = [phase_time(p) for p in pipeline["phases"]]
+    times = [estimate_phase_cycles(p, profile, concurrent_ctas) for p in pipeline["phases"]]
     if any(t is None for t in times):
         return None
     consumer = sum(t for t, p in zip(times, pipeline["phases"]) if p["inside_loop"])
@@ -297,7 +74,7 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
 def analyze_pipeline(col, specialization, memory, pressure, performance_model=None, pass_configs=None):
     from .analysis import _int
     from .memory import loop_visits
-    from .specializations import in_loop
+    from .ir_utils import in_loop
 
     loop = specialization.loop
     unknown = list(col.unknown)
@@ -312,7 +89,7 @@ def analyze_pipeline(col, specialization, memory, pressure, performance_model=No
             "inside_loop": in_loop(op, loop),
             "work": operation_work(op),
             "compute_participants": compute_participants(op, pressure, pass_configs),
-            "consumer_threads": _consumer_threads(op),
+            "consumer_threads": consumer_threads(op),
         }
         for op in col.operations
     ]

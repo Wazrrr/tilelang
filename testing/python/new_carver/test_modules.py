@@ -60,7 +60,7 @@ def test_same_modules_and_unchanged_ir(family):
 def test_attention_traffic_liveness_and_causal_bounds(layout, causal):
     result = analyze_prim_func(attention(layout, causal), target=TARGET, device_limits=LIMITS)
     assert result["specialization"]["name"] == "attention"
-    assert not result["propagation"]["unknown"]
+    assert not result["tile_propagation"]["unknown"]
     memory = result["modules"]["memory_traffic"]
     assert len(memory["input_tiles"]) == 3  # Q once, K and V once each per iteration
     assert memory["one_time_input_bytes"] == 64 * 64 * 2
@@ -142,15 +142,13 @@ def test_unmatched_specialization_and_missing_profile_remain_eligible():
         assert result["tile_cost"]["score"] is None
 
 
-def test_pipeline_failure_preserves_other_modules(monkeypatch):
+def test_pipeline_errors_reach_the_caller(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("unknown schedule")
 
     monkeypatch.setattr("tilelang.new_carver.pipeline.analyze_pipeline", fail)
-    result = analyze_prim_func(attention(), target=TARGET, device_limits=LIMITS)
-    assert result["modules"]["pipeline_overlap"]["precision"] == "unknown"
-    assert result["tile_cost"]["score"] is not None
-    assert result["pressure"]["decision"]["keep"]
+    with pytest.raises(RuntimeError, match="unknown schedule"):
+        analyze_prim_func(attention(), target=TARGET, device_limits=LIMITS)
 
 
 def test_different_score_units_cannot_be_mixed():

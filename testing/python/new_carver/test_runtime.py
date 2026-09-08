@@ -132,6 +132,8 @@ def test_settings_cache_identity():
     assert key() == enabled
     tuner.set_carver_args(True, report_path="a.json")
     assert key() == enabled
+    tuner.set_carver_args(True, trace_path="trace.log")
+    assert key() == enabled
     tuner.set_carver_args(True, mode="report_only")
     assert key() != enabled
     tuner.set_compile_args(target={"kind": "cuda", "arch": "sm_90a"}, execution_backend="tvm_ffi")
