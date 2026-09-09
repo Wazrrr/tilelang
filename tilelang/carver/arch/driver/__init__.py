@@ -7,13 +7,4 @@ from .cuda_driver import (
     get_persisting_l2_cache_max_size,  # noqa: F401
     get_num_sms,  # noqa: F401
     get_registers_per_block,  # noqa: F401
-    get_max_threads_per_block,  # noqa: F401
-    get_max_block_dims,  # noqa: F401
-    get_max_grid_dims,  # noqa: F401
-    get_shared_memory_per_multiprocessor,  # noqa: F401
-    get_registers_per_multiprocessor,  # noqa: F401
-    get_max_threads_per_multiprocessor,  # noqa: F401
-    get_max_blocks_per_multiprocessor,  # noqa: F401
-    get_reserved_shared_memory_per_block,  # noqa: F401
-    get_cooperative_launch_support,  # noqa: F401
 )

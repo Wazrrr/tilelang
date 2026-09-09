@@ -23,7 +23,6 @@ class _cudaDeviceAttrNames:
     cudaDevAttrMaxRegistersPerBlock: int = 12
     cudaDevAttrMultiProcessorCount: int = 16
     cudaDevAttrMaxSharedMemoryPerMultiprocessor: int = 81
-    cudaDevAttrMaxSharedMemoryPerBlockOptin: int = 97
     cudaDevAttrMaxPersistingL2CacheSize: int = 108
 
 
@@ -72,7 +71,7 @@ def test_device_get_registers_per_block():
 @tilelang.testing.requires_cuda
 def test_device_get_max_dynamic_shared_size_bytes():
     tl_dynamic_smem = get_max_dynamic_shared_size_bytes()
-    driver_dynamic_smem = get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerBlockOptin)
+    driver_dynamic_smem = get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerMultiprocessor)
     assert tl_dynamic_smem == driver_dynamic_smem, "Max dynamic shared size bytes values do not match"
 
 
