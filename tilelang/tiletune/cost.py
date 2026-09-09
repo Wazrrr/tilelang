@@ -31,7 +31,7 @@ def query_device_limits(target=None):
     props = torch.cuda.get_device_properties(device)
     if arch is None or arch.removeprefix("sm_").rstrip("af") != f"{props.major}{props.minor}":
         return None
-    from tilelang.carver.arch.driver.cuda_driver import get_max_blocks_per_multiprocessor
+    from tilelang.carver.arch.driver.cuda_driver import get_device_attribute
 
     values = {
         "sm_count": props.multi_processor_count,
@@ -41,7 +41,9 @@ def query_device_limits(target=None):
         "max_threads_per_sm": props.max_threads_per_multi_processor,
         "max_threads_per_block": props.max_threads_per_block,
         "warp_size": props.warp_size,
-        "max_blocks_per_sm": get_max_blocks_per_multiprocessor(device),
+        # cudaDevAttrMaxBlocksPerMultiprocessor; keep TileTune's extra query out
+        # of the unmodified legacy Carver driver and policy.
+        "max_blocks_per_sm": get_device_attribute(106, device),
     }
     return {k: int(v) for k, v in values.items() if v is not None and v > 0}
 
