@@ -9,7 +9,7 @@ from tilelang.utils.autotune_timing import timed_autotune_stage
 from .analysis import analyze_prim_func
 from .config import ANALYSIS_VERSION, TileTuneConfig, TileTuneReject
 from .budget import resolve_register_budget
-from .ranking import rank_records
+from .ranking import rank_records, select_top_k
 
 
 def check_compiler_resources(resource_usage, function_names, config=None, *, target=None, launch_infos=None, device_limits=None):
@@ -86,6 +86,9 @@ class TileTuneSession:
         self.device_limits = device_limits or config.device_limits
         self.compile_flags = list(compile_flags or [])
         self.started = time.perf_counter()
+        self.prepared_programs = {}
+        self.ranking = None
+        self.selection = None
         self.records = [
             {
                 "index": i,
@@ -113,6 +116,8 @@ class TileTuneSession:
             timing[name] = timing.get(name, 0) + (time.perf_counter() - start) * 1000
 
     def elaborate(self, idx, config_arg, elaborate_func, *, target=None, pass_configs=None):
+        if idx in self.prepared_programs:
+            return self.prepared_programs[idx]
         record = self.records[idx]
         try:
             with self.stage(idx, "elaborate"):
@@ -141,6 +146,39 @@ class TileTuneSession:
             raise TileTuneReject(f"config {idx}: {reasons}")
         record["status"] = "analyzed"
         return program
+
+    def prepare_top_k(self, items, elaborate_func):
+        """Freeze a selection before lowering, retaining each selected PrimFunc.
+
+        Items contain (original index, elaboration kwargs, effective pass configs).
+        Candidate failures remain in the report and do not stop other analyses.
+        """
+        started = time.perf_counter()
+        for idx, kwargs, pass_configs in items:
+            try:
+                self.prepared_programs[idx] = self.elaborate(idx, kwargs, elaborate_func, pass_configs=pass_configs)
+            except Exception:
+                # elaborate records the precise elaboration/analysis/pressure failure.
+                continue
+        self.ranking = rank_records(self.records)
+        indices = select_top_k(self.ranking, self.config.top_k)
+        selected = set(indices)
+        for record in self.records:
+            record["selected"] = record["index"] in selected
+            if record["status"] == "analyzed" and not record["selected"]:
+                record["status"] = "not_selected"
+        self.prepared_programs = {idx: self.prepared_programs[idx] for idx in indices}
+        self.selection = {
+            "requested_k": self.config.top_k,
+            "selected_indices": indices,
+            "selected_count": len(indices),
+            "shortfall": max(0, self.config.top_k - len(indices)),
+            "tie_break": "original configuration index",
+            "unknown_policy": "exclude unscored and pressure-rejected candidates",
+            "failure_policy": "no replacement after compilation or benchmark failure",
+            "wall_time_ms": (time.perf_counter() - started) * 1000,
+        }
+        return indices
 
     def post_compile(self, idx, resource_usage, launch_infos, *, target=None):
         record = self.records[idx]
@@ -174,7 +212,7 @@ class TileTuneSession:
             for stage, duration in record["timings_ms"].items():
                 totals[stage] = totals.get(stage, 0) + duration
         cost = sum(totals.values())
-        ranking = rank_records(self.records) if self.config.ranking else []
+        ranking = self.ranking if self.ranking is not None else rank_records(self.records) if self.config.ranking else []
         for entry in ranking:
             self.records[entry["index"]]["ranking"] = entry
         report = {
@@ -182,7 +220,10 @@ class TileTuneSession:
             "settings": self.config.to_cache_key_dict(),
             "device_limits": self.device_limits,
             "ranking": ranking,
-            "ranking_note": "All configs retained in the report; scores use only pre-lowering tile analysis. No top-K cutoff is applied.",
+            "ranking_note": "All configs retained; scores use only pre-lowering analysis. Top-k selection is frozen before compilation."
+            if self.selection is not None
+            else "All configs retained in the report; scores use only pre-lowering tile analysis. No top-K cutoff is applied.",
+            "selection": self.selection,
             "configs": self.records,
             "wall_time_ms": (time.perf_counter() - self.started) * 1000,
             "stage_cost_ms": totals,

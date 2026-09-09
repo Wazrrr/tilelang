@@ -56,6 +56,17 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
     return result
 
 
+def select_top_k(ranking, k):
+    """Select at most k finite, eligible scores; ties retain original grid order."""
+    import math
+
+    if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+        raise ValueError("top_k must be a positive integer")
+    return [
+        entry["index"] for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])
+    ][:k]
+
+
 def rank_records(records):
     """Return all original indices in score order, without reading measurements."""
     metrics = {

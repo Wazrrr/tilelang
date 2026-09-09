@@ -5,7 +5,6 @@ separate modules. The engine later adds family loop liveness and the predicted
 warp-specialization partition before resolving the final register decision.
 """
 
-from .liveness import analyze_allocation_live_sets
 from .register_accumulator import analyze_accumulator_bound
 from .register_storage import analyze_register_storage
 
@@ -17,11 +16,9 @@ def analyze_register_pressure(col):
     """Describe register demand; the engine resolves capacity and rejection."""
     storage = analyze_register_storage(col)
     accumulator = analyze_accumulator_bound(col, storage.modeled_buffers)
-    live_sets = analyze_allocation_live_sets(col, storage.modeled_buffers)
 
     return {
         "logical_storage": storage.logical_storage,
-        "live_tile_sets": live_sets,
         "modeled_lower_bound": accumulator.registers_per_thread or None,
         "modeled_accumulator_registers_per_block": accumulator.registers_per_block or None,
         "total_register_upper_bound": None,

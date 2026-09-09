@@ -9,39 +9,6 @@ from math import prod
 from tilelang import tvm
 
 
-def analyze_allocation_live_sets(col, modeled_buffers):
-    """Report live sets for explicit-layout and thread-private allocations.
-
-    The input is the subset modeled by register_storage. This preserves the
-    initial report's allocation-based estimates, which cannot justify rejection.
-    The later analyze_live_tiles stage also includes automatic fragments and
-    family-loop state.
-    """
-    from .analysis import _exclusive
-
-    live_sets = []
-    for op in col.operations:
-        active = []
-        tile_upper = 0
-        for buffer, entry in modeled_buffers.items():
-            before = any(
-                old.index <= op.index and not _exclusive(old, op) and any(r.buffer.same_as(buffer) for r in old.writes)
-                for old in col.operations
-            )
-            after = any(
-                old.index >= op.index and not _exclusive(old, op) and any(r.buffer.same_as(buffer) for r in old.reads)
-                for old in col.operations
-            )
-            if before and after:
-                active.append(buffer.name)
-                tile_upper += entry["modeled_registers_per_thread"]["upper"]
-        if active:
-            live_sets.append(
-                {"operation": op.index, "buffers": active, "precision": "conservative", "modeled_tile_registers_upper": tile_upper}
-            )
-    return live_sets
-
-
 def analyze_live_tiles(col, specialization):
     """Conservative tile intervals, including attention's loop-carried state.
 

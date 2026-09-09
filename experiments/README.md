@@ -8,7 +8,7 @@ experiments/
 ├── gemm/
 │   ├── kernel.py             Advanced-autotune GEMM and its 288-config grid
 │   ├── system/run.py         Pipeline, grouped compilation, multi-GPU comparison
-│   └── tiletune/run.py       pipeline_time ranking and measured winner's rank
+│   └── tiletune/run.py       Brute force / Carver / TileTune top-k comparison
 ├── gemm_fp8/
 │   ├── kernel.py             FP8 example adapter for concurrent compilation
 │   └── tiletune/run.py       FP8 GEMM, 288 configs
@@ -35,8 +35,10 @@ Each kernel folder documents its own runnable cases:
 
 ## TileTune ranking experiments
 
-Each run obtains a reusable device profile, uses **`ranking_metric="pipeline_time"`**,
-and exhaustively tunes the supplied grid with `early_stop=False`. The mode is
+The GEMM runner compares brute force, Carver, and TileTune with a fixed top-k;
+see its [kernel guide](gemm/README.md). FP8 and FlashAttention runs obtain a
+reusable device profile, use **`ranking_metric="pipeline_time"`**,
+and exhaustively tune the supplied grid with `early_stop=False`. The mode is
 `report_only`: pressure decisions are recorded, and every successfully analyzed
 candidate proceeds to compilation. Correctness checks remain enabled. Failed
 candidates stay in `tiletune.json`; the winner is the fastest successful candidate.
@@ -48,7 +50,8 @@ The existing profiler supports A100 and Hopper; FP8 requires Hopper.
 
 ## Read the winner's rank
 
-Every TileTune run ends with lines in this form (illustrative values):
+FP8 and FlashAttention runs end with lines in this form (illustrative values);
+GEMM prints the same rank information in its winner summary and comparison:
 
 ```text
 Measured winner: 0.123456 ms, original config #42
@@ -72,7 +75,9 @@ device or build change.
 ## Run sizes and output files
 
 All runners accept `--workers`, `--warmup`, `--rep`, `--timeout`, and `--seed`.
-TileTune accepts `--group-size` (default 1, grouping disabled).
+TileTune accepts `--group-size` (default 1, grouping disabled). GEMM additionally
+accepts `--method` and `--top-k` (default 20); its library top-k option is
+`TileTuneConfig(top_k=...)`, with `None` preserving exhaustive behavior.
 `--config-indices 0 8 16 24` runs an explicit subset for a shorter experiment;
 the default is the entire grid. Subset reports preserve original indices and
 label their grid size. They do not claim an exhaustive full-grid winner.

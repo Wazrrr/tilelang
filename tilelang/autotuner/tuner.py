@@ -380,7 +380,7 @@ class AutoTuner:
         return self
 
     def set_tiletune_args(self, tiletune=None, **kwargs):
-        """Enable exhaustive pre-lowering analysis and pressure-only compiler checks."""
+        """Configure pre-lowering analysis, optional top-k selection, and compiler checks."""
         self.tiletune_args = TileTuneConfig.from_value(tiletune, **kwargs)
         return self
 
@@ -873,6 +873,7 @@ class AutoTuner:
         group_compile_size: int,
         compile_func: Callable[..., tilelang.JITKernel],
         elaborate_func: Callable[..., PrimFunc],
+        config_indices: list[int] | None = None,
     ) -> tuple[
         concurrent.futures.ThreadPoolExecutor,
         list[concurrent.futures.Future],
@@ -953,10 +954,12 @@ class AutoTuner:
             return unit_results
 
         compile_units: list[CompileUnit] = []
+        config_indices = list(range(len(config_args))) if config_indices is None else config_indices
         if grouped_compile_active:
             # Bucket configs by per-config pass_configs value
             buckets: dict[tuple | None, list[BucketItem]] = {}
-            for i, cfg in enumerate(config_args):
+            for i in config_indices:
+                cfg = config_args[i]
                 pc = cfg.pop(_PASS_CONFIGS_KEY, None)
                 key = (
                     (json.dumps(pc, sort_keys=True, default=str) if self.tiletune_args.enabled else tuple(sorted(pc.items())))
@@ -971,8 +974,8 @@ class AutoTuner:
                     end = min(start + group_compile_size, len(items))
                     compile_units.append((items[start:end], per_pc))
         else:
-            for i, config_arg in enumerate(config_args):
-                compile_units.append(([(i, config_arg)], None))
+            for i in config_indices:
+                compile_units.append(([(i, config_args[i])], None))
 
         for unit_items, per_pc in compile_units:
             future = pool.submit(compile_unit, unit_items, per_pc)
@@ -1339,7 +1342,7 @@ class AutoTuner:
             if self.filter_args.enabled:
                 raise ValueError("TileTune and legacy autotune filters cannot be enabled together")
             if early_stop:
-                raise ValueError("Exhaustive TileTune requires early_stop=False")
+                raise ValueError("TileTune requires early_stop=False")
             target_kind = getattr(getattr(self.compile_args.target, "kind", None), "name", str(self.compile_args.target))
             if target_kind != "cuda" or self.compile_args.execution_backend != "tvm_ffi":
                 raise ValueError("TileTune supports only CUDA with the tvm_ffi execution backend")
@@ -1518,6 +1521,19 @@ class AutoTuner:
                 self._validate_input_supply_requirements(program, self.compile_args.out_idx)
                 return program
 
+        compile_indices = list(range(len(config_args)))
+        if self.tiletune_session is not None and self.tiletune_args.top_k is not None:
+            items = [
+                (idx, kwargs, self._merge_pass_configs_into_compile_args(kwargs.get(_PASS_CONFIGS_KEY)).pass_configs)
+                for idx, kwargs in enumerate(config_args)
+            ]
+            compile_indices = self.tiletune_session.prepare_top_k(items, elaborate_func)
+            # Persist the full ranking and selection before any compilation/measurement.
+            self.tiletune_report = self.tiletune_session.finish()
+            if not compile_indices:
+                raise RuntimeError("TileTune top_k selected no eligible scored candidates; inspect the analysis report")
+        compile_positions = {idx: position for position, idx in enumerate(compile_indices)}
+
         # Launch compile tasks
         pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(
             config_args=config_args,
@@ -1525,6 +1541,7 @@ class AutoTuner:
             group_compile_size=group_compile_size,
             compile_func=compile_func,
             elaborate_func=elaborate_func,
+            config_indices=compile_indices,
         )
 
         ref_latency = None
@@ -1572,7 +1589,10 @@ class AutoTuner:
 
         def _enqueue_benchmark_task(jit_kernel: tilelang.JITKernel, config: dict[str, Any], idx: int):
             nonlocal benchmark_expected_results
-            queue_idx = min(len(benchmark_task_queues) - 1, idx * len(benchmark_task_queues) // max(1, len(config_args)))
+            queue_idx = min(
+                len(benchmark_task_queues) - 1,
+                compile_positions[idx] * len(benchmark_task_queues) // max(1, len(compile_indices)),
+            )
             benchmark_task_queues[queue_idx].put((jit_kernel, config, idx, time.perf_counter()))
             benchmark_expected_results += 1
 
@@ -1635,8 +1655,8 @@ class AutoTuner:
             worker_thread.start()
             benchmark_threads.append(worker_thread)
 
-        compile_progress = tqdm(total=len(config_args), desc=compile_desc)
-        progress_bar = tqdm(total=len(config_args), desc="Bench configurations")
+        compile_progress = tqdm(total=len(compile_indices), desc=compile_desc)
+        progress_bar = tqdm(total=len(compile_indices), desc="Bench configurations")
         pending_futures = set(futures)
 
         # Main thread loop to process compile results and feed benchmark tasks, end when all compile tasks are done.

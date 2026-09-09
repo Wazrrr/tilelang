@@ -1,8 +1,8 @@
-"""Configuration for exhaustive, pressure-only autotuning."""
+"""Configuration for exhaustive or top-k tile-based autotuning."""
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 15
+ANALYSIS_VERSION = 17
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class TileTuneConfig:
     attention_spill_budget_registers_per_thread: int = 0
     report_path: str | None = None
     ranking: bool = True
+    top_k: int | None = None  # Analyze the full grid, then compile at most this many scored candidates.
     device_limits: dict | None = None
     specialization: str = "auto"
     ranking_metric: str = "traffic_waves"
@@ -36,6 +37,11 @@ class TileTuneConfig:
             validate_performance_model(self.performance_model)
         if not isinstance(self.ranking, bool):
             raise ValueError("ranking must be a bool")
+        if self.top_k is not None:
+            if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k <= 0:
+                raise ValueError("top_k must be a positive integer or None")
+            if not self.ranking:
+                raise ValueError("top_k requires ranking=True")
         if self.device_limits is not None:
             from .cost import DEVICE_LIMIT_FIELDS
 

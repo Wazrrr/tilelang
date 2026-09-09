@@ -256,7 +256,7 @@ if __name__ == "__main__":
     ref_latency = best_result.ref_latency
 
     # Print out the benchmark results
-    print(f"Best latency (s): {best_latency}")
+    print(f"Best latency (ms): {best_latency}")
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
 

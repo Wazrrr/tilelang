@@ -1,9 +1,9 @@
 # TileTune: from PrimFunc to filtering, timing estimates, and benchmarking
 
-This document describes the checkout inspected on **2026-09-07**, with
-`ANALYSIS_VERSION = 14` and device `PROFILE_VERSION = 4`. It explains the current
-implementation, including the differences between GEMM and attention. Source
-links identify the implementation behind each part of the process.
+This document describes `ANALYSIS_VERSION = 17` and device `PROFILE_VERSION = 4`.
+It explains the current implementation, including the differences between GEMM
+and attention. Source links identify the implementation behind each part of the
+process.
 
 The [code review guide](../tilelang/tiletune/README.md) maps the source into
 shared analysis stages and separate GEMM/attention policy modules. The source
@@ -29,11 +29,11 @@ rank, then benchmark”:
 1. **GEMM and attention use the same analysis modules.** Family recognition
    supplies graph roles, the main loop, phase labels, and a family-specific
    memory-accounting choice. It does not select two independent cost models.
-2. **Scoring does not currently select a top-K subset in the integrated
-   autotuner.** Scores are computed during analysis, but successful candidates
-   surviving the configured resource checks are benchmarked through the usual
-   tuner. The sorted ranking is assembled in the final report. Compilation and
-   benchmark submission are not reordered by the score.
+2. **Top-K selection is explicit.** With `top_k=None`, successful candidates
+   surviving resource checks are benchmarked through the usual tuner. A positive
+   `top_k` adds a full-grid analysis pass before compilation, freezes the first K
+   finite eligible scores, and reuses selected PrimFuncs. Unselected candidates
+   remain in the report; compilation and benchmark failures never refill K.
 3. **`pipeline_time` is optional.** The default metric is `traffic_waves`.
    Pipeline timing requires an explicitly supplied performance profile and a
    supported schedule. Missing timing information does not silently fall back
@@ -338,10 +338,9 @@ Sources: [initial register-analysis flow](../tilelang/tiletune/register_pressure
 
 Allocation descriptions are separate in
 [register_storage.py](../tilelang/tiletune/register_storage.py). Their size and
-layout estimates do not prove simultaneous demand. The initial report also keeps
-`live_tile_sets`, calculated by `liveness.analyze_allocation_live_sets` for the
-modeled explicit-layout and thread-private allocations. The later family-loop
-estimate described below covers automatic fragments as well.
+layout estimates do not prove simultaneous demand. Tile liveness is analyzed
+once after family recognition, as described below, covering explicit and
+automatic fragments as well as thread-private allocations and loop-carried state.
 
 ### 5.2 Conservative live-tile demand
 
@@ -814,12 +813,13 @@ It does not use measured latency. Post-compile rejection or compilation failure
 does not change this analytical tier, so an `eligible` ranking entry is not a
 promise that compilation or execution succeeded.
 
-The integrated tuner computes these scores before lowering but calls
-`rank_records()` when finishing the report. Candidates are submitted for
-benchmarking from compilation results, not by their analytical rank. An
-external caller can use `analyze_prim_func()` and `rank_records()` before deciding
-what to compile, but that is a separate workflow and requires its own top-K
-selection policy.
+The exhaustive integrated tuner calls `rank_records()` when finishing its
+report. With explicit `top_k`, it first analyzes every supplied configuration,
+calls `rank_records()`, and freezes a selection before any lowering or candidate
+benchmarking. It compiles at most K finite eligible scores, preserving the
+original indices and reusing their elaborated PrimFuncs. Ties break by original
+index; unknowns are not silently backfilled. The report records shortfalls and
+all outcomes. Selection is independent of measured candidate latencies.
 
 The standalone GEMM/attention examples demonstrate analysis followed by one
 reference measurement by default. They are different from the exhaustive

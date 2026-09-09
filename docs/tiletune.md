@@ -3,8 +3,9 @@
 TileTune analyzes every supplied configuration's actual, elaborated PrimFunc
 before lowering. It propagates tile requirements, models register pressure,
 shared storage, scheduling, memory traffic and launch waves, then ranks the full
-grid. It does not generate configurations, rewrite kernels, or apply a top-K
-cutoff. Original Carver and the existing autotune filters remain separate.
+grid. Optional `top_k` selection limits compilation to the first K finite,
+eligible scores. It does not generate configurations or rewrite kernels.
+Original Carver and the existing autotune filters remain separate.
 
 The project uses the `tilelang.tiletune` package, `TileTuneConfig`,
 `set_tiletune_args(...)`, the `tiletune=` decorator option, and
@@ -52,6 +53,32 @@ and grouped compilation reuse the analyzed PrimFunc, including normal JIT bindin
 and per-config pass settings. `report_only` records pressure decisions while
 compiling candidates that analyze successfully; `reject` applies proven pressure failures.
 Correctness checks and benchmarking still run normally.
+
+### Optional top-k selection
+
+```python
+tuner.set_tiletune_args(
+    True, top_k=20, mode="report_only", ranking_metric="pipeline_time",
+    performance_model=device_profile, report_path="tiletune.json",
+)
+# The decorator accepts the same configuration:
+# @tilelang.autotune(configs=configs, tiletune={"top_k": 20, ...})
+```
+
+`top_k=None` preserves exhaustive behavior. A positive `top_k` requires
+`ranking=True`: the tuner first elaborates and analyzes every supplied candidate,
+freezes the ranking, writes its selection report, and compiles only the selected
+PrimFuncs. The same elaborated IR is reused for individual/grouped compilation,
+including per-config pass settings. Unknown, non-finite, and pressure-rejected
+scores are not selected, even in `report_only` mode. That mode still controls
+post-compile resource rejection independently of top-k selection.
+
+Ties use original configuration index without expanding the budget. Failed
+selected candidates are not replaced. Reports retain original indices and all
+analysis/compilation/benchmark failures, mark unselected analyzed candidates
+`not_selected`, and report any shortfall from K. An empty selection fails with a
+saved report. Top-k is included in cache identity. Report version 16 adds the
+frozen `selection` metadata; the cost equations are unchanged.
 
 `analyze_prim_func` always analyzes every captured global output write. It has no
 output-region override, and a kernel without captured global output writes raises
@@ -285,6 +312,12 @@ cmake --build build -j8
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 python -m pytest testing/python/tiletune/ -q
 ```
+
+Analysis version 17 removes the redundant `analyze_allocation_live_sets` pass and
+the diagnostic `pressure["live_tile_sets"]` field. Use
+`pressure["tile_liveness"]` for simultaneous tile-storage estimates. Per-buffer
+allocation estimates remain in `pressure["logical_storage"]`; accumulator bounds,
+ranking equations, and rejection decisions are unchanged.
 
 Analysis version 14 simplifies the API and error contracts: whole-kernel analysis,
 explicit region queries, one register decision, and analysis errors that stop the

@@ -29,7 +29,7 @@ tiletune/
 ├── register_pressure.py    Initial register-analysis flow and report assembly
 ├── register_storage.py     Allocation sizes and layout-based storage estimates
 ├── register_accumulator.py Dense MMA accumulator demand and ownership proof
-├── liveness.py             Allocation live sets and family-loop tile estimates
+├── liveness.py             Live tile estimates, including loop-carried state
 ├── register_policy.py      Physical limits, allowance and final register decision
 ├── budget.py               Target and user register ceilings
 ├── warp_specialization.py  Native copy classification and Hopper reservations
@@ -73,9 +73,12 @@ The engine runs the same sequence for each family:
    occupancy, and the family's `pipeline_overlap` analysis.
 6. Apply the configured ranking metric and return the module reports.
 
-`runtime.py` enforces rejection and records compiler resource checks. The normal
-autotuner compiles and benchmarks surviving candidates. Sorting the final report
-does not currently select a top-K subset or reorder benchmark submission.
+`runtime.py` enforces rejection and records compiler resource checks. With
+`top_k=None`, the autotuner compiles and benchmarks surviving candidates.
+With a positive `top_k`, `TileTuneSession.prepare_top_k()` analyzes the full grid,
+freezes the first K eligible finite scores, and retains their elaborated PrimFuncs
+for compilation. Ties use original index; failures never refill the budget.
+All candidates stay in the report, including `not_selected` records.
 
 ## What belongs to each family
 
@@ -115,11 +118,11 @@ Read these files in order:
    establishes the thread bound and replication; `analyze_accumulator_bound`
    converts bits to register units and takes maxima across operations. This
    operator-level proof is shared by GEMM and attention.
-4. [liveness.py](liveness.py): `analyze_allocation_live_sets` preserves the initial
-   `live_tile_sets` report for modeled allocations. The later `analyze_live_tiles`
-   also includes automatic fragments and family-loop state, producing the
-   `tile_liveness` estimate used by demand policy and occupancy. Neither live-set
-   calculation strengthens the accumulator proof.
+4. [liveness.py](liveness.py): after family recognition, `analyze_live_tiles`
+   estimates simultaneous storage for explicit/automatic fragments and
+   thread-private allocations, including loop-carried state. It produces the
+   `tile_liveness` estimate used by demand policy and occupancy. This estimate
+   does not strengthen the accumulator proof.
 5. The selected family's `register_spill_allowance` and
    [warp_specialization.py](warp_specialization.py): the soft demand margin and
    physical producer/consumer register reservation.
@@ -133,7 +136,6 @@ The initial `_pressure` call follows this sequence:
 ```text
 analyze_register_storage          → allocation report + modeled Buffer map
 analyze_accumulator_bound         → proven per-thread and per-CTA lower bounds
-analyze_allocation_live_sets      → conservative allocation live sets
 analyze_register_pressure        → assemble the pressure.accumulator checkpoint
 ```
 

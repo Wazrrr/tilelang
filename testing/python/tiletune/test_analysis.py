@@ -231,7 +231,9 @@ def test_packing_and_register_operands(dtype, bounds):
     tmp = next(x for x in pressure["logical_storage"] if x["buffer"] == "tmp")
     assert tmp["modeled_registers_per_thread"] == bounds
     assert pressure["decision"]["keep"]  # copy can stream/fuse
-    assert pressure["live_tile_sets"]
+    live = pressure["tile_liveness"]
+    assert live["peak_registers_per_block_estimate"] == 128 * bounds["lower"]
+    assert any(buffer["buffer"] == "tmp" for phase in live["phases"] for buffer in phase["buffers"])
 
 
 def test_partial_overwrite_keeps_unwritten_inputs():

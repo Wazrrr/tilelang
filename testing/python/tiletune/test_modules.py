@@ -50,6 +50,7 @@ def test_same_modules_and_unchanged_ir(family):
     assert set(result["modules"]) == MODULES
     assert all("implementation" in module for module in result["modules"].values())
     assert result["modules"]["register_pressure"] == result["pressure"]
+    assert "live_tile_sets" not in result["pressure"]
     assert result["modules"]["warp_specialization"]["status"] == "predicted"
     assert result["modules"]["ranking"]["score"] == result["tile_cost"]["score"]
     assert result["modules"]["pipeline_overlap"]["timing_status"] == "unknown"  # no invented timing profile

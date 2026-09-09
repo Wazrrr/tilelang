@@ -83,5 +83,7 @@ def device_info(devices):
 
 def source_hashes(kernel_source):
     root = Path(__file__).resolve().parents[1]
-    paths = [*(root / "experiments").rglob("*.py"), *(root / "tilelang/tiletune").rglob("*.py"), root / kernel_source]
+    paths = [root / kernel_source, root / "experiments/gemm/carver_baseline.json"]
+    for directory in ("experiments", "tilelang/tiletune", "tilelang/carver", "tilelang/autotuner"):
+        paths.extend((root / directory).rglob("*.py"))
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))}
