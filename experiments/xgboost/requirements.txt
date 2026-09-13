@@ -1,0 +1,2 @@
+# Optional upstream CPU package; ordinary TileTune runs do not import XGBoost.
+xgboost-cpu>=2.1,<4

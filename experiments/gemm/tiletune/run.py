@@ -24,7 +24,7 @@ from experiments._common import (
 from experiments._tiletune import add_arguments, rank_info, winner_summary
 
 
-METHODS = ("brute_force", "carver", "tiletune")
+METHODS = ("brute_force", "carver", "tiletune", "xgboost")
 
 
 def benchmark(args, configs, selected, inputs, profile, target):
@@ -42,6 +42,15 @@ def benchmark(args, configs, selected, inputs, profile, target):
     supplied = list(range(len(configs))) if args.method == "tiletune" else selected
     if not supplied:
         raise ValueError("The model selected no eligible configurations")
+    preparation_started = time.perf_counter()
+    preparation_failures = {}
+    if args.method == "xgboost":
+        from experiments.xgboost.execution import prepare_selected
+
+        supplied, preparation_failures = prepare_selected(make_kernel(args.m, args.n, args.k, args.dtype), configs, supplied, target)
+        if not supplied:
+            return None, None, preparation_failures, time.perf_counter() - preparation_started, "All selected candidates failed elaboration"
+    preparation_seconds = time.perf_counter() - preparation_started
     tuner = (
         ObservedTuner(make_kernel(args.m, args.n, args.k, args.dtype), [configs[i] for i in supplied])
         .set_compile_args(target=target, execution_backend="tvm_ffi", out_idx=[2])
@@ -82,7 +91,7 @@ def benchmark(args, configs, selected, inputs, profile, target):
         if not str(error).startswith(("Auto-tuning failed:", "TileTune top_k selected no eligible")):
             raise
         result, failure = None, str(error)
-    elapsed = time.perf_counter() - started
+    elapsed = time.perf_counter() - started + preparation_seconds
     if (args.output / "benchmarks.tsv").exists():
         with (args.output / "benchmarks.tsv").open() as stream:
             for row in csv.DictReader(stream, delimiter="\t"):
@@ -91,7 +100,7 @@ def benchmark(args, configs, selected, inputs, profile, target):
                     latency_ms=float(row["latency_ms"]) if row["latency_ms"] else None,
                     error=row["error"] or None,
                 )
-    return result, tuner.tiletune_report, {supplied[i]: row for i, row in outcomes.items()}, elapsed, failure
+    return result, tuner.tiletune_report, {**preparation_failures, **{supplied[i]: row for i, row in outcomes.items()}}, elapsed, failure
 
 
 def run_one(args):
@@ -126,6 +135,8 @@ def run_one(args):
             profile_seconds=profile_seconds,
             source_sha256=source_hashes("experiments/gemm/kernel.py"),
             native_build=KernelCache._get_tilelang_lib_stamp(),
+            torch_version=torch.__version__,
+            runtime_version=torch.version.hip or torch.version.cuda,
             cold_kernel_cache=True,
             cold_autotune_cache=True,
         ),
@@ -140,6 +151,11 @@ def run_one(args):
         selection_seconds = time.perf_counter() - started
         selected = report["selection"]["selected_indices"]
         write_json(args.output / "carver.json", report)
+    elif args.method == "xgboost":
+        from experiments.xgboost.integration import rank_for_run
+
+        report, selection_seconds = rank_for_run(args, configs)
+        selected = report["selection"]["selected_indices"]
     print(f"{args.method}: grid={len(configs)}, top_k={args.top_k}", flush=True)
     result, tiletune_report, outcomes, tuning_seconds, failure = benchmark(args, configs, selected, inputs, profile, target)
     if tiletune_report is not None:
@@ -185,8 +201,10 @@ def run_one(args):
         compile_and_benchmark_seconds=tuning_seconds,
         tuning_seconds=selection_seconds + tuning_seconds,
     )
-    with (args.output / "timings.tsv").open() as stream:
-        timings = list(csv.DictReader(stream, delimiter="\t"))
+    timings = []
+    if (args.output / "timings.tsv").exists():
+        with (args.output / "timings.tsv").open() as stream:
+            timings = list(csv.DictReader(stream, delimiter="\t"))
     summary["compile_work_seconds"] = (
         sum(
             float(row["duration_ms"])
@@ -264,7 +282,7 @@ def compare_results(summaries, method_outputs):
 def run_all(args):
     summaries, outputs = [], {}
     # Model selections are complete before the exhaustive baseline produces labels.
-    for method in ("carver", "tiletune", "brute_force"):
+    for method in ("carver", "tiletune", *(["xgboost"] if args.xgb_model is not None else []), "brute_force"):
         output = outputs[method] = args.output / method
         command = [
             sys.executable,
@@ -297,6 +315,9 @@ def run_all(args):
             command += ["--device-profile", str(args.device_profile)]
         if args.config_indices is not None:
             command += ["--config-indices", *map(str, args.config_indices)]
+        from experiments.xgboost.integration import child_arguments
+
+        command += child_arguments(args)
         log_path = args.output / f"{method}.log"
         print(f"Running {method}; log: {log_path}", flush=True)
         with log_path.open("w") as log:
@@ -342,7 +363,11 @@ def main():
     parser.add_argument("--top-k", type=positive_int, default=20)
     parser.add_argument("--backend", choices=["cudagraph", "event"], default="cudagraph")
     parser.add_argument("--validation-repeats", type=positive_int, default=5)
+    from experiments.xgboost.integration import add_arguments as add_xgb_arguments, validate_arguments
+
+    add_xgb_arguments(parser)
     args = parser.parse_args()
+    validate_arguments(parser, args)
     prepare_run(args)
     successful = run_all(args) if args.method == "all" else run_one(args)["status"] == "ok"
     if not successful:

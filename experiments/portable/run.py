@@ -33,6 +33,13 @@ def write_json(path, value):
 
 
 def make_request(workload, device, settings):
+    settings = dict(settings)
+    if settings.get("method") == "xgboost" and not settings.get("xgb_model_sha256"):
+        path = settings.get("xgb_model")
+        if not path:
+            raise ValueError("xgboost requires an explicit trained --xgb-model")
+        settings["xgb_model"] = str(Path(path).resolve())
+        settings["xgb_model_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     payload = dict(version=1, workload=workload.to_dict(), device=device.to_dict(), settings=settings)
     return dict(payload, request_id=hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
 
@@ -64,6 +71,23 @@ def validate_result(result, request):
         observation = result["device_observation"]
         if not observation.get("name") or not targets_match(request["device"]["target"], observation.get("target", {})):
             raise ValueError("worker observed a different target than requested")
+        if request["settings"]["method"] == "xgboost":
+            if result.get("model_sha256") != request["settings"]["xgb_model_sha256"]:
+                raise ValueError("worker result used a different XGBoost model")
+            selection = result.get("selection") or {}
+            selected = selection.get("selected_indices")
+            k = request["settings"]["top_k"]
+            if (
+                not isinstance(selected, list)
+                or not selected
+                or any(type(i) is not int or i < 0 for i in selected)
+                or len(set(selected)) != len(selected)
+                or len(selected) > k
+                or selection.get("requested_k") != k
+                or selection.get("selected_count") != len(selected)
+                or result["winner"].get("index") not in selected
+            ):
+                raise ValueError("worker result violates the frozen XGBoost selection budget")
     elif result["status"] != "analyzed" and not result.get("reason"):
         raise ValueError("unsuccessful worker result requires a reason")
     return result
@@ -121,6 +145,7 @@ def run_native(request, output):
     import torch
     from tilelang.tiletune import TileTuneConfig, current_target, query_device_limits, resolve_target
     from tilelang.tiletune.runtime import TileTuneSession
+    from tilelang.cache.kernel_cache import KernelCache
     from experiments._common import source_hashes
     from .kernels import make_case
 
@@ -149,9 +174,9 @@ def run_native(request, output):
         torch.backends.cuda.matmul.allow_tf32 = False
 
     case = make_case(workload)
-    performance_model = device.performance_model
+    performance_model = device.performance_model if settings["method"] != "xgboost" else None
     profile_identity = None
-    if device.profiles:
+    if device.profiles and settings["method"] != "xgboost":
         from tilelang.tiletune import load_device_profile
 
         profile_path = device.profiles.get(workload.dtype)
@@ -180,22 +205,48 @@ def run_native(request, output):
         indices, configs = select_configs(configs, indices)
     else:
         indices = list(range(len(configs)))
-    config = TileTuneConfig(
-        enabled=True,
-        mode="report_only",
-        ranking_metric=settings["metric"],
-        top_k=settings["top_k"] if settings["method"] == "top_k" else None,
-        performance_model=performance_model,
-        device_limits=limits,
-        report_path=str(output / "tiletune.json"),
-        trace_path=str(output / "trace.log") if settings["trace"] else None,
-        max_spill_bytes=None,
-        max_local_bytes=None,
+    if settings["method"] != "xgboost":
+        config = TileTuneConfig(
+            enabled=True,
+            mode="report_only",
+            ranking_metric=settings["metric"],
+            top_k=settings["top_k"] if settings["method"] == "top_k" else None,
+            performance_model=performance_model,
+            device_limits=limits,
+            report_path=str(output / "tiletune.json"),
+            trace_path=str(output / "trace.log") if settings["trace"] else None,
+            max_spill_bytes=None,
+            max_local_bytes=None,
+        )
+    extra_sources = (
+        ("examples/flash_attention/example_mha_fwd_bshd.py", "examples/flash_attention/example_mha_tiletune.py")
+        if workload.op == "attention"
+        else ()
     )
-    hashes = source_hashes("experiments/portable/kernels.py")
-    if workload.op == "attention":
-        for name in ("examples/flash_attention/example_mha_fwd_bshd.py", "examples/flash_attention/example_mha_tiletune.py"):
-            hashes[name] = hashlib.sha256((Path(__file__).resolve().parents[2] / name).read_bytes()).hexdigest()
+    hashes = source_hashes("experiments/portable/kernels.py", *extra_sources)
+    xgb_report = None
+    native_build = KernelCache._get_tilelang_lib_stamp()
+    if settings["method"] == "xgboost":
+        from experiments.xgboost.data import make_context
+        from experiments.xgboost.model import Predictor
+
+        started = time.perf_counter()
+        context = make_context(
+            workload,
+            "portable." + workload.op,
+            device.target,
+            result["device_observation"]["name"],
+            "event",
+            hashes,
+            environment=dict(
+                native_build=native_build,
+                torch_version=result["device_observation"]["torch_version"],
+                runtime_version=result["device_observation"]["runtime_version"],
+            ),
+        )
+        predictor = Predictor(settings["xgb_model"], expected_sha256=settings["xgb_model_sha256"], workers=settings["workers"])
+        xgb_report = predictor.rank(context, configs, settings["top_k"])
+        xgb_report["selection"]["wall_time_ms"] = (time.perf_counter() - started) * 1000
     write_json(
         output / "experiment.json",
         dict(
@@ -204,6 +255,7 @@ def run_native(request, output):
             configs=configs,
             device_limits=limits,
             source_sha256=hashes,
+            native_build=native_build,
             device_observation=result.get("device_observation"),
             performance_model=performance_model,
             profile_identity=profile_identity,
@@ -236,6 +288,10 @@ def run_native(request, output):
     generator = torch.Generator(device="cuda").manual_seed(settings["seed"])
     inputs = case.inputs("cuda", generator)
     expected = case.reference(*inputs)
+    if xgb_report is not None:
+        from experiments.xgboost.execution import run_selected
+
+        return dict(result, **run_selected(case, configs, indices, device.target, inputs, expected, settings, output, xgb_report))
     tuner = (
         AutoTuner(case.build, configs)
         .set_compile_args(target=device.target, execution_backend="tvm_ffi", out_idx=case.out_idx, pass_configs=case.pass_configs)
@@ -349,7 +405,8 @@ def main():
     parser.add_argument(
         "--plan", action="store_true", help="Print the manifest and coverage without importing TileLang or querying a device"
     )
-    parser.add_argument("--method", choices=["analyze", "exhaustive", "top_k"], default="analyze")
+    parser.add_argument("--method", choices=["analyze", "exhaustive", "top_k", "xgboost"], default="analyze")
+    parser.add_argument("--xgb-model", type=Path, help="Frozen model from python -m experiments.xgboost train")
     parser.add_argument("--metric", choices=["traffic_waves", "pipeline_time"], default="traffic_waves")
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--memory-regime", choices=["cached", "streaming"], default="streaming")
@@ -363,6 +420,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--case-timeout", type=int, default=3600)
     args = parser.parse_args()
+    if args.method == "xgboost" and args.xgb_model is None:
+        parser.error("--method xgboost requires --xgb-model")
     if any(getattr(args, key) <= 0 for key in ("top_k", "workers", "warmup", "rep", "timeout", "case_timeout")):
         parser.error("budgets, workers, repetitions, and timeouts must be positive")
     if args.manifest:
@@ -435,6 +494,9 @@ def main():
         )
     }
     results = []
+    if args.xgb_model is not None:
+        settings["xgb_model"] = str(args.xgb_model.resolve())
+        settings["xgb_model_sha256"] = hashlib.sha256(args.xgb_model.read_bytes()).hexdigest()
     for device in devices:
         for workload in workloads:
             request = make_request(workload, device, settings)

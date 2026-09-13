@@ -1,9 +1,13 @@
 # Reproducing TileTune experiments
 
-Run commands from a checkout of this commit. The portable entry point is
+For the current workload × accelerator matrix and baseline comparisons, start
+with [portable experiments](../../experiments/portable/README.md) and the
+[XGBoost guide](../../experiments/xgboost/README.md).
+
+This directory retains the CUDA generalization suite:
 `python -m benchmark.autotune.validate_tiletune_generalization`. It uses actual
 GEMM/attention PrimFuncs, fixed device probes and the full original config grids.
-No candidate timing fits the model and no top-K pruning is applied.
+No candidate timing fits this analytical model and no top-K pruning is applied.
 
 ## Build on the destination node
 
@@ -145,7 +149,6 @@ CPU analysis with explicit A100 limits and sm_80 device cross-compilation.
 `benchmark_tiletune_gemm.py`, `benchmark_tiletune_attention.py`, and
 `benchmark_tiletune_fp8.py` provide individual-case comparisons, including
 selected-index debugging. The FP8 script/example requires Hopper. See
-[the model documentation](../../docs/tiletune.md) for API use and formulas, and
-[the preceding H200 findings](../../docs/tiletune_validation.md) for known model
-weaknesses. Historical fitted-profile scripts and raw experiment artifacts are
+[the model documentation](../../docs/tiletune.md) for API use, formulas, and model
+limitations. Historical fitted-profile scripts and raw experiment artifacts are
 not dependencies of this workflow.

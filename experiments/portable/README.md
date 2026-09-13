@@ -223,6 +223,14 @@ and `worker_main` in `run.py`; the built-in CUDA/HIP worker uses this same proto
 
 ## Results and interpretation
 
+The optional [XGBoost baseline](../xgboost/README.md) accepts
+`--method xgboost --xgb-model MODEL --top-k K`. It uses a separately trained model
+with explicit workload holdouts and configuration features. Its predictions are
+independent of TileTune's analytical features and primitive profiles. Reports
+use `xgboost.json` and `outcomes.json`; scores have units `log(ms)`. The model
+fingerprint is frozen in the worker request. The native CUDA/HIP worker executes
+this method; an external worker must implement it explicitly to use it on Ascend.
+
 Each invocation creates a fresh timestamped output directory. Each device/workload
 case writes `request.json`, `result.json`, and `worker.log`. Native runs additionally
 write `experiment.json` with source/profile provenance, `tiletune.json` with all

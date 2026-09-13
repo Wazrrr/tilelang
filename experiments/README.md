@@ -6,6 +6,12 @@ FlashAttention, KDA, normalization/reduction kernels, native CUDA/HIP execution,
 and the external worker boundary for Huawei Ascend. The fixed-grid comparisons
 below remain separate entry points.
 
+The optional [XGBoost baseline](xgboost/README.md) trains on separate exhaustive
+workloads and selects a frozen top-K on held-out shapes. It is available in the
+portable matrix and the GEMM, FP8, and FlashAttention comparison runners through
+`--method xgboost --xgb-model MODEL`; supplying a model also adds it to their
+`--method all` comparison.
+
 Run these commands from the repository root in an environment with TileLang,
 PyTorch, and CUDA. Each entry point runs an experiment and writes its results.
 
@@ -14,7 +20,7 @@ experiments/
 ├── gemm/
 │   ├── kernel.py             Advanced-autotune GEMM and its 288-config grid
 │   ├── system/run.py         Pipeline, grouped compilation, multi-GPU comparison
-│   └── tiletune/run.py       Brute force / Carver / TileTune top-k comparison
+│   └── tiletune/run.py       Brute force / Carver / TileTune / XGBoost top-k
 ├── gemm_fp8/
 │   ├── kernel.py             FP8 example adapter for concurrent compilation
 │   ├── system/run.py         Five system variants, E4M3 or E5M2
@@ -24,6 +30,7 @@ experiments/
 │   ├── system/run.py         Five system variants, causal or noncausal
 │   └── tiletune/run.py       Brute force / TileTune top-k, 128 configs
 ├── portable/                Workload × accelerator matrix and worker protocol
+├── xgboost/                 Offline training, frozen selection, and evaluation
 ├── _common.py               Run arguments, result files, compile outcomes
 └── _tiletune.py             TileTune arguments and model-rank reporting
 ```
