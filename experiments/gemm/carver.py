@@ -1,8 +1,5 @@
 """Evaluate the repository's legacy Carver policy on an explicit GEMM grid."""
 
-import json
-from pathlib import Path
-
 from tilelang.carver.arch import CUDA
 from tilelang.carver.matmul_analysis import get_tensorized_func_and_tags
 from tilelang.carver.roller.policy import TensorCorePolicy
@@ -20,7 +17,6 @@ def model_target(target):
 
 
 def rank_configs(configs, *, m, n, k, dtype, target, top_k):
-    baseline = json.loads(Path(__file__).with_name("carver_baseline.json").read_text())
     arch = CUDA(model_target(target))
     template = MatmulTemplate(M=m, N=n, K=k, trans_B=True, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32")
     func, tags = get_tensorized_func_and_tags(template.equivalent_function(), arch.target, allow_gemv=True)
@@ -64,7 +60,6 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k):
             record["status"] = "not_selected"
     return dict(
         model="legacy_carver_common_grid",
-        baseline=baseline,
         model_target=str(arch.target),
         compile_target=str(Target(target)),
         formula="(traffic_bytes + 1) * num_wave",
@@ -72,7 +67,7 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k):
         configs=records,
         selection=dict(requested_k=top_k, selected_indices=selected, selected_count=len(selected), shortfall=top_k - len(selected)),
         assumptions=[
-            "Uses the repository's legacy Carver policy; baseline metadata records the restored upstream snapshot.",
+            "Uses the repository's legacy Carver policy without experimental WGMMA/WS model extensions.",
             "sm_90a is spelled sm_90 for the legacy model only; every method compiles the same kernel for the actual target.",
             "Pipeline stages 0 and 1 both use one shared-memory copy in the legacy policy.",
             "Thread count is checked for policy feasibility; the cost retains Carver's original occupancy estimate.",

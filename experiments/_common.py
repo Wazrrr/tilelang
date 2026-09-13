@@ -83,7 +83,25 @@ def device_info(devices):
 
 def source_hashes(kernel_source):
     root = Path(__file__).resolve().parents[1]
-    paths = [root / kernel_source, root / "experiments/gemm/carver_baseline.json"]
+    paths = [root / kernel_source]
     for directory in ("experiments", "tilelang/tiletune", "tilelang/carver", "tilelang/autotuner"):
         paths.extend((root / directory).rglob("*.py"))
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))}
+
+
+def observe_compilation(execution, outcomes):
+    """Retain each candidate's compile result before benchmark rows are available."""
+    for future, items in execution[2].items():
+
+        def record(done, items=items):
+            try:
+                results = done.result()
+            except Exception as error:
+                for index, _ in items:
+                    outcomes[index] = dict(status="compilation_failed", error=str(error))
+            else:
+                for index, _, _, error in results:
+                    outcomes[index] = dict(status="compilation_failed" if error else "compiled", error=str(error) if error else None)
+
+        future.add_done_callback(record)
+    return execution

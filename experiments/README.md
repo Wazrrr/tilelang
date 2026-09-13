@@ -11,11 +11,14 @@ experiments/
 │   └── tiletune/run.py       Brute force / Carver / TileTune top-k comparison
 ├── gemm_fp8/
 │   ├── kernel.py             FP8 example adapter for concurrent compilation
-│   └── tiletune/run.py       FP8 GEMM, 288 configs
+│   ├── system/run.py         Five system variants, E4M3 or E5M2
+│   └── tiletune/run.py       Brute force / TileTune top-k, 288 configs
 ├── flash_attention/
-│   └── tiletune/run.py       FlashAttention, 128 configs, causal or noncausal
-├── _common.py               Run arguments and result files
-└── _tiletune.py             Shared TileTune experiment and rank reporting
+│   ├── kernel.py             Attention construction, inputs, and correctness
+│   ├── system/run.py         Five system variants, causal or noncausal
+│   └── tiletune/run.py       Brute force / TileTune top-k, 128 configs
+├── _common.py               Run arguments, result files, compile outcomes
+└── _tiletune.py             TileTune arguments and model-rank reporting
 ```
 
 GEMM uses the tiled `A @ B.T` kernel from the advanced autotune example, with
@@ -30,18 +33,36 @@ Each kernel folder documents its own runnable cases:
 | Kernel | Experiment commands |
 | --- | --- |
 | [GEMM](gemm/README.md) | Five system cases: baseline, pipeline, grouped compilation, multi-GPU, and combined; FP16/BF16 TileTune runs |
-| [FP8 GEMM](gemm_fp8/README.md) | E4M3 and E5M2 TileTune runs |
-| [FlashAttention](flash_attention/README.md) | Noncausal and causal TileTune runs |
+| [FP8 GEMM](gemm_fp8/README.md) | Five system cases and brute-force/TileTune comparisons for E4M3 and E5M2 |
+| [FlashAttention](flash_attention/README.md) | Five system cases and brute-force/TileTune comparisons for causal and noncausal attention |
 
 ## TileTune ranking experiments
 
-The GEMM runner compares brute force, Carver, and TileTune with a fixed top-k;
-see its [kernel guide](gemm/README.md). FP8 and FlashAttention runs obtain a
-reusable device profile, use **`ranking_metric="pipeline_time"`**,
-and exhaustively tune the supplied grid with `early_stop=False`. The mode is
-`report_only`: pressure decisions are recorded, and every successfully analyzed
-candidate proceeds to compilation. Correctness checks remain enabled. Failed
-candidates stay in `tiletune.json`; the winner is the fastest successful candidate.
+Each kernel has its own system and TileTune runner. System `--variant all` runs
+baseline, pipeline, grouped compilation, multi-GPU, and combined variants in
+fresh processes. These cases disable TileTune and tune the entire supplied grid.
+They default to the `event` backend and require two visible GPUs for `all`.
+
+The GEMM runner compares brute force, Carver, and TileTune; FP8 and FlashAttention
+compare brute force and TileTune. `--method all` runs the comparison in separate
+processes, with model selection preceding exhaustive measurements. Each TileTune
+runner defaults to a fixed `--top-k 20`, a reusable device profile, and
+**`ranking_metric="pipeline_time"`**. At most K scored, eligible configurations
+are compiled and benchmarked, with no replacement after failures. Brute force
+tunes the entire supplied grid. Correctness checks remain enabled and all
+candidate outcomes are retained.
+
+FP8 and FlashAttention also accept `--method tiletune --top-k all` for their
+previous exhaustive ranking experiment. This uses `report_only` mode and
+`early_stop=False`: every successfully analyzed candidate proceeds to
+compilation, including candidates the model would reject for pressure.
+
+Comparisons remeasure the selected winners in shuffled order, report the median
+of 5 samples, and save every sample. They also report Oracle@K: exhaustive best
+latency divided by the best exhaustive latency within the frozen selected set.
+Coverage excludes candidates without successful exhaustive measurements. Profile
+preparation and final validation are excluded from reported tuning time;
+top-K analysis and selection are included.
 
 Primitive rates are measured or loaded before candidate timing. Candidate
 latencies are used to identify the measured winner, not to fit the model or
@@ -50,23 +71,27 @@ The existing profiler supports A100 and Hopper; FP8 requires Hopper.
 
 ## Read the winner's rank
 
-FP8 and FlashAttention runs end with lines in this form (illustrative values);
-GEMM prints the same rank information in its winner summary and comparison:
+Each TileTune winner summary records latency, original configuration index,
+predicted rank, and the complete tie interval. For example (illustrative values):
 
-```text
-Measured winner: 0.123456 ms, original config #42
-Winner config: {...}
-Winner's pipeline_time rank: 7/288 (tie range 7-8; 240 scored candidates)
+```json
+{
+  "latency_ms": 0.123456,
+  "original_index": 42,
+  "predicted_rank": 7,
+  "tie_first_rank": 7,
+  "tie_last_rank": 8
+}
 ```
 
 Ranks are one-based and refer to the model's ordering of the **supplied grid**.
 Ties show the full possible rank interval. If the measured winner is unscored or
-marked pressure-rejected by the model, the script prints `rank: unavailable`
+marked pressure-rejected by the model, the summary uses null predicted ranks
 with its tier and report position. An appended position for an unknown result
 is not presented as a predicted performance rank.
 
 `--memory-regime streaming` is the default model input; `cached` selects the
-profile's cached-memory rates. Both benchmark with CUDA graphs. Omitting
+profile's cached-memory rates. TileTune runners default to CUDA graphs. Omitting
 `--device-profile` uses the profiler's automatic cache. An explicit path is
 created if needed and can accumulate FP16, BF16, and FP8 primitive measurements
 for the same device/build fingerprint. Use a separate path after an incompatible
@@ -75,8 +100,8 @@ device or build change.
 ## Run sizes and output files
 
 All runners accept `--workers`, `--warmup`, `--rep`, `--timeout`, and `--seed`.
-TileTune accepts `--group-size` (default 1, grouping disabled). GEMM additionally
-accepts `--method` and `--top-k` (default 20); its library top-k option is
+TileTune accepts `--group-size` (default 1, grouping disabled), `--method`, and
+`--top-k` (default 20); its library top-k option is
 `TileTuneConfig(top_k=...)`, with `None` preserving exhaustive behavior.
 `--config-indices 0 8 16 24` runs an explicit subset for a shorter experiment;
 the default is the entire grid. Subset reports preserve original indices and
@@ -99,5 +124,6 @@ and profiles under `experiments/profiles/` are ignored by Git.
 | `benchmarks.tsv` | Per-candidate benchmark outcomes and latencies |
 | `timings.tsv` | Compilation and autotuning stage measurements |
 | `summary.json` | Tuning duration and measured winner; TileTune also records its predicted rank and ties |
+| `outcomes.json` | Comparison method's candidate outcomes, original indices, selection flags, and failures |
 | `tiletune.json` | TileTune's analysis, resource decisions, ranking, and outcome for every supplied candidate |
-| `comparison.json` | System `--variant all` results and speedups; each variant has its own subdirectory |
+| `comparison.json` | System `--variant all` or TileTune `--method all` results, speedups, and comparison metrics |

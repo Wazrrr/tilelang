@@ -11,23 +11,20 @@ import subprocess
 import sys
 import time
 
-from experiments._common import add_gemm_arguments, device_info, positive_int, prepare_run, select_configs, source_hashes, write_json
-from experiments._tiletune import add_arguments, winner_summary
+from experiments._common import (
+    observe_compilation,
+    add_gemm_arguments,
+    device_info,
+    positive_int,
+    prepare_run,
+    select_configs,
+    source_hashes,
+    write_json,
+)
+from experiments._tiletune import add_arguments, rank_info, winner_summary
 
 
 METHODS = ("brute_force", "carver", "tiletune")
-
-
-def rank_info(report, index):
-    entry = next(row for row in report["ranking"] if row["index"] == index)
-    scored = entry["tier"] == "eligible" and entry["score"] is not None
-    return dict(
-        predicted_rank=entry["rank"] if scored else None,
-        tie_first_rank=entry["tie_first_rank"] if scored else None,
-        tie_last_rank=entry["tie_last_rank"] if scored else None,
-        tier=entry["tier"],
-        selected=index in report["selection"]["selected_indices"],
-    )
 
 
 def benchmark(args, configs, selected, inputs, profile, target):
@@ -39,21 +36,7 @@ def benchmark(args, configs, selected, inputs, profile, target):
 
     class ObservedTuner(AutoTuner):
         def _prepare_compile_execution(self, *a, **kw):
-            execution = super()._prepare_compile_execution(*a, **kw)
-            for future, items in execution[2].items():
-
-                def record(done, items=items):
-                    try:
-                        results = done.result()
-                    except Exception as error:
-                        for idx, _ in items:
-                            outcomes[idx] = dict(status="compilation_failed", error=str(error))
-                    else:
-                        for idx, _, _, error in results:
-                            outcomes[idx] = dict(status="compilation_failed" if error else "compiled", error=str(error) if error else None)
-
-                future.add_done_callback(record)
-            return execution
+            return observe_compilation(super()._prepare_compile_execution(*a, **kw), outcomes)
 
     # TileTune must see the full grid to analyze and select before compiling.
     supplied = list(range(len(configs))) if args.method == "tiletune" else selected
@@ -121,7 +104,8 @@ def run_one(args):
     torch.cuda.set_device(0)
     torch.backends.cuda.matmul.allow_tf32 = False
     target = current_target()
-    original_indices, configs = select_configs(get_configs(), args.config_indices)
+    grid = get_configs()
+    original_indices, configs = select_configs(grid, args.config_indices)
     inputs = make_inputs(args.m, args.n, args.k, args.dtype, args.seed)
     profile, profile_seconds = None, 0.0
     if args.method == "tiletune":
@@ -135,7 +119,7 @@ def run_one(args):
             arguments=vars(args),
             configs=configs,
             original_indices=original_indices,
-            original_grid_size=len(get_configs()),
+            original_grid_size=len(grid),
             target=target,
             devices=device_info([0]),
             profile=profile,
@@ -354,13 +338,11 @@ def main():
     add_arguments(parser, "gemm")
     add_gemm_arguments(parser)
     parser.add_argument("--dtype", choices=["float16", "bfloat16"], default="float16")
-    parser.add_argument("--method", choices=[*METHODS, "learned", "all"], default="tiletune")
+    parser.add_argument("--method", choices=[*METHODS, "all"], default="tiletune")
     parser.add_argument("--top-k", type=positive_int, default=20)
     parser.add_argument("--backend", choices=["cudagraph", "event"], default="cudagraph")
     parser.add_argument("--validation-repeats", type=positive_int, default=5)
     args = parser.parse_args()
-    if args.method == "learned":
-        parser.error("The learned ranking baseline is deferred; choose brute_force, carver, tiletune, or all")
     prepare_run(args)
     successful = run_all(args) if args.method == "all" else run_one(args)["status"] == "ok"
     if not successful:

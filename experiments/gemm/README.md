@@ -106,15 +106,13 @@ Existing results directly in `grouped/` stay in place. `--variant all` writes
 
 [tiletune/run.py](tiletune/run.py) controls all methods through `--method`.
 The default is `tiletune` with `--top-k 20`. `all` runs the three implemented
-methods in separate processes and prints a comparison. The learned baseline is
-reserved and currently exits with a clear error; `all` does not run it.
+methods in separate processes and prints a comparison.
 
 | Method | Candidate selection | Compilation and benchmark budget |
 | --- | --- | --- |
 | `brute_force` | All 288 configurations, no cost-model filtering | Entire grid |
 | `carver` | Legacy Carver cost on the same 288-config grid | At most K candidates |
 | `tiletune` | TileTune `pipeline_time` cost on the same grid | At most K candidates |
-| `learned` | Deferred AutoTVM-style XGBoost ranker | Planned: at most K candidates |
 
 Brute force means exhaustive autotuning. The example's `--use_autotune` disabled
 path instead runs one heuristic configuration; that is not this baseline.
@@ -155,9 +153,6 @@ CUDA_VISIBLE_DEVICES=2 python -m experiments.gemm.tiletune.run \
     --method tiletune --top-k 20 --m 4096 --n 4096 --k 4096 --dtype float16 \
     --device-profile experiments/profiles/h200-tiletune-topk.json \
     --output experiments/results/gemm/tiletune
-
-# 4. Reserved for the learned baseline: currently reports that it is deferred.
-# CUDA_VISIBLE_DEVICES=2 python -m experiments.gemm.tiletune.run --method learned --top-k 20
 ```
 
 ### Selection and measurement contracts
@@ -184,19 +179,19 @@ architecture parser changes, and added CUDA-driver helpers have been removed.
 Local Carver hint-conversion edits in the legacy examples, benchmarks, and
 autotuning tutorial have also been reverted.
 
-[carver_baseline.json](carver_baseline.json) records the restored upstream commit,
-Carver tree ID, and SHA-256 of all 34 package files for provenance. The adapter
-includes this snapshot metadata and both target spellings in `carver.json`
-without verifying the current sources against the snapshot. TileTune's
-extra device-limit query lives in TileTune and uses the original generic driver
-query, leaving Carver unchanged.
+Each run records SHA-256 hashes of the current Carver, TileTune, autotuner, and
+experiment Python sources in `experiment.json`. These identify the code used
+for that run; the upstream restoration commit above provides historical context.
+The adapter records both target spellings in `carver.json`. TileTune's extra
+device-limit query lives in TileTune and uses the original generic driver query,
+leaving Carver unchanged.
 
 The old parser accepts `sm_90` but cannot parse `sm_90a`. The experiment adapter
 passes `sm_90` to the Carver model on Hopper; **all methods still compile the
 same GEMM kernel for the actual `sm_90a` target**. This spelling conversion lives
 outside Carver. It adds no WGMMA/WS modeling or revised resource limits.
 
-The Carver adapter in [carver.py](carver.py) calls the pinned upstream
+The Carver adapter in [carver.py](carver.py) calls the restored upstream
 `TensorCorePolicy` on each supplied output tile and reduction step. Its score is
 `(traffic_bytes + 1) * num_wave`, retaining its own shared-memory/register and
 thread-feasibility checks. Stages 0 and 1 both mean one shared-memory
@@ -339,11 +334,6 @@ competing benchmarks. The focused tests are:
 ```bash
 python -m pytest testing/python/tiletune/test_top_k.py testing/python/experiments/ -q
 ```
-
-The learned baseline will use an XGBoost ranker with AutoTVM-style program
-features, trained on separate GEMM workloads and frozen before evaluation;
-see [Learning to Optimize Tensor Programs](https://proceedings.neurips.cc/paper_files/paper/2018/file/8b5700012be65c9da25f49408d959ca0-Paper.pdf).
-It is deferred in this implementation.
 
 See the [shared experiment guide](../README.md) for the FP8/attention experiment
 contracts and the [TileTune guide](../../docs/tiletune.md) for the library API.
