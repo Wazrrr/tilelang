@@ -20,6 +20,7 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
     """
     config = TileTuneConfig.from_value(config)
     register_budget = resolve_register_budget(config, target)
+    backend = register_budget["target_model"]["kind"]
     launches = {info.function_name: info for info in launch_infos or []}
     physical = {}
     sm_registers = (device_limits or config.device_limits or {}).get("registers_per_sm")
@@ -28,7 +29,28 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
     for name in function_names:
         item = resource_usage.get(name)
         counters = dict(registers=None, spill_stores_bytes=None, spill_loads_bytes=None, local_bytes=None)
-        if item is not None:
+        if item is not None and backend == "hip":
+            # HIP VGPR/SGPR spill remarks count registers, not PTXAS bytes.
+            # Retain the raw observations without inventing a byte conversion.
+            extra = item.extra
+
+            def observed_integer(key, observations=extra):
+                value = str(observations.get(key, ""))
+                return int(value) if value.isdecimal() else None
+
+            vgpr, agpr = observed_integer("VGPRs"), observed_integer("AGPRs")
+            total = vgpr + agpr if register_budget["target_arch"] == "gfx942" and vgpr is not None and agpr is not None else None
+            counters.update(
+                registers=total,
+                vector_registers=vgpr,
+                accumulator_registers=agpr,
+                scalar_registers=observed_integer("TotalSGPRs"),
+                register_basis="CDNA3 architectural VGPR + AGPR; allocation granularity unmodeled",
+                local_bytes=observed_integer("ScratchSize [bytes/lane]"),
+            )
+            if config.max_spill_bytes == 0 and any((observed_integer(key) or 0) > 0 for key in ("SGPRs Spill", "VGPRs Spill")):
+                reasons.append(f"{name}: compiler reports spilled registers with a zero-spill policy")
+        elif item is not None:
             extra = item.extra
             observed = extra.get("observed_fields", [])
             counters.update(
@@ -38,12 +60,14 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
                 local_bytes=item.local_size_bytes if item.local_size_bytes or "local_size_bytes" in observed else None,
             )
         resources[name] = counters
+        if item is not None and backend == "hip":
+            counters["hip_observations"] = dict(item.extra)
         if launch_infos is not None:
             info = launches.get(name)
             threads = info.threads_per_block if info is not None else None
             # PTXAS reports initial per-thread allocation. Rounding to physical
             # allocation granularity can only increase this CTA lower bound.
-            allocation = counters["registers"] * threads if counters["registers"] is not None and threads else None
+            allocation = counters["registers"] * threads if backend == "cuda" and counters["registers"] is not None and threads else None
             exceeds = allocation is not None and sm_registers is not None and allocation > sm_registers
             physical[name] = {
                 "initial_registers_per_block_lower_bound": allocation,
@@ -59,7 +83,7 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
             unknown |= physical[name]["status"] == "unknown"
             if exceeds:
                 reasons.append(f"{name}: initial CTA register allocation {allocation} exceeds SM capacity {sm_registers}")
-        unknown |= any(value is None for value in counters.values())
+        unknown |= any(counters[field] is None for field in ("registers", "spill_stores_bytes", "spill_loads_bytes", "local_bytes"))
         for field, cap in (
             ("spill_stores_bytes", config.max_spill_bytes),
             ("spill_loads_bytes", config.max_spill_bytes),
@@ -184,7 +208,7 @@ class TileTuneSession:
         record = self.records[idx]
         decision = check_compiler_resources(
             resource_usage,
-            [info.function_name for info in launch_infos],
+            [info.function_name for info in launch_infos] if launch_infos is not None else list(resource_usage),
             self.config,
             target=target if target is not None else self.target,
             launch_infos=launch_infos,
@@ -195,6 +219,28 @@ class TileTuneSession:
         if not decision["keep"]:
             record["status"] = "post_compile_rejected"
             raise TileTuneReject("; ".join(decision["reasons"]))
+
+    def compile_native(self, idx, kwargs, elaborate_func, compile_args):
+        """Compile an analyzed HIP candidate through its registered backend.
+
+        CUDA retains the grouped compiler (including singleton groups). This
+        path reuses the same PrimFunc and the existing backend-owned compiler.
+        """
+        from dataclasses import replace
+
+        program = self.elaborate(idx, kwargs, elaborate_func, target=compile_args.target, pass_configs=compile_args.pass_configs)
+        attrs = program.attrs or {}
+        effective = dict(attrs.get("tilelang_pass_configs", {}))
+        effective.update(compile_args.pass_configs or {})
+        # tilelang.compile consumes the PrimFunc's flags itself. Only the JIT
+        # wrapper's extra flags need forwarding here.
+        if self.compile_flags:
+            effective["tl.device_compile_flags"] = list(effective.get("tl.device_compile_flags", [])) + self.compile_flags
+        self.records[idx]["effective_pass_configs"] = effective
+        with self.stage(idx, "compile"):
+            kernel = replace(compile_args, pass_configs=effective).compile_program(program)
+        self.post_compile(idx, kernel.resource_usage, None, target=compile_args.target)
+        return kernel
 
     def compilation_result(self, idx, error):
         record = self.records[idx]

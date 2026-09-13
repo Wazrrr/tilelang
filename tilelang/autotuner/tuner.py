@@ -243,7 +243,7 @@ def _normalize_value(value, sort_dict_items: bool = False):
         return ("tensor", str(value.dtype), tuple(value.shape), value.stride())
     if isinstance(value, Var):
         return str(value)
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return tuple(_normalize_value(v, sort_dict_items=sort_dict_items) for v in value)
     if isinstance(value, dict):
         items = ((str(k), _normalize_value(v, sort_dict_items=sort_dict_items)) for k, v in value.items())
@@ -455,7 +455,7 @@ class AutoTuner:
             cached_tensors_by_device = {}
 
             def supply_prog(device, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
-                if not isinstance(device, (int, str, torch.device)):
+                if not isinstance(device, int | str | torch.device):
                     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
                 if device not in _cached_tensors_by_device:
                     if isinstance(device, torch.device):
@@ -939,6 +939,10 @@ class AutoTuner:
                     ):
                         if self.tiletune_session is not None:
                             effective_args = self._merge_pass_configs_into_compile_args(config_arg.get(_PASS_CONFIGS_KEY))
+                            if target_kind == "hip":
+                                jit_kernel = self.tiletune_session.compile_native(idx, config_arg, elaborate_impl, effective_args)
+                                unit_results.append((idx, config_arg, jit_kernel, None))
+                                continue
                             results = compile_grouped_unit_tvm_ffi(
                                 [(idx, config_arg)], effective_args, elaborate_impl, tiletune_session=self.tiletune_session
                             )
@@ -1344,8 +1348,10 @@ class AutoTuner:
             if early_stop:
                 raise ValueError("TileTune requires early_stop=False")
             target_kind = getattr(getattr(self.compile_args.target, "kind", None), "name", str(self.compile_args.target))
-            if target_kind != "cuda" or self.compile_args.execution_backend != "tvm_ffi":
-                raise ValueError("TileTune supports only CUDA with the tvm_ffi execution backend")
+            if target_kind not in ("cuda", "hip") or self.compile_args.execution_backend != "tvm_ffi":
+                raise ValueError(
+                    "TileTune native autotuning requires CUDA or HIP with the tvm_ffi execution backend; Ascend uses an external worker"
+                )
             if self.jit_compile is not None and not self._tiletune_standard_jit and self.jit_compile != self._default_compile:
                 raise ValueError("TileTune cannot analyze opaque custom jit_compile hooks; use the standard JIT path")
             from tilelang.tiletune import query_device_limits
@@ -1375,7 +1381,7 @@ class AutoTuner:
                 if var_name in parameters:
                     continue
                 # Cell content must be serializable
-                assert isinstance(cell.cell_contents, (int, float, str, bool, type(None))), (
+                assert isinstance(cell.cell_contents, int | float | str | bool | type(None)), (
                     f"Cell contents {cell.cell_contents} is not serializable: {type(cell.cell_contents)}"
                 )
                 extra_parameters[var_name] = cell.cell_contents

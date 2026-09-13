@@ -1,5 +1,10 @@
 # TileTune code review guide
 
+The [portable experiment guide](../../experiments/portable/README.md) describes
+the version-18 extension to multiple workloads and targets. `targets.py` owns
+offline target identity and model boundaries; `runtime.py` dispatches native
+CUDA/HIP integration, while Ascend requires an external compiler worker.
+
 TileTune reads an actual PrimFunc, propagates its required tiles, estimates
 resources and timing, and ranks supplied configurations. Start with
 [analysis.py](analysis.py) for the public boundary and [engine.py](engine.py)
@@ -11,6 +16,7 @@ package; native operator metadata continues to come from the compiler.
 | Component | Responsibility |
 | --- | --- |
 | `analysis.py`, `config.py`, `__init__.py` | Public entry points, resolved settings, and exports |
+| `targets.py` | Offline architecture/subgroup identity and explicit runtime detection |
 | `engine.py` | Direct stage calls, family policy inputs, and report assembly |
 | `src/ir.py`, `src/collector.py` | Region/operation records, native operator collection, and dependencies |
 | `src/regions.py`, `src/propagation.py` | Symbolic geometry and one backward tile traversal |

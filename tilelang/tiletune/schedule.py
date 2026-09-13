@@ -122,7 +122,7 @@ def collect_cta_work(col, loop, max_axis_points=4096):
 
     domains = col.block_domains
     result = {"precision": "unknown", "groups": [], "repetitions": None, "grid_blocks": None, "unknown": []}
-    if loop is None or not domains:
+    if (loop is None and (col.pipeline_loops or col.serial_loops)) or not domains:
         result["unknown"].append("no unique launch domain and pipeline loop")
         return result
     axes = sorted(domains)
@@ -131,7 +131,7 @@ def collect_cta_work(col, loop, max_axis_points=4096):
         result["unknown"].append("symbolic CTA launch domain")
         return result
     result["grid_blocks"] = prod(sizes)
-    extent = loop.extent
+    extent = loop.extent if loop is not None else tir.IntImm("int32", 0)
     constant = _int(extent)
     if constant is not None and constant >= 0:
         result.update(

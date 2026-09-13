@@ -7,6 +7,9 @@ def analyze_waves(col, memory, pressure, device_limits=None):
     from .src.ir_utils import _int
 
     unknown = []
+    model = pressure.get("target_model")
+    if model is not None and model["kind"] is not None and not model["block_execution"]:
+        unknown.append("target requires a non-SIMT core/storage residency model")
     limits = dict(device_limits or {})
     smem = memory["shared_memory_bytes_estimate"]
     shared = memory["shared_allocations"]
@@ -85,5 +88,12 @@ def analyze_waves(col, memory, pressure, device_limits=None):
             "occupancy is an estimate; compiler initial allocation, scratch and granularity are unmodeled",
             "known WS policies use physical reservations; otherwise tile storage is only an occupancy proxy",
             "the register demand allowance never changes physical register residency",
-        ],
+        ]
+        + (
+            [
+                "HIP uses aggregate logical vector/accumulator storage as a proxy; scalar-register limits and per-SIMD allocation granularity are unmodeled"
+            ]
+            if model and model["kind"] == "hip"
+            else []
+        ),
     }

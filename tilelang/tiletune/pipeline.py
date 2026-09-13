@@ -74,6 +74,18 @@ def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs
     from .src.ir_utils import in_loop
 
     unknown = list(col.unknown)
+    model = pressure.get("target_model")
+    if model and model["kind"] is not None and not model["block_execution"]:
+        unknown.append("target requires its own core/storage scheduling model")
+    if (
+        model
+        and model["kind"] not in (None, "cuda")
+        and performance_model
+        and (performance_model.get("profile_backend") != model["kind"] or performance_model.get("profile_target") != model["arch"])
+    ):
+        unknown.append("non-CUDA timing requires an explicit matching profile_backend and profile_target")
+    if any(op.kind == "elementwise" and in_loop(op, loop) and any(r.buffer.scope() == "global" for r in op.reads) for op in col.operations):
+        unknown.append("direct scalar global accesses inside a recurrence require a per-iteration access schedule")
     if performance_model and performance_model.get("profile_target", pressure.get("target_arch")) != pressure.get("target_arch"):
         unknown.append("device profile target does not match the analyzed kernel")
     phases = [
@@ -120,7 +132,12 @@ def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs
             unknown.append("device profile GEMM instruction/dtype signature does not match the kernel")
     iterations = {"min": None, "max": None, "precision": "unknown"}
     stages = None
-    if loop is None:
+    if loop is None and not col.pipeline_loops and not col.serial_loops:
+        # A single-pass tile has only outside-loop work. Zero recurrence steps
+        # let the same timing equation count that work exactly once.
+        stages = 0
+        iterations = {"min": 0, "max": 0, "precision": "exact"}
+    elif loop is None:
         unknown.append("no recognized single tile pipeline loop")
     else:
         stages = _int(loop.annotations.get("num_stages", 0))

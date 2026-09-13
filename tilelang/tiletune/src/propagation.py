@@ -141,6 +141,7 @@ def _propagate_tiles(col, outputs):
         op.demands.clear()
     demands = list(outputs)
     origins = {id(region): () for region in demands}
+    block_vars = {var for var, _ in col.block_domains.values()}
     for op in reversed(col.operations):
         matched = []
         for write in op.writes:
@@ -161,7 +162,10 @@ def _propagate_tiles(col, outputs):
             demands.append(region)
             # Elementwise mapping already bounds its scalar axes, so do not
             # multiply their extents into the mapped tile a second time.
-            origins[id(region)] = () if op.kind == "elementwise" else op.loops
+            # Keep block domains for clipping batch/head/block offsets.
+            # Thread domains need lane coverage; using them only for clipping
+            # would incorrectly count a thread-indexed scalar as one CTA value.
+            origins[id(region)] = tuple(entry for entry in op.loops if entry[0] in block_vars) if op.kind == "elementwise" else op.loops
     inputs, coverage, input_loops = [], [], []
     for region in demands:
         if region.buffer.scope() == "global":

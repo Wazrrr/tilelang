@@ -31,7 +31,7 @@ CONSUMER_RATE_FIELDS = {
     "reduction_shuffle_sum_per_cycle",
     "reduction_shuffle_max_per_cycle",
 }
-PROFILE_METADATA_FIELDS = {"gemm_signature", "profile_target", "profile_id", "memory_regime", "reduction_dtype"}
+PROFILE_METADATA_FIELDS = {"gemm_signature", "profile_target", "profile_backend", "profile_id", "memory_regime", "reduction_dtype"}
 
 
 def validate_performance_model(profile):

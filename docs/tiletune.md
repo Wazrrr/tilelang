@@ -1,5 +1,12 @@
 # TileTune: tile analysis and ranking
 
+For the current multi-workload/multi-target design and runnable matrix, see
+[portable experiments](../experiments/portable/README.md). Analysis version 18
+separates target identity/model coverage from kernel-family semantics, adds native
+HIP singleton compilation, and retains explicit uncertainty for unsupported
+hardware schedules. CUDA grouped compilation remains unchanged. Huawei Ascend
+uses an external worker environment; this checkout has no Ascend compiler/model.
+
 TileTune analyzes every supplied configuration's actual, elaborated PrimFunc
 before lowering. It propagates tile requirements, models register pressure,
 shared storage, scheduling, memory traffic and launch waves, then ranks the full
@@ -47,7 +54,7 @@ analysis = analyze_prim_func(func, TileTuneConfig(trace_path="/tmp/tiletune_trac
                             target=target, device_limits=device_limits)
 ```
 
-Autotuner integration requires CUDA, `tvm_ffi`, and `early_stop=False`. TileTune
+Native autotuner integration requires CUDA or HIP, `tvm_ffi`, and `early_stop=False`. TileTune
 cannot run alongside legacy filters or opaque custom compilation hooks. Single
 and grouped compilation reuse the analyzed PrimFunc, including normal JIT binding
 and per-config pass settings. `report_only` records pressure decisions while
@@ -266,8 +273,12 @@ profile = load_device_profile("device.json", input_dtype="float16",
                               memory_regime="streaming")
 ```
 
-Profile version 4 supports A100 (`sm_80`, FP16/BF16 MMA) and Hopper (`sm_90a`,
-FP16/BF16/FP8 WGMMA), with FP32 accumulation. Shared common probes measure cached
+Profile version 4 supports Ampere (FP16/BF16 MMA), Hopper (`sm_90a`,
+FP16/BF16/FP8 WGMMA), and the Blackwell MMA path, with FP32 accumulation.
+Blackwell measurements use synchronous-copy/MMA probes; TCGEN05/TMEM and its
+specialized schedules need separate models. HIP profiles can be loaded with
+explicit backend/instruction identity; automatic HIP probes are not implemented.
+Shared common CUDA probes measure cached
 and streaming traffic, scalar arithmetic, exponentials, local/lane reductions,
 barriers and tile-copy latency. A100 uses a synchronous tile-copy probe; Hopper
 uses TMA. Separate matrix probes are keyed by instruction and dtype. Single-CTA

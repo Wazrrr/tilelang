@@ -20,10 +20,9 @@ def get_configs():
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn(batch, heads, seq_len, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128):
+def flashattn(batch, heads, seq_len, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128, dtype="float16"):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
-    dtype = T.float16
     accum_dtype = T.float32
 
     @T.prim_func

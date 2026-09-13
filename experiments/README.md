@@ -1,5 +1,11 @@
 # Final autotuning experiments
 
+For the expanded workload × accelerator matrix, see
+[portable experiments](portable/README.md). It covers GEMM variants,
+FlashAttention, KDA, normalization/reduction kernels, native CUDA/HIP execution,
+and the external worker boundary for Huawei Ascend. The fixed-grid comparisons
+below remain separate entry points.
+
 Run these commands from the repository root in an environment with TileLang,
 PyTorch, and CUDA. Each entry point runs an experiment and writes its results.
 
@@ -17,6 +23,7 @@ experiments/
 │   ├── kernel.py             Attention construction, inputs, and correctness
 │   ├── system/run.py         Five system variants, causal or noncausal
 │   └── tiletune/run.py       Brute force / TileTune top-k, 128 configs
+├── portable/                Workload × accelerator matrix and worker protocol
 ├── _common.py               Run arguments, result files, compile outcomes
 └── _tiletune.py             TileTune arguments and model-rank reporting
 ```

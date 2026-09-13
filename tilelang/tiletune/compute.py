@@ -72,7 +72,15 @@ def compute_participants(op, pressure, pass_configs):
     if not threads or any(v is None or v <= 0 for v in threads) or not pressure.get("target_arch"):
         return {"precision": "unknown"}
     try:
-        target = Target({"kind": "cuda", "arch": pressure["target_arch"]})
+        from .targets import resolve_target
+
+        model = pressure.get("target_model")
+        target_description = (
+            {"kind": model["kind"], "mcpu" if model["kind"] == "hip" else "arch": model["arch"]}
+            if model
+            else {"kind": "cuda", "arch": pressure["target_arch"]}
+        )
+        target = Target(resolve_target(target_description).compiler_target())
         registered = PassContext.list_configs()
         with PassContext(config={k: v for k, v in pass_configs.items() if k in registered}):
             instruction = op.metadata._select_gemm_instruction(prod(threads), target)
@@ -121,13 +129,15 @@ def _evaluator(expr, variables):
     raise ValueError("unsupported fragment thread expression")
 
 
-def fragment_reduction_work(layout, shape, axis):
+def fragment_reduction_work(layout, shape, axis, subgroup_size=32):
     """Count physical local pairs and butterfly lane pairs, including replication.
 
     Enumerates a bounded logical tile, never the enclosing loop or launch grid.
     Inter-warp collectives remain unknown until their communication is modeled.
     """
 
+    if subgroup_size not in (32, 64):
+        raise ValueError("reduction ownership requires a modeled subgroup size (32 or 64)")
     replication = _int(layout.replicate_size)
     if not replication or prod(shape) * replication > 262144:
         raise ValueError("unresolved or oversized fragment ownership map")
@@ -136,7 +146,7 @@ def fragment_reduction_work(layout, shape, axis):
         raise ValueError("fragment rank does not match reduction source")
     # FragmentNode::GetForwardVars prepends the replication coordinate.
     variables = forward_vars[-len(shape) :]
-    key = (str(layout.thread), tuple(str(v) for v in variables), tuple(shape), axis, replication)
+    key = (str(layout.thread), tuple(str(v) for v in variables), tuple(shape), axis, replication, subgroup_size)
     if key in _CACHE:
         return dict(_CACHE[key])
     used = set()
@@ -158,12 +168,12 @@ def fragment_reduction_work(layout, shape, axis):
                 values[axis] = position
                 owners[evaluate(values + ([replica] if extra else []))] += 1
             width = len(owners)
-            if width & (width - 1) or len({thread // 32 for thread in owners}) != 1:
+            if width & (width - 1) or len({thread // subgroup_size for thread in owners}) != 1:
                 raise ValueError("reduction needs an unresolved or inter-warp collective")
             # Match the compiler's XOR butterfly over a power-of-two lane set.
             first = min(owners)
             xor = {thread ^ first for thread in owners}
-            bits = [1 << b for b in range(5) if (1 << b) in xor]
+            bits = [1 << b for b in range(subgroup_size.bit_length() - 1) if (1 << b) in xor]
             if len(xor) != 1 << len(bits) or any(value & ~sum(bits) for value in xor):
                 raise ValueError("reduction lanes are not a supported butterfly group")
             local += sum(n - 1 for n in owners.values())
@@ -228,7 +238,10 @@ def reduction_work(op, col, pressure, participants, layout_cache):
                 layout_cache[meta.src] = layouts[meta.src]
             layout = layout_cache[meta.src]
             source = "compiler MMA/WGMMA fragment layout prediction"
-        result.update(fragment_reduction_work(layout, shape, axis), mapping_source=source)
+        subgroup = pressure.get("target_model", {}).get("subgroup_size", 32)
+        if subgroup is None and pressure.get("target_model", {}).get("kind") is None:
+            subgroup = 32  # Preserve the original no-target fragment contract.
+        result.update(fragment_reduction_work(layout, shape, axis, subgroup), mapping_source=source)
     except Exception as error:
         result["reason"] = str(error)
     return result

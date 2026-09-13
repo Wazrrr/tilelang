@@ -7,6 +7,7 @@ from .runtime import check_compiler_resources
 from .src.device import query_device_limits
 from .ranking import rank_records
 from .profiling.device_profile import profile_device, load_device_profile, anchor_latency
+from .targets import TargetModel, resolve_target, current_target
 
 __all__ = [
     "ANALYSIS_VERSION",
@@ -22,4 +23,7 @@ __all__ = [
     "profile_device",
     "load_device_profile",
     "anchor_latency",
+    "TargetModel",
+    "resolve_target",
+    "current_target",
 ]

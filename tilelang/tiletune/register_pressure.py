@@ -183,6 +183,9 @@ def resolve_register_budget(config, target=None):
     This ceiling does not model occupancy or warp-specific register allocation.
     """
     arch, hardware_cap = target_register_limits(target)
+    from .targets import resolve_target
+
+    model = resolve_target(target)
 
     budget = config.register_cap
     source = "user register cap" if budget is not None else None
@@ -193,6 +196,7 @@ def resolve_register_budget(config, target=None):
         "budget_source": source,
         "hardware_register_cap": hardware_cap,
         "target_arch": arch,
+        "target_model": model.to_dict(),
     }
 
 

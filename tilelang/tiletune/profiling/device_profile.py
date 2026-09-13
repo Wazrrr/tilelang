@@ -13,6 +13,7 @@ import statistics
 import subprocess
 import time
 from pathlib import Path
+from ..targets import current_target, resolve_target
 
 PROFILE_VERSION = 4
 
@@ -21,22 +22,17 @@ def _signature(input_dtype, accum_dtype, instruction="cuda.wgmma"):
     return {"instruction": instruction, "a_dtype": str(input_dtype), "b_dtype": str(input_dtype), "accum_dtype": str(accum_dtype)}
 
 
-def current_target():
-    """Return the supported target for the current visible CUDA device."""
-    import torch
-
-    if not torch.cuda.is_available():
-        raise ValueError("device profiling requires a CUDA GPU")
-    major, minor = torch.cuda.get_device_capability()
-    if (major, minor) == (8, 0):
-        return {"kind": "cuda", "arch": "sm_80"}
-    if major == 9:
-        return {"kind": "cuda", "arch": "sm_90a"}
-    raise ValueError("device profiling supports Ampere sm_80 (A100) and Hopper sm_90a GPUs")
-
-
 def _instruction(identity):
-    return "cuda.mma" if identity["target_arch"] == "sm_80" else "cuda.wgmma"
+    if identity.get("matrix_instruction"):
+        return identity["matrix_instruction"]
+    arch = identity["target_arch"]
+    if identity.get("backend", "cuda") == "cuda":
+        family = resolve_target({"kind": "cuda", "arch": arch}).architecture
+        if family in ("ampere", "blackwell"):
+            return "cuda.mma"
+        if family == "hopper":
+            return "cuda.wgmma"
+    raise ValueError("Profiles for additional architectures must declare backend and matrix_instruction explicitly")
 
 
 def _identity():
@@ -46,6 +42,10 @@ def _identity():
     from tilelang.contrib.nvcc import find_cuda_path
 
     target = current_target()
+    if target["kind"] != "cuda" or resolve_target(target).architecture not in ("ampere", "hopper", "blackwell"):
+        raise NotImplementedError(
+            "Automatic primitive profiling requires Ampere/Hopper/Blackwell CUDA; load a measured profile for this target or use traffic_waves"
+        )
     prop = torch.cuda.get_device_properties(torch.cuda.current_device())
     source = Path(__file__).with_name("device_probes.py")
     return {
@@ -89,7 +89,7 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
         rates["global_bytes_per_cycle"] = streaming_rate
     if data["common"].get("consumer_rates"):
         rates["consumer_rates"] = data["common"]["consumer_rates"]
-    return {
+    result = {
         **rates,
         "gemm_signature": signature,
         "profile_target": data["identity"]["target_arch"],
@@ -98,6 +98,12 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
         "memory_regime": memory_regime,
         "reduction_dtype": "float32",
     }
+    if "backend" in data["identity"]:
+        result["profile_backend"] = data["identity"]["backend"]
+    from .profile_schema import validate_performance_model
+
+    validate_performance_model(result)
+    return result
 
 
 def anchor_latency(performance_model, analysis, measured_latency_ms):
@@ -141,6 +147,8 @@ def profile_device(*, input_dtype="float16", accum_dtype="float32", cache_path=N
         raise ValueError("device probes support FP16/BF16/FP8 inputs with FP32 accumulation")
     if identity["target_arch"] == "sm_80" and str(input_dtype).startswith("float8"):
         raise ValueError("A100 has no FP8 tensor-core instructions; use FP16 or BF16")
+    if resolve_target({"kind": "cuda", "arch": identity["target_arch"]}).architecture == "ampere" and str(input_dtype).startswith("float8"):
+        raise ValueError("Ampere has no FP8 tensor-core instructions; use FP16 or BF16")
     if cache_path is None:
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:20]
         cache_path = Path(env.TILELANG_CACHE_DIR) / "tiletune_profiles" / f"{key}.json"
