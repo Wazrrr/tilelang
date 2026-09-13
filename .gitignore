@@ -53,6 +53,7 @@ doc/doxygen/xml/*
 doc/doxygen/html/*
 
 # Generated autotuning experiment results (keep standalone documentation tracked)
+/autotune_experiment_results.tsv
 /docs/new_carver_*/
 /docs/tiletune_*/
 /docs/autotune_filter_experiments/
