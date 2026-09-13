@@ -26,11 +26,13 @@ def _square(matrix):
     return tuple(tuple(max(matrix[i][k] + matrix[k][j] for k in range(size)) for j in range(size)) for i in range(size))
 
 
-def repeat_transition(matrix, iterations):
+def repeat_transition(matrix, iterations, *, state=None):
     """Max-plus exponentiation; O(log(iterations)) transitions, all slots free at t=0."""
     if not isinstance(iterations, int) or iterations < 0:
         raise ValueError("iteration count must be a nonnegative integer")
-    state = [0.0] * len(matrix)
+    state = [0.0] * len(matrix) if state is None else list(state)
+    if len(state) != len(matrix):
+        raise ValueError("transition state size must match its matrix")
     while iterations:
         if iterations & 1:
             state = [max(weight + value for weight, value in zip(row, state)) for row in matrix]

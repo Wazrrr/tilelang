@@ -16,9 +16,11 @@ def model_target(target):
     return Target(target)
 
 
-def rank_configs(configs, *, m, n, k, dtype, target, top_k):
+def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True):
     arch = CUDA(model_target(target))
-    template = MatmulTemplate(M=m, N=n, K=k, trans_B=True, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32")
+    template = MatmulTemplate(
+        M=m, N=n, K=k, trans_A=transpose_a, trans_B=transpose_b, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32"
+    )
     func, tags = get_tensorized_func_and_tags(template.equivalent_function(), arch.target, allow_gemv=True)
     if func is None or not tags:
         raise ValueError("Legacy Carver cannot tensorize this GEMM; no fallback cost model is used")

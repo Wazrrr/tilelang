@@ -70,6 +70,28 @@ def test_hip_register_units_and_symbolic_metadata():
     assert check_compiler_resources({"f": usage}, ["f"], target=target)["resources"]["f"]["registers"] is None
 
 
+def test_cuda_limits_query_missing_pytorch_properties(monkeypatch):
+    import torch
+    from tilelang.carver.arch.driver import cuda_driver
+
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(major=8, minor=0, multi_processor_count=108))
+    calls = []
+
+    def query(attribute, device):
+        calls.append((attribute, device))
+        return {1: 1024, 10: 32, 39: 2048, 81: 167936, 82: 65536, 97: 166912, 106: 32}[attribute]
+
+    monkeypatch.setattr(cuda_driver, "get_device_attribute", query)
+    result = query_device_limits({"kind": "cuda", "arch": "sm_80"})
+    assert result["max_threads_per_block"] == 1024 and result["warp_size"] == 32
+    assert result["sm_count"] == 108 and len(calls) == 7 and all(device == 2 for _, device in calls)
+    assert query_device_limits({"kind": "cuda", "arch": "sm_90a"}) is None
+    assert len(calls) == 7
+
+
 def test_subgroup_reduction_uses_64_lane_ownership():
     import tilelang.language as T
 

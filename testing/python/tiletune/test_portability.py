@@ -71,7 +71,7 @@ def test_ampere_profile_cache_and_fp8_rejection(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("factory", [matrix_pipeline, attention])
 @pytest.mark.parametrize("stages", [0, 2])
-def test_ampere_analysis_keeps_unmodeled_software_pipeline(factory, stages):
+def test_ampere_pipeline_requires_async_copy_profile(factory, stages):
     result = analyze_prim_func(
         factory(stages=stages),
         TileTuneConfig(enabled=True, mode="report_only", ranking_metric="pipeline_time", performance_model=ampere_profile()),
@@ -84,7 +84,7 @@ def test_ampere_analysis_keeps_unmodeled_software_pipeline(factory, stages):
     assert all(p["reduction"]["precision"] == "predicted" for p in pipeline["phases"] if p["reduction"])
     if stages:
         assert result["tile_cost"]["score"] is None
-        assert "positive-stage pipeline scheduling policy is unresolved or unsupported" in pipeline["unknown"]
+        assert "Ampere asynchronous pipeline requires profile field async_copy_latency_cycles" in pipeline["unknown"]
     else:
         assert result["tile_cost"]["score"] is not None
     assert result["pressure"]["decision"]["keep"]

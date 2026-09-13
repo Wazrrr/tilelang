@@ -41,6 +41,10 @@ def run_modules(context, pressure):
 
     phase_labels = {op.index: specialization.phase(op) for op in context.collector.operations}
     pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=specialization.loop)
+    if hasattr(context.collector, "ampere_plan"):
+        from .ampere import operand_registers
+
+        pressure["ampere_mma_operand_registers"] = operand_registers(context.collector, context.target)
     for phase in pressure["tile_liveness"]["phases"]:
         phase["phase"] = phase_labels[phase["operation"]]
     trace.record("pressure.tile_liveness", lambda: pressure["tile_liveness"])
@@ -122,6 +126,10 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
         trace.record("prim_func", lambda: func.script())
         col = _Collector(func)
         trace.record("col", lambda: collector_snapshot(col))
+        from .ampere import is_ampere, prepare_analysis
+
+        if config.ranking and config.ranking_metric == "pipeline_time" and is_ampere(target):
+            prepare_analysis(func, col, target, pass_configs)
         tile_propagation = _propagate_tiles(col, _kernel_outputs(col))
         trace.record("tile_propagation", lambda: propagation_snapshot(tile_propagation))
         buffer_facts = collect_buffer_facts(col)

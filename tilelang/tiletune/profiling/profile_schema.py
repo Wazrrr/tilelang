@@ -8,6 +8,7 @@ from math import isfinite
 
 
 RATE_FIELDS = {
+    "async_copy_issue_bytes_per_cycle",
     "global_bytes_per_cycle",
     "shared_bytes_per_cycle",
     "gemm_flops_per_cycle",
@@ -16,16 +17,18 @@ RATE_FIELDS = {
     "reference_clock_mhz",
     "elementwise_ops_per_cycle",
     "exp_ops_per_cycle",
+    "rsqrt_ops_per_cycle",
     "reduction_ops_per_cycle",  # Legacy profile field; not used for mapped tile reductions.
     "reduction_local_sum_per_cycle",
     "reduction_local_max_per_cycle",
     "reduction_shuffle_sum_per_cycle",
     "reduction_shuffle_max_per_cycle",
 }
-LATENCY_FIELDS = {"copy_latency_cycles", "barrier_cycles"}
+LATENCY_FIELDS = {"copy_latency_cycles", "barrier_cycles", "async_copy_latency_cycles"}
 CONSUMER_RATE_FIELDS = {
     "elementwise_ops_per_cycle",
     "exp_ops_per_cycle",
+    "rsqrt_ops_per_cycle",
     "reduction_local_sum_per_cycle",
     "reduction_local_max_per_cycle",
     "reduction_shuffle_sum_per_cycle",

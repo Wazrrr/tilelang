@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from ..targets import current_target, resolve_target
 
-PROFILE_VERSION = 4
+PROFILE_VERSION = 5
 
 
 def _signature(input_dtype, accum_dtype, instruction="cuda.wgmma"):
@@ -72,7 +72,7 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
     data = json.loads(Path(path).read_text())
     if memory_regime not in ("cached", "streaming"):
         raise ValueError("memory_regime must be cached or streaming")
-    if data.get("identity", {}).get("profile_version") not in (2, 3, PROFILE_VERSION):
+    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, PROFILE_VERSION):
         raise ValueError("unsupported device profile version; regenerate the profile")
     if expected_identity is not None and data["identity"] != expected_identity:
         raise ValueError("device/profile fingerprint mismatch; use a separate cache path or refresh explicitly")
@@ -252,6 +252,7 @@ def _measure_common(identity):
         1: ("shared_bytes_per_cycle", 128 * 8 * 8),
         2: ("exp_ops_per_cycle", 128 * 8),
         3: ("reduction_ops_per_cycle", 4 * 8 * 31),
+        5: ("rsqrt_ops_per_cycle", 128 * 8),
     }
     for kind, (name, work) in counts.items():
         measurements = [_benchmark(probes.primitive(kind, n, blocks), [], [0]) for n in (256, 512)]
@@ -301,6 +302,19 @@ def _measure_common(identity):
         "method": ("TMA" if hopper else "synchronous")
         + " tile copy + dependent consumer; subtract measured byte service and barrier; residual includes consumer overhead",
     }
+    if resolve_target({"kind": "cuda", "arch": identity["target_arch"]}).architecture == "ampere":
+        data = torch.ones((4096,), device="cuda")
+        _, obs, output = _benchmark(probes.async_copy_clocks(), [data], [1], required_source="cp.async.cg.shared.global")
+        issue, ready = output.double().median(dim=0).values.tolist()
+        rates["async_copy_issue_bytes_per_cycle"] = 16384 / issue
+        rates["async_copy_latency_cycles"] = ready
+        evidence["async_copy"] = {
+            **obs,
+            "issue_cycles": issue,
+            "ready_cycles": ready,
+            "method": "clock64: eight 16-byte copies per lane, 128-thread CTA; readiness measured through wait_group and a dependent shared load; cached fixed addresses",
+            "latency_semantics": "minimum ready time including service, combined with byte-service completion by max, without subtracting unrelated aggregate rates",
+        }
     return {
         "rates": rates,
         **_measure_consumer_rates(clock),
@@ -364,6 +378,7 @@ def _measure_consumer_rates(clock):
         kinds = [
             (probes.primitive, 0, "elementwise_ops_per_cycle", 2),
             (probes.primitive, 2, "exp_ops_per_cycle", 1),
+            (probes.primitive, 5, "rsqrt_ops_per_cycle", 1),
             *[
                 (probes.reduction_primitive, kind, name, 1)
                 for kind, name in enumerate(

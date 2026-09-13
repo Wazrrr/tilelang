@@ -21,6 +21,77 @@ flowchart TD
 
 ## Start here
 
+For a complete comparison with disjoint training, validation and test shapes:
+
+```bash
+# Use the host compiler and toolkit installed on this server. CUDA 12.4 with
+# GCC 9 ignores TileLang's C++20 flag; GCC 10 works on the validated A100 host.
+export CUDA_HOME=/path/to/cuda
+export CXX=/usr/bin/g++-10
+bash experiments/portable/run_accelerator.sh --build \
+  --device ampere --output experiments/results/a100-comparison --wait-idle
+```
+
+`run_accelerator.sh` accepts the arguments of `compare.py`, including `--manifest`
+for another CUDA/HIP accelerator, `--workloads`, `--workers`, and `--plan`.
+`CMAKE_COMMAND`, `BUILD_JOBS`, and `PYTHON` can select build/environment tools.
+Skip `--build` after rebuilding once. `--resume` verifies the frozen plan,
+requests, source hashes and native build before reusing completed cases; use a
+new output directory after code changes. The earlier single-method runner below
+remains available.
+
+The comparison uses the original grids and scales mathematical shapes before
+measurement: training at 0.25× and 0.5×, validation at 0.75×, and held-out tests
+at 1× and 2×. GEMM scales M/N/K; row kernels scale rows/columns; attention/KDA
+scale sequence length while retaining head dimensions. Dimensions round down
+to multiples of 32 or the KDA chunk size. Shape aliases and rounding collisions
+across any split are rejected. Custom manifests should avoid duplicate semantic
+workloads. This is a reproducible shape-generalization study on each measured
+device, not evidence of zero-shot transfer between accelerators.
+
+The default online budget per case is `min(20, ceil(grid_size * 0.1))`, so small
+six-configuration grids also exercise actual selection. Set `--top-k` and
+`--budget-fraction` to change that policy before collection. Every shortlist method uses
+the same budget, and all methods use the same grid within a case. Diagnostic Oracle@1/5/10/20 curves are
+reported separately; they do not change the online shortlist.
+
+The coordinator prepares fixed primitive profiles first, collects independent
+brute-force training/validation runs, and fits one XGBoost model per operation
+using the baseline's fixed defaults and validation early stopping. It executes
+TileTune `pipeline_time`, the separately declared `traffic_waves` diagnostic,
+Carver where supported, and XGBoost before collecting each held-out brute-force
+oracle. `frozen-rankings.json` records selections and scores before that oracle.
+No workload latency anchor or analytical-model fitting is applied. Training
+collection and fitting costs remain in the saved model artifacts; profile
+preparation and shuffled winner remeasurement are recorded separately.
+
+`--method brute_force` on the single-method runner measures every supplied
+candidate independently of TileTune analysis. The older `exhaustive` method
+still means exhaustive **report-only TileTune** analysis/measurement. The new
+Carver adapter accepts plain, nonbatched FP16/BF16 GEMMs, including transpose
+variants, and maps the exact supplied grid to the existing policy. It reports
+unsupported for fused/batched GEMMs and other operations. CUDA FP8 and AMD FNUZ
+remain explicit hardware-dependent cases; Ampere FP8 is unsupported.
+
+Each test case records method outcomes, an independent oracle table, ranking
+diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics
+retain unknown and pressure-rejected candidates, coverage, ties, Spearman
+correlation on scored successful pairs, absolute prediction errors where the
+model supplies latency estimates, pipeline unknown reasons, stage-level measured
+best times, and seeded random-shortlist Oracle@K comparisons. An unscored oracle
+winner remains visible. Report rank correlation together with coverage: strong
+correlation on a small scored subset does not establish a useful full-grid model.
+
+The coordinator checks other CUDA compute processes at measurement boundaries.
+`--wait-idle` waits for those processes to finish; it never stops them.
+`--allow-contended` explicitly permits loaded-GPU protocol checks and records
+that choice in the plan. Such timings cannot establish isolated performance or
+prediction calibration. Record output stability from the repeated validation
+samples, and obtain additional workload distributions before claiming absence
+of overfitting. Other runtimes need their scheduler to provide exclusive access.
+External Ascend workers retain their explicit execution boundary and must supply
+their own winner-remeasurement implementation.
+
 Planning uses only the Python standard library and requires no GPU or TileLang
 installation:
 
@@ -104,7 +175,7 @@ architecture. Reports include the actual device name and runtime version.
 
 | Target | Execution code | Current timing model |
 | --- | --- | --- |
-| Ampere | Native CUDA + `tvm_ffi` | Existing MMA probes; positive-stage software-pipeline overlap remains unknown |
+| Ampere | Native CUDA + `tvm_ffi` | MMA and asynchronous-copy probes; compiler-ordered software pipelines use `pipeline_time` |
 | Hopper | Native CUDA + `tvm_ffi` | WGMMA, supported pure-TMA producer pipelines and existing primitive profiles |
 | Blackwell | Native CUDA + `tvm_ffi`, regular `T.gemm`/MMA path | Explicit MMA/synchronous-copy profiling; TCGEN05/TMEM and Blackwell warp-specialized schedules need separate models |
 | MI308 | Native HIP + `tvm_ffi` in a ROCm build | Traffic/waves with supplied or queried CU capacities; timing needs a measured HIP profile and supported schedule |
@@ -117,9 +188,17 @@ execution: it produces an explicit `unsupported` result until a worker is
 configured. The shared protocol can launch that worker without importing its
 incompatible TVM libraries into the CUDA/HIP process.
 
-Local validation uses H200 GPUs. Ampere/Blackwell device compilation can be
-checked here; it is not runtime or performance validation on those devices.
+The [A100 evaluation](../../docs/tiletune_ampere_evaluation.md) records Ampere
+runtime results for analysis version 18. The [Ampere pipeline revision](../../docs/tiletune_ampere_pipeline.md)
+documents version 20, its compiler-plan checks and the fresh comparison. The
+earlier H200 validation does not establish runtime behavior on Blackwell.
 MI308 and Huawei execution still need their respective machines and toolchains.
+
+The completed version-20 A100 run covers 34 supported fresh test cases, with four
+FP8 cases explicitly unsupported. Pipeline-score shortlists retain 98.31% of
+exhaustive-best performance overall. The linked report also records latency
+miscalibration, register-gate coverage losses, chunk-KDA ranking failures, and
+the cases where analysis costs more than exhaustive tuning.
 
 MI308 FP8 uses explicit FNUZ dtypes rather than silently changing CUDA FN/E5M2
 inputs. HIP compiler remarks retain VGPR, AGPR and SGPR counts separately.
@@ -253,12 +332,33 @@ The reading path is `spec.py` → `kernels.py` → `run.py`, followed by
 continues to describe semantic roles; target selection controls hardware rules.
 Generic graphs select a recurrence loop only when it is unambiguous. A single-pass
 tile uses zero recurrence steps and charges its work once outside the loop.
-Direct scalar global reads within a recurrence retain unknown pipeline timing
-until their per-iteration access schedule is represented; their complete input
-regions can still support traffic ranking. Explicit scalar thread indexing also
+Ampere `pipeline_time` represents direct scalar global reads and stores at their
+per-iteration phase. Other timing paths retain the conservative unknown guard;
+complete input regions can still support traffic ranking. Explicit scalar thread indexing also
 stays unscored where per-CTA lane coverage is unresolved.
 
 Analysis version 18 adds target-model metadata, heterogeneous runtime integration,
 subgroup-aware reduction counting, generic loop/single-pass scheduling, and
-preserves launch domains when propagating scalar input regions. Existing CUDA
-GEMM/attention equations and top-K policy are retained.
+preserves launch domains when propagating scalar input regions. Family-specific
+CUDA GEMM/attention analysis and the common top-K interface remain in use.
+
+Analysis version 20 adds Ampere compiler-ordered pipeline timing, generic
+reduction ownership, per-iteration external accesses and MMA operand storage.
+It corrects scalar work counts, per-thread expression reuse and per-output reduction synchronization, and uses profile version 5 for asynchronous-copy
+and `rsqrt` service. Select `--metric pipeline_time` for pipeline-score ranking;
+lower scores rank first. Old profiles without the required asynchronous-copy
+fields cannot score positive-stage Ampere pipelines.
+
+For a completed `compare.py` run, [audit_model.py](audit_model.py) audits all saved
+TileTune test reports against the independent brute-force outcomes without GPU
+execution. It records exclusion reasons, coverage versus ranking loss, scalar
+work domains, and available compiler-register comparisons. Reasons overlap and
+compiler comparisons cover only candidates whose counters were recorded.
+
+```bash
+python experiments/portable/audit_model.py experiments/results/your-run \
+  --output /tmp/model-audit.json
+```
+
+Use a new output filename. See the [A100 model audit](../../docs/tiletune_model_audit.md)
+for the observed defects and architecture coverage requirements.

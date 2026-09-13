@@ -12,7 +12,7 @@ from .src.ir_utils import _int, call_names
 _CACHE = OrderedDict()
 
 
-def operation_work(op):
+def operation_work(op, col=None):
     work = dict(gemm_flops=0, elementwise_ops=0, exp_ops=0, reduction_ops=0, shared_bytes=0)
 
     def size(region):
@@ -32,12 +32,14 @@ def operation_work(op):
                     work["shared_bytes"] = None
                 else:
                     work["shared_bytes"] += (elements * dtype.bits * dtype.lanes + 7) // 8
-    elif hasattr(meta, "dim") and hasattr(meta, "srcRegion"):
+    elif op.kind == "reduce" and hasattr(meta, "srcRegion"):
         src, dst = size(meta.srcRegion), size(meta.dstRegion)
         work["reduction_ops"] = src - dst if src is not None and dst is not None else None
     elif op.kind == "elementwise":
         # Parallel loops define one logical tile, not work per launch thread.
-        dims = [_int(r.extent) for _, r, kind in op.loops if kind == str(tir.ForKind.PARALLEL)]
+        # The collector serializes the native integer kind, whereas the Python
+        # enum's string representation is "ForKind.PARALLEL".
+        dims = [_int(r.extent) for _, r, kind in op.loops if kind == "1"]
         elements = prod(dims) if all(v is not None for v in dims) else None
         names = call_names(op)
         exps = sum(name in ("tirx.exp", "tirx.exp2") for name in names)
@@ -45,16 +47,104 @@ def operation_work(op):
         types = (tir.Add, tir.Sub, tir.Mul, tir.Div, tir.FloorDiv, tir.Max, tir.Min, tir.Cast, tir.Select)
         tir.stmt_functor.post_order_visit(op.metadata.value, lambda n: scalar_ops.append(n) if isinstance(n, types) else None)
         work["exp_ops"] = elements * exps if elements is not None else None
+        rsqrts = sum(name == "tirx.rsqrt" for name in names)
+        if rsqrts:
+            work["rsqrt_ops"] = elements * rsqrts if elements is not None else None
         work["elementwise_ops"] = elements * max(len(scalar_ops), 1) if elements is not None else None
-        if any(name not in ("tirx.exp", "tirx.exp2", "tirx.if_then_else", "tirx.likely", "tl.infinity") for name in names):
+        if any(name not in ("tirx.exp", "tirx.exp2", "tirx.rsqrt", "tirx.if_then_else", "tirx.likely", "tl.infinity") for name in names):
             work["elementwise_ops"] = None
-    elif op.kind in ("copy", "fill") and op.writes:
+        elif col is not None and getattr(col, "inferred_layouts", {}).get(op.metadata.buffer.data) is not None:
+            try:
+                work.update(scalar_fragment_work(op, col.inferred_layouts[op.metadata.buffer.data]))
+            except Exception as error:
+                work["elementwise_ops"] = None
+                col.scalar_work_unknown = getattr(col, "scalar_work_unknown", {})
+                col.scalar_work_unknown[op.index] = str(error)
+    elif op.kind in ("copy", "async_copy", "fill") and op.writes:
         # Register casts, initialization and epilogue stores are consumer work.
         # External read copies are charged to the producer separately.
         if not any(r.buffer.scope() == "global" for r in op.reads):
             dims = [_int(r.extent) for r in op.writes[0].ranges]
             work["elementwise_ops"] = prod(dims) if all(v is not None for v in dims) else None
+    else:
+        # Access-region reflection is not a timing implementation. In particular
+        # scans, transpose and atomics must not silently receive zero cost.
+        work["elementwise_ops"] = None
     return work
+
+
+def scalar_fragment_work(op, layout):
+    """Count per-thread expression values, including replication and local CSE.
+
+    Only pure scalar expressions with compiler-inferred ownership enter this
+    path. Buffer address arithmetic is not counted as FP32 arithmetic. Distinct
+    parallel coordinates needed by each expression determine which evaluations
+    can be shared within a thread; no sharing is assumed between threads.
+    """
+    axes = [(var, _int(r.min), _int(r.extent)) for var, r, kind in op.loops if kind == "1"]
+    replication = _int(layout.replicate_size)
+    if not replication or any(lo is None or n is None for _, lo, n in axes) or prod(n for _, _, n in axes) * replication > 262144:
+        raise ValueError("unresolved or oversized scalar ownership map")
+    variables = [var for var, _, _ in axes]
+    shape = list(op.metadata.buffer.shape)
+    forward = list(layout.get_forward_vars())[-len(shape) :]
+    used = set()
+    tir.stmt_functor.post_order_visit(layout.thread, lambda n: used.add(n) if isinstance(n, tir.Var) else None)
+    extra = [var for var in used if not any(var.same_as(v) for v in forward)]
+    if len(extra) > 1:
+        raise ValueError("unresolved scalar layout replication")
+    owner = _evaluator(layout.thread, forward + extra)
+    indices = [_evaluator(index, variables) for index in op.metadata.indices]
+    points = [
+        (owner([index(coords) for index in indices] + ([replica] if extra else [])), coords)
+        for coords in product(*(range(lo, lo + n) for _, lo, n in axes))
+        for replica in range(replication)
+    ]
+    counts = {}
+
+    def amount(node):
+        used = set()
+        tir.stmt_functor.post_order_visit(node, lambda n: used.add(n) if isinstance(n, tir.Var) else None)
+        mask = tuple(i for i, var in enumerate(variables) if var in used)
+        if mask not in counts:
+            counts[mask] = len({(thread, *(coords[i] for i in mask)) for thread, coords in points})
+        return counts[mask]
+
+    result = dict(elementwise_ops=0, exp_ops=0)
+    visited = {}
+    binary = (tir.Add, tir.Sub, tir.Mul, tir.Div, tir.FloorDiv, tir.Max, tir.Min)
+
+    def visit(node):
+        key = tvm.ir.structural_hash(node)
+        if any(tvm.ir.structural_equal(node, previous) for previous in visited.get(key, [])):
+            return
+        visited.setdefault(key, []).append(node)
+        if isinstance(node, tir.BufferLoad):
+            return
+        if isinstance(node, binary):
+            result["elementwise_ops"] += amount(node)
+            visit(node.a)
+            visit(node.b)
+        elif isinstance(node, tir.Cast):
+            result["elementwise_ops"] += amount(node)
+            visit(node.value)
+        elif isinstance(node, tir.Select):
+            result["elementwise_ops"] += amount(node)
+            visit(node.true_value)
+            visit(node.false_value)
+        elif isinstance(node, tir.Call):
+            name = node.op.name if hasattr(node.op, "name") else str(node.op)
+            field = "exp_ops" if name in ("tirx.exp", "tirx.exp2") else "rsqrt_ops" if name == "tirx.rsqrt" else None
+            if field:
+                result[field] = result.get(field, 0) + amount(node)
+            elif name == "tirx.if_then_else":
+                result["elementwise_ops"] += amount(node)
+            for arg in node.args:
+                visit(arg)
+
+    visit(op.metadata.value)
+    result["elementwise_ops"] = max(result["elementwise_ops"], len(set(points)))
+    return result
 
 
 def compute_participants(op, pressure, pass_configs):
@@ -129,11 +219,11 @@ def _evaluator(expr, variables):
     raise ValueError("unsupported fragment thread expression")
 
 
-def fragment_reduction_work(layout, shape, axis, subgroup_size=32):
+def fragment_reduction_work(layout, shape, axis, subgroup_size=32, *, allow_interwarp=False):
     """Count physical local pairs and butterfly lane pairs, including replication.
 
     Enumerates a bounded logical tile, never the enclosing loop or launch grid.
-    Inter-warp collectives remain unknown until their communication is modeled.
+    Compiler-inferred Ampere layouts also support shared-memory XOR rounds.
     """
 
     if subgroup_size not in (32, 64):
@@ -146,7 +236,7 @@ def fragment_reduction_work(layout, shape, axis, subgroup_size=32):
         raise ValueError("fragment rank does not match reduction source")
     # FragmentNode::GetForwardVars prepends the replication coordinate.
     variables = forward_vars[-len(shape) :]
-    key = (str(layout.thread), tuple(str(v) for v in variables), tuple(shape), axis, replication, subgroup_size)
+    key = (str(layout.thread), tuple(str(v) for v in variables), tuple(shape), axis, replication, subgroup_size, allow_interwarp)
     if key in _CACHE:
         return dict(_CACHE[key])
     used = set()
@@ -155,7 +245,8 @@ def fragment_reduction_work(layout, shape, axis, subgroup_size=32):
     if len(extra) > 1 or (replication > 1 and not extra):
         raise ValueError("unresolved fragment replication")
     evaluate = _evaluator(layout.thread, variables + extra)
-    local = shuffle = 0
+    local = shuffle = shared = 0
+    thread_rounds, thread_channels = Counter(), Counter()
     widths, local_sizes = set(), set()
     other_axes = [i for i in range(len(shape)) if i != axis]
     for replica in range(replication):
@@ -168,16 +259,22 @@ def fragment_reduction_work(layout, shape, axis, subgroup_size=32):
                 values[axis] = position
                 owners[evaluate(values + ([replica] if extra else []))] += 1
             width = len(owners)
-            if width & (width - 1) or len({thread // subgroup_size for thread in owners}) != 1:
+            if width & (width - 1) or (not allow_interwarp and len({thread // subgroup_size for thread in owners}) != 1):
                 raise ValueError("reduction needs an unresolved or inter-warp collective")
             # Match the compiler's XOR butterfly over a power-of-two lane set.
             first = min(owners)
             xor = {thread ^ first for thread in owners}
-            bits = [1 << b for b in range(subgroup_size.bit_length() - 1) if (1 << b) in xor]
+            bits = [1 << b for b in range(max(subgroup_size, max(owners) + 1).bit_length()) if (1 << b) in xor]
             if len(xor) != 1 << len(bits) or any(value & ~sum(bits) for value in xor):
                 raise ValueError("reduction lanes are not a supported butterfly group")
             local += sum(n - 1 for n in owners.values())
-            shuffle += width * (width.bit_length() - 1)
+            shuffle += width * sum(bit < subgroup_size for bit in bits)
+            shared += width * sum(bit >= subgroup_size for bit in bits)
+            rounds = 2 * sum(bit >= subgroup_size for bit in bits)
+            if rounds:
+                for thread in owners:
+                    thread_rounds[thread] += rounds
+                    thread_channels[thread] += 1
             widths.add(width)
             local_sizes.update(owners.values())
     result = dict(
@@ -189,6 +286,17 @@ def fragment_reduction_work(layout, shape, axis, subgroup_size=32):
         precision="predicted",
         assumptions=["compiler fragment ownership; local accumulation followed by a butterfly within one warp"],
     )
+    if shared:
+        result.update(
+            shared_pairs=shared,
+            barrier_rounds=max(thread_rounds.values()),
+            workspace_reuse_barriers=max(n if n > 1 else 0 for n in thread_channels.values()),
+            local_outputs_per_thread=max(thread_channels.values()),
+        )
+        result["assumptions"] = [
+            "compiler fragment ownership; scalar AllReduce calls serialize local output channels",
+            "each inter-warp XOR round has two barriers; repeated workspace use adds a fence per local channel",
+        ]
     _CACHE[key] = result
     if len(_CACHE) > 256:
         _CACHE.popitem(last=False)
@@ -199,7 +307,7 @@ def reduction_work(op, col, pressure, participants, layout_cache):
     """Use explicit ownership or the compiler's read-only GEMM layout helper."""
 
     meta = op.metadata
-    if not hasattr(meta, "dim") or not hasattr(meta, "srcRegion"):
+    if op.kind != "reduce" or not hasattr(meta, "srcRegion"):
         return None
     result = {"precision": "unknown", "dtype": str(meta.src.dtype)}
     try:
@@ -215,10 +323,17 @@ def reduction_work(op, col, pressure, participants, layout_cache):
             raise ValueError("partial reduction fragment requires a region mapping")
         layout = col.layouts.get(meta.src.data)
         source = "explicit fragment layout"
+        inferred = False
+        if layout is None:
+            layout = getattr(col, "inferred_layouts", {}).get(meta.src.data)
+            if layout is not None:
+                source, inferred = "compiler LayoutInference on an isolated Ampere IRModule", True
         if layout is None:
             if meta.src not in layout_cache:
                 producers = [p for p in col.operations[: op.index] if hasattr(p.metadata, "cRegion") and p.metadata.c.same_as(meta.src)]
                 if not producers:
+                    if getattr(col, "ampere_layout_unknown", None):
+                        raise ValueError(f"Ampere layout inference failed: {col.ampere_layout_unknown}")
                     raise ValueError("no known fragment producer for reduction")
                 producer = producers[-1]
                 compute = participants.get(producer.index) or {}
@@ -241,8 +356,11 @@ def reduction_work(op, col, pressure, participants, layout_cache):
         subgroup = pressure.get("target_model", {}).get("subgroup_size", 32)
         if subgroup is None and pressure.get("target_model", {}).get("kind") is None:
             subgroup = 32  # Preserve the original no-target fragment contract.
-        result.update(fragment_reduction_work(layout, shape, axis, subgroup), mapping_source=source)
+        result.update(fragment_reduction_work(layout, shape, axis, subgroup, allow_interwarp=inferred), mapping_source=source)
+        if result.get("shared_pairs") and _int(meta.batch) != 1:
+            raise ValueError("batched inter-warp reduction scheduling is not modeled")
     except Exception as error:
+        result["precision"] = "unknown"
         result["reason"] = str(error)
     return result
 
@@ -277,6 +395,7 @@ def estimate_phase_cycles(phase, profile, concurrent_ctas):
             "shared_bytes": "shared_bytes_per_cycle",
             "elementwise_ops": "elementwise_ops_per_cycle",
             "exp_ops": "exp_ops_per_cycle",
+            "rsqrt_ops": "rsqrt_ops_per_cycle",
             "reduction_ops": "reduction_ops_per_cycle",
         }[key]
         if amount and not profile.get(rate_key):
@@ -298,6 +417,16 @@ def estimate_phase_cycles(phase, profile, concurrent_ctas):
             if cycles is None:
                 return None
             terms["reduction_ops"] += cycles
+        if reduction.get("shared_pairs"):
+            pairs = reduction["shared_pairs"]
+            combine = service(pairs, f"reduction_local_{kind}_per_cycle")
+            dtype = tvm.DataType(reduction["dtype"])
+            shared = service(pairs * 2 * dtype.bits * dtype.lanes / 8, "shared_bytes_per_cycle")
+            if combine is None or shared is None or profile.get("barrier_cycles") is None:
+                return None
+            terms["reduction_ops"] += (
+                combine + shared + (reduction["barrier_rounds"] + reduction.get("workspace_reuse_barriers", 0)) * profile["barrier_cycles"]
+            )
     # Matrix instructions consume tensor-core and shared-memory service;
     # scalar/reduction/exp phases execute in program order.
     group_service = 0
@@ -315,5 +444,6 @@ def estimate_phase_cycles(phase, profile, concurrent_ctas):
         max(terms["gemm_flops"], terms["shared_bytes"], group_service)
         + terms["elementwise_ops"]
         + terms["exp_ops"]
+        + terms.get("rsqrt_ops", 0)
         + terms["reduction_ops"]
     )

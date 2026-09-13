@@ -46,6 +46,8 @@ __device__ __noinline__ float TileTunePrimitive(int tid) {
             sum += other;
           }
           x[j] = sum * 0.03125f;
+        } else if constexpr (Kind == 5) {
+          asm volatile("rsqrt.approx.ftz.f32 %0, %0;" : "+f"(x[j]));
         }
       }
     }
@@ -70,6 +72,49 @@ def primitive(kind, iterations, blocks, threads=128):
             T.import_source(CUDA_PRIMITIVES)
             tx = T.get_thread_binding()
             Out[bx, tx] = T.call_extern("float32", name, tx)
+
+    return main
+
+
+ASYNC_CLOCKS = r"""
+template <int Kind>
+__device__ __noinline__ float TileTuneAsyncClocks(const float* input, int tid) {
+  __shared__ __align__(16) float storage[4096];
+  unsigned long long elapsed = 0;
+  #pragma unroll 1
+  for (int iteration = 0; iteration < 128; ++iteration) {
+    __syncthreads();
+    unsigned long long start = clock64();
+    #pragma unroll
+    for (int j = 0; j < (Kind == 0 ? 8 : 1); ++j) {
+      int index = tid * 4 + j * 512;
+      unsigned address = unsigned(__cvta_generic_to_shared(storage + index));
+      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
+                   :: "r"(address), "l"(input + index) : "memory");
+    }
+    asm volatile("cp.async.commit_group;" ::: "memory");
+    unsigned long long issued = clock64();
+    asm volatile("cp.async.wait_group 0;" ::: "memory");
+    float value = reinterpret_cast<volatile float*>(storage)[tid * 4];
+    asm volatile("" :: "f"(value) : "memory");
+    unsigned long long ready = clock64();
+    elapsed += (Kind == 0 ? issued : ready) - start;
+  }
+  return float(elapsed) / 128.0f;
+}
+"""
+
+
+def async_copy_clocks():
+    """Separate copy issue and load-to-use timing without residual subtraction."""
+
+    @T.prim_func
+    def main(A: T.Tensor((4096,), "float32"), Out: T.Tensor((128, 2), "float32")):
+        with T.Kernel(1, threads=128):
+            T.import_source(ASYNC_CLOCKS)
+            tx = T.get_thread_binding()
+            Out[tx, 0] = T.call_extern("float32", "TileTuneAsyncClocks<0>", T.address_of(A[0]), tx)
+            Out[tx, 1] = T.call_extern("float32", "TileTuneAsyncClocks<1>", T.address_of(A[0]), tx)
 
     return main
 

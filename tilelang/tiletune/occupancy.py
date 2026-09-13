@@ -48,6 +48,18 @@ def analyze_waves(col, memory, pressure, device_limits=None):
     )
     tile_regs = block_regs
     register_basis = "tile-state proxy; physical allocation is unknown"
+    operands = pressure.get("ampere_mma_operand_registers")
+    if operands:
+        estimates = []
+        for phase in pressure["tile_liveness"]["phases"]:
+            temporary = operands.get(phase["operation"], {})
+            if temporary.get("unknown"):
+                unknown.append("unresolved Ampere MMA operand register storage")
+            live = phase["packed_registers_per_block_estimate"]
+            if live is not None:
+                estimates.append(live + temporary.get("registers_per_block", 0))
+        block_regs = max([block_regs or 0, *estimates])
+        register_basis = "live tile state plus native MMA operand fragments; compiler scratch remains unknown"
     physical = pressure.get("physical_register_allocation", {})
     if ws.get("status") == "predicted":
         block_regs = physical.get("registers_per_block")

@@ -139,6 +139,10 @@ def run_native(request, output):
     settings = request["settings"]
     result = dict(version=1, request_id=request["request_id"], workload=workload.name, device=device.name)
     reason = support_reason(workload, Device(device.name, device.target))
+    if not reason and settings["method"] == "carver":
+        from .baselines import carver_support_reason
+
+        reason = carver_support_reason(workload, device)
     if reason:
         return dict(result, status="unsupported", reason=reason)
 
@@ -174,9 +178,10 @@ def run_native(request, output):
         torch.backends.cuda.matmul.allow_tf32 = False
 
     case = make_case(workload)
-    performance_model = device.performance_model if settings["method"] != "xgboost" else None
+    analytical = settings["method"] in ("analyze", "exhaustive", "top_k")
+    performance_model = device.performance_model if analytical else None
     profile_identity = None
-    if device.profiles and settings["method"] != "xgboost":
+    if device.profiles and analytical:
         from tilelang.tiletune import load_device_profile
 
         profile_path = device.profiles.get(workload.dtype)
@@ -205,7 +210,7 @@ def run_native(request, output):
         indices, configs = select_configs(configs, indices)
     else:
         indices = list(range(len(configs)))
-    if settings["method"] != "xgboost":
+    if analytical:
         config = TileTuneConfig(
             enabled=True,
             mode="report_only",
@@ -246,6 +251,14 @@ def run_native(request, output):
         )
         predictor = Predictor(settings["xgb_model"], expected_sha256=settings["xgb_model_sha256"], workers=settings["workers"])
         xgb_report = predictor.rank(context, configs, settings["top_k"])
+        xgb_report["selection"]["wall_time_ms"] = (time.perf_counter() - started) * 1000
+    elif settings["method"] in ("carver", "brute_force"):
+        from .baselines import carver_rank, exhaustive_selection
+
+        started = time.perf_counter()
+        xgb_report = (
+            carver_rank(workload, device, configs, settings["top_k"]) if settings["method"] == "carver" else exhaustive_selection(configs)
+        )
         xgb_report["selection"]["wall_time_ms"] = (time.perf_counter() - started) * 1000
     write_json(
         output / "experiment.json",
@@ -289,9 +302,14 @@ def run_native(request, output):
     inputs = case.inputs("cuda", generator)
     expected = case.reference(*inputs)
     if xgb_report is not None:
-        from experiments.xgboost.execution import run_selected
+        from .execution import run_selected
 
-        return dict(result, **run_selected(case, configs, indices, device.target, inputs, expected, settings, output, xgb_report))
+        return dict(
+            result,
+            **run_selected(
+                case, configs, indices, device.target, inputs, expected, settings, output, xgb_report, report_name=settings["method"]
+            ),
+        )
     tuner = (
         AutoTuner(case.build, configs)
         .set_compile_args(target=device.target, execution_backend="tvm_ffi", out_idx=case.out_idx, pass_configs=case.pass_configs)
@@ -405,7 +423,7 @@ def main():
     parser.add_argument(
         "--plan", action="store_true", help="Print the manifest and coverage without importing TileLang or querying a device"
     )
-    parser.add_argument("--method", choices=["analyze", "exhaustive", "top_k", "xgboost"], default="analyze")
+    parser.add_argument("--method", choices=["analyze", "exhaustive", "brute_force", "top_k", "carver", "xgboost"], default="analyze")
     parser.add_argument("--xgb-model", type=Path, help="Frozen model from python -m experiments.xgboost train")
     parser.add_argument("--metric", choices=["traffic_waves", "pipeline_time"], default="traffic_waves")
     parser.add_argument("--top-k", type=int, default=20)

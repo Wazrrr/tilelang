@@ -26,6 +26,8 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
     times = [estimate_phase_cycles(p, profile, concurrent_ctas) for p in pipeline["phases"]]
     if any(t is None for t in times):
         return None
+    if pipeline.get("ampere_schedule") is not None:
+        return _estimate_ampere(pipeline, times, n, profile, concurrent_ctas)
     consumer = sum(t for t, p in zip(times, pipeline["phases"]) if p["inside_loop"])
     outside = sum(t for t, p in zip(times, pipeline["phases"]) if not p["inside_loop"])
     service = pipeline["input_bytes_per_iteration"] * concurrent_ctas / global_rate
@@ -68,12 +70,60 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
     }
 
 
+def _estimate_ampere(pipeline, times, n, profile, concurrent_ctas):
+    from .ampere import schedule_cycles
+
+    phases = pipeline["phases"]
+    copies = pipeline["producer_buffers"]
+    copy_ids = {copy["operation"] for copy in copies}
+    rate = profile["global_bytes_per_cycle"] / concurrent_ctas
+    cost = {}
+    for phase, cycles in zip(phases, times):
+        work = phase["external_work"]
+        if phase["inside_loop"] and phase["operation"] in copy_ids:
+            cost[phase["operation"]] = cycles
+        else:
+            cost[phase["operation"]] = cycles + (work["read_bytes"] + work["write_bytes"]) / rate
+            cost[phase["operation"]] += work["read_groups"] * profile["copy_latency_cycles"]
+    outside = sum(cost[p["operation"]] for p in phases if not p["inside_loop"])
+    consumer = sum(cost[p["operation"]] for p in phases if p["inside_loop"] and p["operation"] not in copy_ids)
+    service = sum(copy["bytes"] for copy in copies) / rate
+    plan = pipeline["ampere_schedule"]
+    if pipeline["num_stages"]:
+        if pipeline["producer_schedule_unknown"]:
+            return None
+        values = [schedule_cycles(plan, copies, cost, k, profile, concurrent_ctas) for k in (n, max(0, n - 1), 1)]
+        if any(value is None for value in values):
+            return None
+        total, previous, first = values
+        step = total - previous if n else 0
+        model = "Ampere compiler-ordered asynchronous copy recurrence"
+    else:
+        first = consumer + service + len(copies) * (profile["copy_latency_cycles"] + profile["barrier_cycles"])
+        step, total = first, n * first
+        model = "Ampere serial per-operation memory and consumer schedule"
+    return dict(
+        cycles=outside + total,
+        consumer_cycles_per_iteration=consumer,
+        copy_service_cycles_per_iteration=service,
+        input_ready_latency_cycles=service + len(copies) * profile["copy_latency_cycles"],
+        steady_state_interval_cycles=step,
+        fill_and_first_consumer_cycles=first,
+        iterations=n,
+        schedule_model=model,
+        phase_cycles=[dict(operation=p["operation"], cycles=cost[p["operation"]]) for p in phases],
+        outside_loop_cycles=outside,
+        concurrent_ctas=concurrent_ctas,
+    )
+
+
 def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs=None, *, loop, family_name, phase_labels):
     from .src.ir_utils import _int
     from .src.ir_utils import loop_visits
     from .src.ir_utils import in_loop
 
     unknown = list(col.unknown)
+    ampere = getattr(col, "ampere_plan", None)
     model = pressure.get("target_model")
     if model and model["kind"] is not None and not model["block_execution"]:
         unknown.append("target requires its own core/storage scheduling model")
@@ -84,7 +134,9 @@ def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs
         and (performance_model.get("profile_backend") != model["kind"] or performance_model.get("profile_target") != model["arch"])
     ):
         unknown.append("non-CUDA timing requires an explicit matching profile_backend and profile_target")
-    if any(op.kind == "elementwise" and in_loop(op, loop) and any(r.buffer.scope() == "global" for r in op.reads) for op in col.operations):
+    if ampere is None and any(
+        op.kind == "elementwise" and in_loop(op, loop) and any(r.buffer.scope() == "global" for r in op.reads) for op in col.operations
+    ):
         unknown.append("direct scalar global accesses inside a recurrence require a per-iteration access schedule")
     if performance_model and performance_model.get("profile_target", pressure.get("target_arch")) != pressure.get("target_arch"):
         unknown.append("device profile target does not match the analyzed kernel")
@@ -95,7 +147,7 @@ def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs
             "kind": op.kind,
             "dependencies": op.dependencies,
             "inside_loop": in_loop(op, loop),
-            "work": operation_work(op),
+            "work": operation_work(op, col),
             "compute_participants": compute_participants(op, pressure, pass_configs),
             "consumer_threads": consumer_threads(op),
         }
@@ -108,6 +160,18 @@ def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs
     participants = {p["operation"]: p["compute_participants"] for p in phases}
     layout_cache = {}
     for op, phase in zip(col.operations, phases):
+        if op.index in getattr(col, "scalar_work_unknown", {}):
+            unknown.append(f"operation {op.index} scalar ownership: {col.scalar_work_unknown[op.index]}")
+        if op.kind == "elementwise" and getattr(col, "inferred_layouts", {}).get(op.metadata.buffer.data) is not None:
+            phase["scalar_work_basis"] = (
+                "compiler fragment ownership and pure-expression reuse within each thread; address instructions excluded"
+            )
+        if ampere is not None:
+            from .ampere import external_work
+
+            phase["external_work"] = external_work(op)
+            if any(value is None for value in phase["external_work"].values()):
+                unknown.append(f"operation {op.index} has unresolved external access bytes")
         phase["reduction"] = reduction_work(op, col, pressure, participants, layout_cache)
         reduction = phase["reduction"]
         if reduction and reduction["precision"] == "unknown":
@@ -159,6 +223,13 @@ def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs
         unknown.append("unresolved operation work")
     ws = pressure.get("warp_specialization", {})
     eligible = ws.get("status") == "predicted"
+    if ampere is not None and stages:
+        eligible = ampere["status"] == "predicted"
+        unknown.extend(ampere["unknown"])
+        if performance_model:
+            for field in ("async_copy_issue_bytes_per_cycle", "async_copy_latency_cycles"):
+                if field not in performance_model:
+                    unknown.append(f"Ampere asynchronous pipeline requires profile field {field}")
     if stages and not eligible:
         unknown.append("positive-stage pipeline scheduling policy is unresolved or unsupported")
     if any(op.predicates for op in col.operations):
@@ -169,6 +240,7 @@ def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs
 
     result = {
         "specialization": family_name,
+        "ampere_schedule": ampere,
         "phases": phases,
         "cta_work": distribution,
         "producer_buffers": producer_buffers,
