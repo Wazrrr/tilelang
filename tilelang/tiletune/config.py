@@ -32,7 +32,7 @@ class TileTuneConfig:
         if self.ranking_metric not in ("traffic_waves", "pipeline_time"):
             raise ValueError("ranking_metric must be traffic_waves or pipeline_time")
         if self.performance_model is not None:
-            from .profile_schema import validate_performance_model
+            from .profiling.profile_schema import validate_performance_model
 
             validate_performance_model(self.performance_model)
         if not isinstance(self.ranking, bool):
@@ -43,7 +43,7 @@ class TileTuneConfig:
             if not self.ranking:
                 raise ValueError("top_k requires ranking=True")
         if self.device_limits is not None:
-            from .cost import DEVICE_LIMIT_FIELDS
+            from .src.device import DEVICE_LIMIT_FIELDS
 
             if not isinstance(self.device_limits, dict) or set(self.device_limits) - DEVICE_LIMIT_FIELDS:
                 raise ValueError("device_limits must contain supported device resource limits")

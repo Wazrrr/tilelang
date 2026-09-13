@@ -115,7 +115,7 @@ def run_one(args):
     import torch
     from tilelang.cache.kernel_cache import KernelCache
     from tilelang.tiletune import profile_device
-    from tilelang.tiletune.device_profile import current_target
+    from tilelang.tiletune.profiling.device_profile import current_target
     from experiments.gemm.kernel import get_configs, make_inputs
 
     torch.cuda.set_device(0)
@@ -224,7 +224,7 @@ def remeasure_winners(args, summaries):
     import tilelang
     import torch
     from experiments.gemm.kernel import make_kernel, make_inputs, reference
-    from tilelang.tiletune.device_profile import current_target
+    from tilelang.tiletune.profiling.device_profile import current_target
 
     os.environ["TILELANG_AUTOTUNE_TIMING_LOG"] = str(args.output / "validation_timings.tsv")
     torch.cuda.set_device(0)

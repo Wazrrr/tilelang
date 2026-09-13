@@ -121,33 +121,34 @@ the same tile algorithm, with explicit region roots and no pressure/ranking.
 ## Common modules and specializations
 
 ```text
-Actual PrimFunc → collection and one backward tile propagation
-               → register_pressure.py coordinates storage and accumulator bounds
-               → GEMM / attention / generic recognition
-               → liveness.py adds family-loop tile estimates
-               → warp_specialization.py
-               → register_policy.py
-               → memory.py and shared_storage.py
-               → waves.py
-               → operation_work.py, reduction.py and service.py
-               → pipeline.py and tile_schedule.py
-               → cta_work.py and ranking.py
+analysis.py → engine.py
+            → src/ collection, propagation, and shared buffer facts
+            → register_pressure.py: storage and accumulator bounds
+            → families/: recognition and policy inputs
+            → tile_liveness.py: explicit-loop storage estimates
+            → warp_specialization.py and final register policy
+            → global_memory.py and shared_memory.py
+            → occupancy.py
+            → compute.py, schedule.py, and pipeline.py
+            → ranking.py
 ```
 
-`engine.py` orchestrates these modules through the shared contract in
-`families/base.py`. GEMM policy lives in `families/gemm.py`, and attention policy
-lives in `families/attention.py`; `specializations.py` preserves the old import
-path. See the [code review guide](../tilelang/tiletune/README.md) for the source
-map, family differences, and suggested reading order. Dense GEMM
-has a single matrix operation. Forward attention requires connected QK and PV
-operations with intervening max, exponential and sum operations. Recognition
-uses the operation graph, not buffer names or configuration names. Set
-`specialization="gemm"` or `"attention"` to require a match; the default is `"auto"`.
-Unsupported indexing, aliases, calls and scheduling remain unknown and eligible.
+The engine calls shared stage functions directly. Families identify the selected
+loop, operand roles, labels, memory-accounting mode, and register/producer policy;
+they do not dispatch separate numerical implementations. The shared Python core
+lives in `tilelang/tiletune/src/`, and device measurements and profile validation
+live in `tilelang/tiletune/profiling/`.
 
-The small native adapter exposes existing `ParseOperator`, `GetAccessRegions`
-and CUDA producer-copy classification. Python reads reflected operation metadata
-and uses TVM arithmetic analysis. The adapter runs no lowering pass.
+Dense GEMM has a single matrix operation. Forward attention requires connected
+QK and PV operations with intervening max, exponential, and sum operations.
+Recognition uses the operation graph, not buffer or configuration names. Set
+`specialization="gemm"` or `"attention"` to require a match; the default is
+`"auto"`. See the [source guide](../tilelang/tiletune/README.md) for a complete
+GEMM call flow and the new internal import paths. Package-root exports and
+existing report formats remain unchanged; obsolete internal aliases are removed.
+
+The native adapter still exposes compiler-owned operator parsing, access regions,
+and CUDA producer-copy classification. These queries run no lowering pass.
 
 ## Register pressure
 
@@ -211,7 +212,7 @@ Causal loop extents come from the actual IR, including unequal query/key lengths
 and partial boundary tiles.
 
 Shared allocation estimates include pipeline copies for buffers written inside
-the loop. `shared_storage.py` predicts reuse only for disjoint tile lifetimes;
+the loop. `shared_memory.py` predicts reuse only for disjoint tile lifetimes;
 repeated-loop lifetimes overlap conservatively. Unknown aliases retain the
 allocation sum, and `tl.disable_shared_memory_reuse` disables reuse prediction.
 Reports retain both the sum and arena estimate. Padding and compiler barriers

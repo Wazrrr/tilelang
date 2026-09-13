@@ -18,7 +18,7 @@ import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.tiletune import analyze_prim_func, anchor_latency, profile_device, rank_records
 from tilelang.tiletune.config import ANALYSIS_VERSION
-from tilelang.tiletune.cost import query_device_limits
+from tilelang.tiletune import query_device_limits
 from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul, calc_diff
 
 

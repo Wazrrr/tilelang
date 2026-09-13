@@ -1,11 +1,48 @@
-"""Read-only tile lifetimes for shared-memory occupancy estimates.
+"""Staged shared allocations and storage reuse from buffer lifetimes."""
 
-This predicts an arena, not the compiler's final allocation. A repeated loop is
-one lifetime interval: buffers used anywhere in it may overlap across iterations
-and producer stages. Reuse is allowed only between disjoint intervals, never
-between successive accesses inside a pipeline. Unknown calls/aliases fall back
-to the sum of allocations. No result here can reject a candidate.
-"""
+from math import prod
+from .src.ir_utils import _int
+
+
+def analyze_shared_memory(col, buffer_facts, pass_configs=None):
+    def product(values):
+        values = [_int(v) for v in values]
+        return prod(values) if all(v is not None and v >= 0 for v in values) else None
+
+    shared = []
+    for buffer in col.buffers:
+        if not buffer.scope().startswith("shared") or buffer.scope() == "shared.tmem":
+            continue
+        facts = buffer_facts[buffer]
+        logical = (facts.logical_bits + 7) // 8 if all(x is not None and x >= 0 for x in facts.shape) else None
+        factors = [1]
+        for op in col.operations:
+            if any(r.buffer.same_as(buffer) for r in op.writes):
+                factors.append(product(max(1, s) if s is not None else None for s in op.pipeline_stages))
+        stages = max(factors) if all(x is not None for x in factors) else None
+        shared.append(
+            {
+                "buffer": buffer.name,
+                "buffer_id": str(hash(buffer)),
+                "dtype": str(buffer.dtype),
+                "shape": [str(x) for x in buffer.shape],
+                "logical_bytes": logical,
+                "pipeline_copies_estimate": stages,
+                "allocated_bytes_estimate": logical * stages if logical is not None and stages is not None else None,
+            }
+        )
+    storage = shared_storage_plan(col, shared, pass_configs)
+    return {
+        "shared_allocations": shared,
+        "shared_memory_bytes_estimate": storage["arena_bytes_estimate"],
+        "shared_memory_allocated_sum_bytes": storage["allocated_sum_bytes"],
+        "shared_storage_plan": storage,
+        "assumptions": [
+            "only shared buffers written in a pipeline receive stage copies; layout padding and compiler barriers are unmodeled",
+            "shared tile lifetimes predict storage reuse across disjoint regions; entire repeated loops remain overlapping",
+            "shared arena size is an estimate, not a compiler allocation guarantee or a rejection bound",
+        ],
+    }
 
 
 def shared_storage_plan(col, allocations, pass_configs=None):

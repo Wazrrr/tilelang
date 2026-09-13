@@ -153,6 +153,17 @@ def test_explicit_layout_pressure():
     assert analyze_prim_func(gemm(explicit=True), {"register_cap": 1, "mode": "report_only"})["pressure"]["decision"]["keep"]
 
 
+def test_explicit_ownership_and_balanced_liveness_remain_distinct():
+    # The explicit layout has 128 owners within a 256-thread launch. The
+    # current liveness model averages across the launch, while the proof uses
+    # actual ownership. Sharing allocation facts must preserve both meanings.
+    pressure = analyze_prim_func(gemm(explicit=True, threads=256), {"register_cap": 6})["pressure"]
+    assert pressure["modeled_lower_bound"] == 8
+    assert pressure["register_demand"]["registers_per_thread_estimate"] == 4
+    assert pressure["register_demand"]["status"] == "within_capacity"
+    assert pressure["decision"]["would_reject"]
+
+
 def test_overwrite_and_broadcast():
     @T.prim_func
     def main(A: T.Tensor((16,), "float32"), B: T.Tensor((16,), "float32"), C: T.Tensor((16, 16), "float32")):

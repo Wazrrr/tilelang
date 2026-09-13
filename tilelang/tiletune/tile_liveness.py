@@ -6,32 +6,29 @@ estimate informs demand and ranking, but cannot establish a rejection proof.
 """
 
 from math import prod
-from tilelang import tvm
 
 
-def analyze_live_tiles(col, specialization):
+def analyze_live_tiles(col, buffer_facts, *, loop):
     """Conservative tile intervals, including attention's loop-carried state.
 
     These are logical demand estimates, never additional rejection evidence. Packing,
     automatic-layout replication, scalarization and storage reuse are unresolved.
     """
-    from .analysis import _int, _exclusive
-    from .ir_utils import in_loop
+    from .src.ir_utils import _int, _exclusive
+    from .src.ir_utils import in_loop
 
     thread_dims = [_int(v) for k, v in col.threads.items() if k.startswith("threadIdx.")]
     threads = prod(thread_dims) if thread_dims and all(thread_dims) else None
-    loop_ops = [op for op in col.operations if in_loop(op, specialization.loop)]
+    loop_ops = [op for op in col.operations if in_loop(op, loop)]
     carried = []
     entries = []
     for buffer in col.buffers:
         if buffer.scope() not in ("local.fragment", "local", "local.var"):
             continue
-        shape = [_int(x) for x in buffer.shape]
-        dtype = tvm.DataType(buffer.dtype)
-        bits = prod(shape) * dtype.bits * dtype.lanes if all(x is not None for x in shape) else None
-        private = buffer.scope() != "local.fragment"
-        layout = col.layouts.get(buffer.data)
-        replication = _int(layout.replicate_size) if layout is not None and hasattr(layout, "replicate_size") else 1
+        facts = buffer_facts[buffer]
+        bits = facts.logical_bits
+        private = facts.scope != "local.fragment"
+        replication = facts.replication
         if bits is not None:
             bits = bits * threads if private and threads else bits * replication if replication else None
         touches = [op for op in loop_ops if any(r.buffer.same_as(buffer) for r in op.reads + op.writes)]
@@ -55,7 +52,7 @@ def analyze_live_tiles(col, specialization):
                 old.index >= op.index and not _exclusive(old, op) and any(r.buffer.same_as(buffer) for r in old.reads)
                 for old in col.operations
             )
-            if (before and after) or (is_carried and in_loop(op, specialization.loop)):
+            if (before and after) or (is_carried and in_loop(op, loop)):
                 active.append(
                     {
                         "buffer": buffer.name,
@@ -70,7 +67,6 @@ def analyze_live_tiles(col, specialization):
         phases.append(
             {
                 "operation": op.index,
-                "phase": specialization.phase(op),
                 "buffers": active,
                 "packed_registers_per_block_estimate": (bits + 31) // 32 if bits is not None else None,
                 "balanced_registers_per_thread_estimate": (bits + 32 * threads - 1) // (32 * threads)

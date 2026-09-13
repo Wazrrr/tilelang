@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tilelang.tiletune import TileTuneConfig, analyze_prim_func, load_device_profile, profile_device
-from tilelang.tiletune import device_profile
+from tilelang.tiletune.profiling import device_profile
 from test_modules import PROFILE, attention
 from test_pipeline import matrix_pipeline
 
@@ -109,14 +109,25 @@ def test_experiment_freeze_includes_family_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(experiment, "current_target", lambda: {"kind": "cuda", "arch": "sm_90a"})
     monkeypatch.setattr(experiment, "_identity", lambda: {})
     monkeypatch.setattr(experiment, "load_device_profile", lambda *args, **kwargs: {})
-    monkeypatch.setattr("tilelang.tiletune.cost.query_device_limits", lambda target: LIMITS)
+    monkeypatch.setattr("tilelang.tiletune.query_device_limits", lambda target: LIMITS)
     monkeypatch.setattr(KernelCache, "_get_tilelang_lib_stamp", lambda: "test-native-build")
     profile = tmp_path / "profile.json"
     profile.write_text("{}")
     frozen = tmp_path / "frozen"
     experiment.freeze(frozen, profile, "baseline")
     report = experiment.verify(frozen)
-    for relative in ("__init__.py", "families/__init__.py", "families/base.py", "families/gemm.py", "families/attention.py"):
+    for relative in (
+        "__init__.py",
+        "families/__init__.py",
+        "families/base.py",
+        "families/gemm.py",
+        "families/attention.py",
+        "src/collector.py",
+        "src/buffer_facts.py",
+        "global_memory.py",
+        "shared_memory.py",
+        "profiling/device_probes.py",
+    ):
         source = experiment.REPO_ROOT / "tilelang/tiletune" / relative
         key = f"tilelang/tiletune/{relative}"
         assert report["source_sha256"][key] == experiment.digest(source)
@@ -137,7 +148,7 @@ def test_unknown_scores_do_not_claim_top_k_performance():
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 def test_ampere_probes_cross_compile(dtype):
     import tilelang
-    from tilelang.tiletune.device_probes import tensor_core, tile_copy_roundtrip
+    from tilelang.tiletune.profiling.device_probes import tensor_core, tile_copy_roundtrip
 
     # Device compilation produces an sm_80 cubin without loading or executing it.
     from tvm.target import Target

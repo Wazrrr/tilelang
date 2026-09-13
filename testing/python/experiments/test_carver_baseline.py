@@ -18,7 +18,7 @@ def test_legacy_target_spelling_does_not_mutate_compile_target():
 def test_original_carver_ranks_common_grid(dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    from tilelang.tiletune.device_profile import current_target
+    from tilelang.tiletune.profiling.device_profile import current_target
 
     configs = get_configs()
     result = rank_configs(configs, m=4096, n=4096, k=4096, dtype=dtype, target=current_target(), top_k=20)

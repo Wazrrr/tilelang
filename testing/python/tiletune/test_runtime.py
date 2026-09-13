@@ -3,7 +3,7 @@ import pytest
 from tilelang.autotuner import AutoTuner
 from tilelang.tiletune import TileTuneConfig, check_compiler_resources
 from tilelang.contrib.cuda_resource_info import KernelResourceUsage, parse_ptxas_output
-from tilelang.tiletune.budget import resolve_register_budget
+from tilelang.tiletune.register_pressure import resolve_register_budget
 from tvm.target import Target
 
 

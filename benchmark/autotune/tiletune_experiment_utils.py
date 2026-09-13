@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from examples.flash_attention.example_mha_tiletune import make_attention
 from tilelang.tiletune import TileTuneConfig, rank_records
-from tilelang.tiletune.cost import combine_tile_cost
+from tilelang.tiletune.ranking import combine_tile_cost
 from tilelang.tiletune.ranking import apply_ranking_metric
 
 PREFIXES = (1, 4, 8, 16, 32, 64)

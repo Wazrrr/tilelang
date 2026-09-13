@@ -38,7 +38,7 @@ def run(args, *, kernel, grid, inputs, reference, dtype, out_idx, workload, kern
     import torch
     from tilelang.autotuner import AutoTuner
     from tilelang.tiletune import profile_device
-    from tilelang.tiletune.device_profile import current_target
+    from tilelang.tiletune.profiling.device_profile import current_target
 
     indices, configs = select_configs(grid, args.config_indices)
     target = current_target()

@@ -6,8 +6,8 @@ and attention. Source links identify the implementation behind each part of the
 process.
 
 The [code review guide](../tilelang/tiletune/README.md) maps the source into
-shared analysis stages and separate GEMM/attention policy modules. The source
-reorganization preserves the analysis described here.
+shared analysis stages and separate GEMM/attention policy modules. The shared Python core lives in `tilelang/tiletune/src/`.
+The stage reorganization preserves the analysis described here.
 
 ## 1. What TileTune does
 
@@ -134,7 +134,7 @@ with `clear=False` reads its previous destination value.
 These queries reuse compiler-owned operator semantics. They do not run a
 lowering pass, emit CUDA, or measure the candidate.
 
-Sources: [collector](../tilelang/tiletune/analysis.py#L91),
+Sources: [collector](../tilelang/tiletune/src/collector.py),
 [native registry lookup and FFI adapters](../src/op/operator.cc#L38),
 [base access-region interface](../src/op/operator.h#L171),
 [GEMM reflection](../src/op/gemm.h#L132),
@@ -168,7 +168,7 @@ Each collected `Operation` holds its reads, writes, native metadata, loop
 context, predicates, dependencies, launch threads, and pipeline-stage context.
 The original PrimFunc is preserved.
 
-Source: [operation records and traversal](../tilelang/tiletune/analysis.py#L62).
+Source: [operation records and traversal](../tilelang/tiletune/src/ir.py).
 
 ### 3.3 Dependencies and backward demand propagation
 
@@ -226,14 +226,13 @@ autotuner records `analysis_failed` and stops that candidate before lowering.
 Supported unknown cases still produce explicit model uncertainty. For example,
 an unresolved thread count cannot justify a numeric register bound.
 
-Sources: [input mapping](../tilelang/tiletune/analysis.py#L377),
-[propagation](../tilelang/tiletune/analysis.py#L490),
-[analysis entry point](../tilelang/tiletune/analysis.py#L549).
+Sources: [input mapping](../tilelang/tiletune/src/propagation.py),
+[propagation](../tilelang/tiletune/src/propagation.py),
+[analysis entry point](../tilelang/tiletune/analysis.py).
 
 ## 4. Family recognition and execution-policy prediction are separate
 
-`families/` identifies **what computation the graph contains**; the former
-`specializations.py` module now provides compatibility imports.
+`families/` identifies **what computation the graph contains**; the engine calls the shared numerical stages directly.
 `warp_specialization.py` predicts **a supported compiler execution policy**.
 
 | Family | Recognition rule | Information supplied to common modules |
@@ -286,7 +285,7 @@ are not assigned an overlapping timing model by the current implementation.
 
 Sources: [WS predictor](../tilelang/tiletune/warp_specialization.py),
 [native copy classification adapter](../src/cuda/op/copy_analysis.cc#L859),
-[device-profile targets](../tilelang/tiletune/device_profile.py#L24).
+[device-profile targets](../tilelang/tiletune/profiling/device_profile.py).
 
 ## 5. Register analysis: demand, reservation, and rejection
 
@@ -334,10 +333,10 @@ of 128 registers/thread. A 256×256 accumulator over 128 threads gives 512.
 Neither `BK`, the K-iteration count, nor `num_stages` multiplies this bound.
 
 Sources: [initial register-analysis flow](../tilelang/tiletune/register_pressure.py),
-[accumulator evidence, ownership and lower bound](../tilelang/tiletune/register_accumulator.py).
+[accumulator evidence, ownership and lower bound](../tilelang/tiletune/register_pressure.py).
 
 Allocation descriptions are separate in
-[register_storage.py](../tilelang/tiletune/register_storage.py). Their size and
+[register_pressure.py](../tilelang/tiletune/register_pressure.py). Their size and
 layout estimates do not prove simultaneous demand. Tile liveness is analyzed
 once after family recognition, as described below, covering explicit and
 automatic fragments as well as thread-private allocations and loop-carried state.
@@ -361,7 +360,7 @@ This may overestimate storage because the compiler can reuse or eliminate
 values. It also omits some compiler temporaries. It is not an exact total
 register count, nor an independent proof that the kernel must spill.
 
-Source: [live-tile analysis](../tilelang/tiletune/liveness.py).
+Source: [live-tile analysis](../tilelang/tiletune/tile_liveness.py).
 
 ### 5.3 Policy and the actual pre-lowering decision
 
@@ -395,12 +394,12 @@ example explicitly uses 32. It does not enlarge the SM register file or change
 the physical residency calculation. It also does not override post-compile
 spill/local-memory limits; those are separate settings.
 
-The engine replaces the preliminary pressure-only decision with this final
-register-policy decision. `TileTuneSession` then enforces it in `reject` mode.
+The engine records this final register-policy decision after resolving
+liveness and execution policy. `TileTuneSession` then enforces it in `reject` mode.
 `report_only` records `would_reject` but continues.
 
-Sources: [architecture/user budget](../tilelang/tiletune/budget.py),
-[register policy](../tilelang/tiletune/register_policy.py),
+Sources: [architecture/user budget](../tilelang/tiletune/register_pressure.py),
+[register policy](../tilelang/tiletune/register_pressure.py),
 [decision enforcement](../tilelang/tiletune/runtime.py#L123).
 
 ### GEMM versus attention pressure
@@ -458,7 +457,7 @@ These are logical bytes. The model does not derive cache hit rates, memory
 transaction efficiency, or coalescing from them. A cached or streaming profile
 is selected explicitly.
 
-Source: [memory analysis](../tilelang/tiletune/memory.py).
+Source: [memory analysis](../tilelang/tiletune/global_memory.py).
 
 ### 6.2 Shared storage
 
@@ -478,7 +477,7 @@ disabled shared-memory reuse falls back to the sum. Padding, alignment, and
 compiler-generated storage remain limitations; this estimate cannot reject a
 candidate by itself.
 
-Source: [shared-storage planning](../tilelang/tiletune/shared_storage.py).
+Source: [shared-storage planning](../tilelang/tiletune/shared_memory.py).
 
 ### 6.3 Resident CTAs and grid waves
 
@@ -506,8 +505,8 @@ Missing capacities, unresolved domains, or estimated block resources exceeding
 device limits leave the wave estimate unknown. Such occupancy uncertainty is
 distinct from the proven register-policy rejection described above.
 
-Sources: [occupancy and waves](../tilelang/tiletune/waves.py),
-[device-limit queries](../tilelang/tiletune/cost.py#L21).
+Sources: [occupancy and waves](../tilelang/tiletune/occupancy.py),
+[device-limit queries](../tilelang/tiletune/src/device.py).
 
 ## 7. Where the performance-model costs come from
 
@@ -544,8 +543,8 @@ primitives, but this does not guarantee prediction accuracy for every shape.
 A positive global `latency_scale` changes the reported time scale, not the
 ordering of candidates scored with the same profile.
 
-Sources: [profile construction and caching](../tilelang/tiletune/device_profile.py),
-[primitive kernels](../tilelang/tiletune/device_probes.py).
+Sources: [profile construction and caching](../tilelang/tiletune/profiling/device_profile.py),
+[primitive kernels](../tilelang/tiletune/profiling/device_probes.py).
 
 ## 8. How `pipeline_time` is calculated now
 
@@ -602,9 +601,9 @@ warp-shuffle/combine pairs separately, then uses the matching sum/max rates.
 Unsupported inter-warp collectives remain unknown. These layout helper queries
 create analysis values; they do not run a layout-inference pass on the PrimFunc.
 
-Sources: [operation work](../tilelang/tiletune/operation_work.py),
-[service-time calculation](../tilelang/tiletune/service.py),
-[reduction mapping and work](../tilelang/tiletune/reduction.py).
+Sources: [operation work](../tilelang/tiletune/compute.py),
+[service-time calculation](../tilelang/tiletune/compute.py),
+[reduction mapping and work](../tilelang/tiletune/compute.py).
 
 ### 8.2 Individual producer buffers and their consumers
 
@@ -665,7 +664,7 @@ individual buffer recurrence. Reported `steady_state_interval_cycles` is the
 difference between the modeled completion at `n` and `n-1` iterations; it is not
 an independently profiled constant or necessarily an asymptotic limit.
 
-Source: [buffer collection and recurrence](../tilelang/tiletune/tile_schedule.py).
+Source: [buffer collection and recurrence](../tilelang/tiletune/schedule.py).
 
 ### 8.3 Serial path and work outside the loop
 
@@ -786,7 +785,7 @@ If a reference clock is supplied:
 estimated_latency_ms = pipeline_score / (1000 * reference_clock_mhz)
 ```
 
-Sources: [CTA work and dispatch](../tilelang/tiletune/cta_work.py),
+Sources: [CTA work and dispatch](../tilelang/tiletune/schedule.py),
 [grid-score integration](../tilelang/tiletune/ranking.py#L7).
 
 ## 9. What ranking does, and what it does not do

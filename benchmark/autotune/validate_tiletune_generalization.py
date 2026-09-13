@@ -23,7 +23,7 @@ from benchmark.autotune.tiletune_experiment_utils import (
 from examples.flash_attention.example_mha_tiletune import PASS_CONFIGS, check_accuracy, get_configs
 from tilelang.tiletune import TileTuneConfig, analyze_prim_func, load_device_profile, rank_records
 from tilelang.tiletune.config import ANALYSIS_VERSION
-from tilelang.tiletune.device_profile import _identity, current_target, profile_device
+from tilelang.tiletune.profiling.device_profile import _identity, current_target, profile_device
 import tilelang.language as T
 
 DEVELOPMENT = [
@@ -143,7 +143,7 @@ def factory(w):
 
 def freeze(root, profile, split, *, mode="report_only", group_size=1):
     from tilelang.cache.kernel_cache import KernelCache
-    from tilelang.tiletune.cost import query_device_limits
+    from tilelang.tiletune import query_device_limits
 
     if (root / "freeze.json").exists():
         raise ValueError("frozen experiment already exists")

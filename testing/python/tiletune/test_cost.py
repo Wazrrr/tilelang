@@ -93,10 +93,10 @@ def test_shared_and_thread_limits_control_waves():
 
 
 def test_cost_errors_reach_the_caller(monkeypatch):
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("cost failure")
 
-    monkeypatch.setattr("tilelang.tiletune.cost.analyze_tile_cost", fail)
+    monkeypatch.setattr("tilelang.tiletune.global_memory.analyze_global_memory", fail)
     with pytest.raises(RuntimeError, match="cost failure"):
         analyze_prim_func(gemm(), {"register_cap": 1})
 

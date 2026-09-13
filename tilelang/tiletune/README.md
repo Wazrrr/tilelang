@@ -1,209 +1,145 @@
 # TileTune code review guide
 
-TileTune reads each candidate's actual PrimFunc, recognizes its operation
-graph, estimates resources and execution time, and reports a ranking. The source
-is organized around **a shared analysis flow and separate kernel-family policies**.
-
-Start with [engine.py](engine.py), then read [families/base.py](families/base.py)
-and the family you want to review: [GEMM](families/gemm.py) or
-[attention](families/attention.py). For the detailed equations and evidence behind
-them, see the [walkthrough](../../docs/tiletune_walkthrough.md).
+TileTune reads an actual PrimFunc, propagates its required tiles, estimates
+resources and timing, and ranks supplied configurations. Start with
+[analysis.py](analysis.py) for the public boundary and [engine.py](engine.py)
+for the complete stage order. The shared Python core is in `src/` within this
+package; native operator metadata continues to come from the compiler.
 
 ## Source map
 
-```text
-tiletune/
-├── __init__.py             Public API
-├── config.py               User settings and analysis cache identity
-├── analysis.py             Native PrimFunc collection and backward propagation
-├── ir_utils.py             Shared read-only queries on captured IR
-├── engine.py               Common stage ordering and one register decision
-├── trace.py                Optional snapshots at each analysis checkpoint
-│
-├── families/
-│   ├── __init__.py         Recognition order and explicit-family matching
-│   ├── base.py             Shared stage implementations and family contract
-│   ├── gemm.py             Single-GEMM recognition and consumer restrictions
-│   └── attention.py        QK/softmax/PV recognition and attention policies
-│
-├── register_pressure.py    Initial register-analysis flow and report assembly
-├── register_storage.py     Allocation sizes and layout-based storage estimates
-├── register_accumulator.py Dense MMA accumulator demand and ownership proof
-├── liveness.py             Live tile estimates, including loop-carried state
-├── register_policy.py      Physical limits, allowance and final register decision
-├── budget.py               Target and user register ceilings
-├── warp_specialization.py  Native copy classification and Hopper reservations
-│
-├── memory.py               External tile traffic and shared allocation sizes
-├── shared_storage.py       Shared-buffer lifetimes and storage reuse
-├── waves.py                Resource-limited occupancy and CTA waves
-├── cost.py                 Combine traffic and occupancy; query device limits
-│
-├── operation_work.py       Work counts and participants from actual operators
-├── reduction.py            Reduction work from fragment ownership
-├── service.py              Work / profile rates → operation service cycles
-├── pipeline.py             Build pipeline phases and combine their timing
-├── tile_schedule.py        Per-buffer readiness/reuse and repeated scheduling
-├── cta_work.py             Per-CTA loop counts and whole-grid timing
-├── ranking.py              Select metric and sort reported candidates
-│
-├── profile_schema.py       Accepted performance-model fields and validation
-├── device_probes.py        Fixed hardware microbenchmark kernels
-├── device_profile.py       Measure, cache and load primitive hardware costs
-├── runtime.py              Autotuner session, rejection gates and reports
-└── specializations.py      Compatibility imports for the former module path
-```
+| Component | Responsibility |
+| --- | --- |
+| `analysis.py`, `config.py`, `__init__.py` | Public entry points, resolved settings, and exports |
+| `engine.py` | Direct stage calls, family policy inputs, and report assembly |
+| `src/ir.py`, `src/collector.py` | Region/operation records, native operator collection, and dependencies |
+| `src/regions.py`, `src/propagation.py` | Symbolic geometry and one backward tile traversal |
+| `src/buffer_facts.py`, `src/ir_utils.py` | Shared allocation facts, arithmetic, loops, and operation queries |
+| `src/device.py` | Target capabilities and explicit device-capacity queries |
+| `register_pressure.py` | Allocation descriptions, accumulator proof, budgets, and register policy |
+| `tile_liveness.py` | Simultaneous local storage and loop-carried state |
+| `global_memory.py` | Logical external traffic per tile visit |
+| `shared_memory.py` | Staged allocations, buffer lifetimes, and shared-storage reuse |
+| `occupancy.py`, `warp_specialization.py` | Residency/waves and producer/consumer policy prediction |
+| `compute.py` | Operation work, reduction ownership, and primitive service cycles |
+| `schedule.py`, `pipeline.py`, `ranking.py` | Buffer recurrence, CTA dispatch, pipeline timing, and ranking |
+| `families/` | GEMM/attention recognition, loop/operand roles, labels, and policy choices |
+| `profiling/` | Fixed primitive kernels, reusable device measurements, and profile validation |
+| `runtime.py`, `trace.py` | Autotuner integration, rejection enforcement, and intermediate snapshots |
 
 ## Shared flow
 
-The entry point is `analysis.analyze_prim_func`. It collects native operations,
-propagates output tiles once, establishes the accumulator lower bound from those
-same demands, and passes
-the collected IR plus CTA tile demands to `engine.run_modules`.
-
-The engine runs the same sequence for each family:
-
-1. Recognize the operation graph through `families.select_specialization`.
-2. Add conservative register liveness through the family's `register_pressure`.
-3. Predict warp specialization through the family's consumer policy and the
-   common native producer classifier.
-4. Resolve physical register capacity and logical demand, using the family's
-   `register_spill_allowance`. Produce the pre-lowering rejection decision.
-5. If ranking is enabled, compute family-selected memory accounting, common
-   occupancy, and the family's `pipeline_overlap` analysis.
-6. Apply the configured ranking metric and return the module reports.
-
-`runtime.py` enforces rejection and records compiler resource checks. With
-`top_k=None`, the autotuner compiles and benchmarks surviving candidates.
-With a positive `top_k`, `TileTuneSession.prepare_top_k()` analyzes the full grid,
-freezes the first K eligible finite scores, and retains their elaborated PrimFuncs
-for compilation. Ties use original index; failures never refill the budget.
-All candidates stay in the report, including `not_selected` records.
-
-## What belongs to each family
-
-| Concern | GEMM | Attention | Shared implementation |
-| --- | --- | --- | --- |
-| Recognition | One dense GEMM | Connected QK → max/exp/sum → PV in one loop | Native collection and dependency facts |
-| Operand roles | A, B, accumulator | Q, K, scores, probabilities, V, output accumulator | Buffer identity, never name matching |
-| Register estimation | Actual accumulator and other live local tiles | Actual score/output/normalization tiles, including loop state | `register_storage.py`, `register_accumulator.py` and `liveness.py`, coordinated by `register_pressure.py` |
-| Soft register allowance | Zero | Configured attention allowance, only after a match | Physical capacity and rejection rules in `register_policy.py` |
-| Memory accounting | Backward-propagated input tiles | Each actual external access, avoiding repeated demand paths | Byte counts and storage in `memory.py` |
-| Phase labels | GEMM, main loop, outside loop | QK GEMM, softmax/rescale, PV GEMM, outside work | The same operation list feeds liveness and timing |
-| WS consumers | Dense GEMMs in a straight-line tile-call loop | Supported internal GEMM/reduce/fill/copy/elementwise work | TMA classification, thread partition and register reservation |
-| Pipeline timing | Captured copies and GEMM operations | Captured copies, both GEMMs, and actual softmax/rescaling operations | `operation_work.py` → `service.py` → `pipeline.py` / `tile_schedule.py` |
-
-GEMM and attention currently share the numerical register and timing algorithms.
-Their family files document inherited behavior and contain the actual differences.
-The base class owns common implementations instead of repeating identical
-methods in both files. A future family can override a stage if its model needs
-different behavior.
-
-The generic fallback preserves the existing conservative GEMM consumer
-restrictions for warp-specialization prediction. This is an execution-policy
-fallback; it does not label an unrelated graph as a GEMM or as attention.
-
-## Review register decisions
-
-Read these files in order:
-
-1. [register_pressure.py](register_pressure.py): the short initial analysis flow
-   and the existing report fields it assembles.
-2. [register_storage.py](register_storage.py): allocation sizes, dtypes, scopes
-   and layout-based per-thread estimates. `RegisterStorage.logical_storage`
-   contains report entries; `modeled_buffers` maps actual Buffer objects to the
-   subset with per-thread allocation estimates.
-3. [register_accumulator.py](register_accumulator.py): `_required_accumulators`
-   finds full reads with full propagated demands; `_accumulator_ownership`
-   establishes the thread bound and replication; `analyze_accumulator_bound`
-   converts bits to register units and takes maxima across operations. This
-   operator-level proof is shared by GEMM and attention.
-4. [liveness.py](liveness.py): after family recognition, `analyze_live_tiles`
-   estimates simultaneous storage for explicit/automatic fragments and
-   thread-private allocations, including loop-carried state. It produces the
-   `tile_liveness` estimate used by demand policy and occupancy. This estimate
-   does not strengthen the accumulator proof.
-5. The selected family's `register_spill_allowance` and
-   [warp_specialization.py](warp_specialization.py): the soft demand margin and
-   physical producer/consumer register reservation.
-6. [register_policy.py](register_policy.py): the single `analyze_register_policy`
-   decision uses physical limits and demand versus consumer capacity plus the
-   family allowance. The engine resolves the target/user ceiling before warp
-   specialization; the initial pressure stage only describes demand.
-
-The initial `_pressure` call follows this sequence:
+`analyze_prim_func()` validates the public inputs and resolves effective pass
+settings once. `engine.analyze_kernel()` collects IR, propagates every captured
+global output, and creates one buffer-fact map. These facts retain buffer
+identity, shape, dtype, logical volume, and lazily evaluated layout properties.
+Each stage keeps its own interpretation of ownership, packing, and uncertainty.
 
 ```text
-analyze_register_storage          → allocation report + modeled Buffer map
-analyze_accumulator_bound         → proven per-thread and per-CTA lower bounds
-analyze_register_pressure        → assemble the pressure.accumulator checkpoint
+analyze_prim_func
+  → engine.analyze_kernel
+      → src.collector._Collector
+      → src.propagation._propagate_tiles
+      → src.buffer_facts.collect_buffer_facts
+      → register_pressure.analyze_register_pressure
+      → engine.run_modules
+          → families.select_specialization
+          → tile_liveness.analyze_live_tiles
+          → register_pressure.resolve_register_budget
+          → warp_specialization.predict_warp_specialization
+          → register_pressure.analyze_register_policy
+          → global_memory.analyze_global_memory       [ranking enabled]
+          → shared_memory.analyze_shared_memory       [ranking enabled]
+          → occupancy.analyze_waves                   [ranking enabled]
+          → pipeline.analyze_pipeline                 [ranking enabled]
+          → ranking.apply_ranking_metric              [ranking enabled]
 ```
 
-Buffer names are report labels. Storage scope and native GEMM operand identity
-determine which buffers are eligible for the accumulator proof.
+The engine calls shared stages directly. Families supply the selected loop,
+operand roles, phase labels, external-access accounting mode, soft spill
+allowance, and warp-specialization policy. They do not run separate register,
+memory, or timing algorithms. Liveness receives an explicit loop; the engine
+adds phase labels afterward. The numerical algorithms do not depend on those
+labels.
 
-Estimated overflow can make a score unknown. Only a proven demand bound or a
-resolved physical limit justifies pre-lowering rejection. Compiler register and
-spill counters are checked separately in `runtime.check_compiler_resources`.
+Dependencies point from the entry points and engine to the stages and then to
+`src/`. Core modules do not import the engine, runtime, or stage implementations.
+Stages use core helpers directly rather than importing private helpers from
+the public `analysis.py` module. The separate `propagate_inputs()` API uses the
+same collector and propagation algorithm without storage or timing analysis.
 
-## Review pipeline timing
+## Follow one GEMM
 
-Read `pipeline.analyze_pipeline` first to see what information the model receives.
-It builds one phase per captured operation, including dependencies and whether
-the operation is inside the recognized loop. Family phase names are labels;
-they do not insert a fixed GEMM or attention template.
+Use [the trace example](../../examples/gemm/example_gemm_tiletune_trace.py).
+It builds a 256×256×256 GEMM with 64×64 output tiles, a reduction tile of 32,
+128 consumer threads, two stages, FP16 inputs, and an FP32 output. Its device
+limits and primitive rates are illustrative constants.
 
-Then follow:
+1. The collector captures A/B copies, the GEMM accumulator, the final store,
+   eight reduction iterations, and sixteen launched blocks. Propagation follows
+   each required C tile back to its A/B regions.
+2. Register analysis establishes the accumulator bound. Liveness estimates
+   simultaneous local storage using the same buffer facts. Supported Hopper
+   policy adds 128 producer threads and reserves 33,792 registers per block.
+3. Global-memory analysis charges 4,096 bytes each for A and B on every one of
+   eight iterations, plus one 16,384-byte C store: 81,920 bytes per block.
+4. Shared-memory analysis assigns two stage copies to each 4,096-byte input
+   buffer. Their lifetimes overlap, giving 16,384 bytes with no storage reuse.
+5. Occupancy uses the minimum of thread, shared-memory, register, and block
+   limits. Registers allow one block per SM; the example's four SMs process
+   sixteen blocks in four waves.
+6. `traffic_waves` gives `(81,920 + 1) × 4 = 327,684`. The example selects
+   `pipeline_time`, which uses `compute.py` for operation service and
+   `schedule.py` for per-buffer readiness/reuse. Uniform grid time is the CTA
+   duration under modeled contention multiplied by four waves.
 
-```text
-actual operator regions/expressions
-    → operation_work.py + reduction.py       work and compute ownership
-    → service.py                            operation cycles from profile rates
-    → tile_schedule.py                      producer readiness and buffer reuse
-    → pipeline.estimate_pipeline_cycles     startup, iterations, outside work
-    → cta_work.py + ranking.py               grid timing and final score
-```
+The completed memory report combines global traffic and shared storage under
+the existing `modules.memory_traffic` key. Existing `waves`, register-policy,
+pipeline, ranking, and trace fields retain their meanings.
 
-The serial and overlapping branches use the same operation services. Positive
-stage counts require a supported scheduling policy; missing rates or unresolved
-IR leave timing unknown. Primitive rates come from `device_profile.py`, whose
-fixed probes calibrate hardware costs without replacing the candidate's graph.
+## Register and timing contracts
 
-## API contracts and validation
+`register_pressure.py` describes allocations and establishes an accumulator
+lower bound before family recognition. `tile_liveness.py` estimates the peak
+sum of overlapping local buffers and preserves carried state across the supplied
+loop. These results share facts but retain different guarantees: only proven
+demand and resolved physical constraints justify resource rejection.
 
-Analysis version 15 uses a single tile propagation:
+The existing liveness estimate balances storage over launch threads. Explicit
+layout ownership can therefore establish a higher per-thread accumulator bound.
+This reorganization preserves that behavior; correcting ownership in the broader
+liveness model is a separate algorithm change.
 
-| Entry point/stage | Contract |
-| --- | --- |
-| `analyze_prim_func(func, config=None, *, ...)` | Analyze every captured global write. No output override; a kernel without captured global output writes raises. |
-| `propagate_inputs(func, outputs)` | Query a supplied, nonempty list of Region/BufferRegion roots. Missing or empty roots raise. |
-| `_propagate_tiles(col, outputs)` | Receive normalized output tiles, retaining symbolic launch offsets; record demands once for all consumers. |
-| `AnalysisContext` | Carry the resolved config, target, device limits, pass settings and trace object. Internal stages require this context. |
-| `analyze_register_pressure(col)` | Return allocation, liveness and accumulator demand facts. No preliminary budget decision. |
-| `engine.run_modules` | Run the selected family stages; unexpected errors propagate. |
-| `TileTuneSession.elaborate` | Record analysis errors as `analysis_failed` and stop the candidate before lowering. |
+`analyze_register_policy()` returns a decision. The engine finishes analysis;
+`TileTuneSession` later enforces `keep=False` before lowering. `report_only`
+records violations without enforcing this gate. A positive `top_k` still
+excludes unscored and pressure-rejected entries and freezes selection before
+compilation. Failed selected candidates are never replaced.
 
-For migration, remove `outputs` from whole-kernel analysis calls. Use
-`propagate_inputs(func, requested_regions)` for a separate region query, and read
-`analyze_prim_func(func)["tile_propagation"]` for the kernel's tile demands and per-CTA loop coverage. The old `propagation` field and the
-`tile_scope` switch are removed; there is no second traversal or compatibility
-report copy. Both public entry points use `_propagate_tiles`.
-The `pressure.accumulator` checkpoint now contains demand facts only; budget and
-decision fields are available after the engine's register-policy stage.
+For timing, read `compute.estimate_phase_cycles`,
+`schedule.buffer_transition`, `pipeline.estimate_pipeline_cycles`, then
+`ranking.apply_ranking_metric`. Ranking recomputes timing with modeled CTA
+contention; the pipeline checkpoint also contains a single-CTA timing view.
+Missing rates or unsupported schedules remain unknown. Unexpected stage errors
+propagate; the autotuner records `analysis_failed` and stops that candidate.
 
-Pass settings are resolved once by `ir_utils.resolve_pass_configs` and passed
-to the family memory, warp-specialization and timing stages. Internal cost and
-warp-specialization helpers require the selected family instead of supplying an
-alternate default path. The former `effective_pass_configs` helper is removed.
+## Imports, profiling, and validation
 
-Model validity checks remain: unknown symbolic shapes, unsupported schedules and
-unresolved ownership cannot produce a valid numeric estimate. These explicit
-unknown results are different from malformed inputs or unexpected stage errors.
-The GEMM/attention equations and successful final report fields are unchanged.
+Package-root exports, settings, signatures, reports, and trace checkpoints are
+unchanged. Internal imports now use the source map above; obsolete forwarding
+modules are removed. Analysis version 17 and device-profile version 4 remain
+unchanged because the equations and schemas are unchanged.
 
-Existing tests are in [testing/python/tiletune](../../testing/python/tiletune).
-They exercise native propagation, family recognition, liveness, spill allowance,
-pipeline scheduling, unknown paths, report ordering, and autotuner integration.
+`profiling/device_profile.py` and `profiling/device_probes.py` moved together
+without content changes. Their source fingerprints are unchanged. Loading a
+profile remains an offline operation, and hardware probing requires an explicit
+`profile_device()` call. `profiling/profile_schema.py` performs validation without
+querying or executing on a device.
+
+Existing tests in [testing/python/tiletune](../../testing/python/tiletune) cover
+propagation, ownership, shared storage, timing, uncertainty, traces, top-K, and
+autotuner integration. The refactor also compares complete offline reports across
+GEMM dtypes, stage counts, attention layouts, and both ranking metrics.
 
 ## Follow the data in a trace log
 

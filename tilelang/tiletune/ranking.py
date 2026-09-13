@@ -1,7 +1,7 @@
 """Comparable ranking metrics, independent of measurements and rejection."""
 
 from .pipeline import estimate_pipeline_cycles
-from .cta_work import estimate_grid_cycles
+from .schedule import estimate_grid_cycles
 
 
 def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, register_demand=None):
@@ -94,3 +94,20 @@ def rank_records(records):
         ranks = groups[entry["tier"], entry["score"]]
         entry.update(tie_first_rank=min(ranks), tie_last_rank=max(ranks))
     return entries
+
+
+def combine_tile_cost(memory, waves):
+    traffic, grid = memory["traffic_bytes_per_block"], waves["grid_blocks"]
+    unknown = sorted(set(memory["unknown"] + waves["unknown"]))
+    count = waves["num_waves_estimate"]
+    score = (traffic + 1) * count if not unknown and traffic is not None and count is not None else None
+    return {
+        **memory,
+        **waves,
+        "traffic_bytes_grid_estimate": traffic * grid if traffic is not None and grid is not None else None,
+        "score": score,
+        "score_formula": "(traffic_bytes_per_block + 1) * num_waves_estimate",
+        "precision": "unknown" if unknown else "estimate",
+        "unknown": unknown,
+        "assumptions": memory["assumptions"] + waves["assumptions"] + ["ranking never adds rejections or truncates configs"],
+    }

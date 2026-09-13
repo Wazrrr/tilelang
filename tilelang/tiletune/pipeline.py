@@ -6,11 +6,8 @@ and reuse events model producer overlap. Instruction scheduling and CUDA
 dispatch remain estimates.
 """
 
-from .operation_work import compute_participants, consumer_threads, operation_work
-from .service import estimate_phase_cycles
-
-# Preserve the existing profile-validation import path for external callers.
-from .profile_schema import validate_performance_model as validate_performance_model
+from .compute import compute_participants, consumer_threads, operation_work
+from .compute import estimate_phase_cycles
 
 
 def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
@@ -36,7 +33,7 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
     consumer += barrier * pipeline["producer_copies_per_iteration"]
     model = "serial consumer loop"
     if pipeline["overlap_eligible"]:
-        from .tile_schedule import buffer_transition, repeat_transition
+        from .schedule import buffer_transition, repeat_transition
 
         copies = pipeline.get("producer_buffers")
         if not copies or pipeline.get("producer_schedule_unknown"):
@@ -71,19 +68,18 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
     }
 
 
-def analyze_pipeline(col, specialization, memory, pressure, performance_model=None, pass_configs=None):
-    from .analysis import _int
-    from .memory import loop_visits
-    from .ir_utils import in_loop
+def analyze_pipeline(col, memory, pressure, performance_model=None, pass_configs=None, *, loop, family_name, phase_labels):
+    from .src.ir_utils import _int
+    from .src.ir_utils import loop_visits
+    from .src.ir_utils import in_loop
 
-    loop = specialization.loop
     unknown = list(col.unknown)
     if performance_model and performance_model.get("profile_target", pressure.get("target_arch")) != pressure.get("target_arch"):
         unknown.append("device profile target does not match the analyzed kernel")
     phases = [
         {
             "operation": op.index,
-            "phase": specialization.phase(op),
+            "phase": phase_labels[op.index],
             "kind": op.kind,
             "dependencies": op.dependencies,
             "inside_loop": in_loop(op, loop),
@@ -93,9 +89,9 @@ def analyze_pipeline(col, specialization, memory, pressure, performance_model=No
         }
         for op in col.operations
     ]
-    from .reduction import reduction_work
-    from .cta_work import collect_cta_work
-    from .tile_schedule import collect_producer_buffers
+    from .compute import reduction_work
+    from .schedule import collect_cta_work
+    from .schedule import collect_producer_buffers
 
     participants = {p["operation"]: p["compute_participants"] for p in phases}
     layout_cache = {}
@@ -155,7 +151,7 @@ def analyze_pipeline(col, specialization, memory, pressure, performance_model=No
         return sum(values) if all(value is not None for value in values) else None
 
     result = {
-        "specialization": specialization.name,
+        "specialization": family_name,
         "phases": phases,
         "cta_work": distribution,
         "producer_buffers": producer_buffers,

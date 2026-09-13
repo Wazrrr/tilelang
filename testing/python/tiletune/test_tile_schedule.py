@@ -8,9 +8,9 @@ import tilelang.language as T
 from tilelang import tvm
 from tvm import tirx as tir
 from tilelang.tiletune import analyze_prim_func
-from tilelang.tiletune.cta_work import collect_cta_work, estimate_grid_cycles
-from tilelang.tiletune.reduction import fragment_reduction_work
-from tilelang.tiletune.tile_schedule import buffer_transition, repeat_transition
+from tilelang.tiletune.schedule import collect_cta_work, estimate_grid_cycles
+from tilelang.tiletune.compute import fragment_reduction_work
+from tilelang.tiletune.schedule import buffer_transition, repeat_transition
 from test_cost import LIMITS
 from test_modules import PROFILE, TARGET
 

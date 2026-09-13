@@ -12,8 +12,8 @@ from tvm.target import Target
 from tilelang.transform import PassContext
 
 
-def predict_warp_specialization(func, col, pressure, pass_configs, *, specialization):
-    from .analysis import _int
+def predict_warp_specialization(func, col, pressure, pass_configs, *, policy):
+    from .src.ir_utils import _int
 
     effective = pass_configs
     result = {
@@ -63,7 +63,6 @@ def predict_warp_specialization(func, col, pressure, pass_configs, *, specializa
     if isinstance(body, tir.SBlockRealize):
         body = body.block.body
     statements = list(body.seq) if isinstance(body, tir.SeqStmt) else [body]
-    policy = specialization.warp_specialization_policy()
     if policy.require_tile_calls and not all(isinstance(s, tir.Evaluate) and isinstance(s.value, tir.Call) for s in statements):
         return unknown("pipeline body is not a straight-line sequence of tile operations")
     pipeline = [op for op in col.operations if any(v.same_as(loop.loop_var) for v, _, _ in op.loops)]

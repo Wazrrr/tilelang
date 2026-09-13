@@ -7,7 +7,7 @@ operation; actual external accesses prevent duplicate traffic through softmax's
 multiple dependency paths. No fixed attention shape or phase cost is supplied.
 """
 
-from ..ir_utils import call_names, dense_gemms, main_loops
+from ..src.ir_utils import call_names, dense_gemms, main_loops
 from .base import KernelSpecialization, WarpSpecializationPolicy
 
 
@@ -84,16 +84,7 @@ class AttentionSpecialization(KernelSpecialization):
     def warp_specialization_policy(self):
         return ATTENTION_WARP_SPECIALIZATION
 
-    def memory_traffic(self, context):
-        from ..memory import analyze_memory
-
-        # A fused attention graph reuses Q and online state along multiple
-        # dependency paths. Charge each actual external tile access once, not
-        # once per backward demand path through both GEMMs and softmax.
-        return analyze_memory(
-            context.collector,
-            context.tile_propagation,
-            specialization=self,
-            actual_accesses=True,
-            pass_configs=context.pass_configs,
-        )
+    @property
+    def actual_memory_accesses(self):
+        # Charge each actual access once, rather than each backward demand path.
+        return True

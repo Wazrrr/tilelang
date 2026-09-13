@@ -6,7 +6,7 @@ and buffer schedule, using propagated input tiles for traffic. Positive-stage
 warp specialization currently supports straight-line copies and GEMM consumers.
 """
 
-from ..ir_utils import dense_gemms, main_loops
+from ..src.ir_utils import dense_gemms, main_loops
 from .base import KernelSpecialization, WarpSpecializationPolicy
 
 

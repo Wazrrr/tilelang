@@ -16,7 +16,7 @@ import torch
 import tilelang
 from tilelang.tiletune import analyze_prim_func, anchor_latency, profile_device, query_device_limits, rank_records
 from tilelang.tiletune.config import ANALYSIS_VERSION
-from tilelang.tiletune.device_profile import current_target
+from tilelang.tiletune.profiling.device_profile import current_target
 from examples.flash_attention.example_mha_fwd_bshd import flashattn
 
 TARGET = {"kind": "cuda", "arch": "sm_90a"}

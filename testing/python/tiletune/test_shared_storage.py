@@ -1,14 +1,14 @@
 """Reuse must respect loop iterations, simultaneous operands and explicit policy."""
 
 import tilelang.language as T
-from tilelang.tiletune.analysis import _Collector, _kernel_outputs, _propagate_tiles
-from tilelang.tiletune.memory import analyze_memory
-from tilelang.tiletune.shared_storage import shared_storage_plan
+from tilelang.tiletune.src.collector import _Collector
+from tilelang.tiletune.src.buffer_facts import collect_buffer_facts
+from tilelang.tiletune.shared_memory import analyze_shared_memory, shared_storage_plan
 
 
 def plan(func, **passes):
     col = _Collector(func)
-    memory = analyze_memory(col, _propagate_tiles(col, _kernel_outputs(col)))
+    memory = analyze_shared_memory(col, collect_buffer_facts(col))
     return shared_storage_plan(col, memory["shared_allocations"], passes)
 
 

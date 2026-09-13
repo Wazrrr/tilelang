@@ -3,7 +3,7 @@
 import pytest
 
 from tilelang.tiletune import TileTuneConfig, analyze_prim_func, check_compiler_resources
-from tilelang.tiletune.register_policy import analyze_register_policy
+from tilelang.tiletune.register_pressure import analyze_register_policy
 from tilelang.tiletune.families import AttentionSpecialization, GemmSpecialization
 from tilelang.autotuner.filters.launch import LaunchResourceInfo
 from tilelang.contrib.cuda_resource_info import parse_ptxas_output
@@ -25,6 +25,8 @@ POLICY = dict(
 
 
 def policy_result(budget=32, *, policy=None, tile=65920, lower=128, limits=None, family="attention", matched=True):
+    config = TileTuneConfig(attention_spill_budget_registers_per_thread=budget)
+    specialization = (AttentionSpecialization if family == "attention" else GemmSpecialization)(name=family, matched=matched)
     return analyze_register_policy(
         dict(
             warp_specialization=POLICY if policy is None else policy,
@@ -34,9 +36,9 @@ def policy_result(budget=32, *, policy=None, tile=65920, lower=128, limits=None,
             modeled_lower_bound=lower,
             tile_liveness=dict(peak_registers_per_block_estimate=tile, computing_threads_estimate=256),
         ),
-        TileTuneConfig(attention_spill_budget_registers_per_thread=budget),
-        (AttentionSpecialization if family == "attention" else GemmSpecialization)(name=family, matched=matched),
+        config,
         LIMITS if limits is None else limits,
+        spill_allowance=specialization.register_spill_allowance(config),
     )
 
 

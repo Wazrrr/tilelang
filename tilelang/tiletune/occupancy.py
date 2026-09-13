@@ -4,7 +4,7 @@ from math import prod
 
 
 def analyze_waves(col, memory, pressure, device_limits=None):
-    from .analysis import _int
+    from .src.ir_utils import _int
 
     unknown = []
     limits = dict(device_limits or {})

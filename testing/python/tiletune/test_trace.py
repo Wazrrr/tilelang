@@ -55,13 +55,14 @@ def test_trace_captures_intermediate_data_without_changing_analysis(tmp_path, fa
     assert checkpoint(text, "pressure.register_policy")["decision"] == after["pressure"]["decision"]
     assert checkpoint(text, "pipeline")["timing"] == after["modules"]["pipeline_overlap"]["timing"]
     assert checkpoint(text, "ranking")["score"] == checkpoint(text, "tile_cost")["score"] == after["tile_cost"]["score"]
-    assert "analysis.py:" in text and "engine.py:" in text
+    assert re.search(r"engine\.py:\d+ in analyze_kernel", text)
+    assert re.search(r"engine\.py:\d+ in run_modules", text)
 
 
 def test_disabled_trace_never_constructs_snapshots(monkeypatch):
     calls = []
-    monkeypatch.setattr("tilelang.tiletune.trace.collector_snapshot", lambda col: calls.append(col))
-    monkeypatch.setattr("tilelang.tiletune.trace.propagation_snapshot", lambda result: calls.append(result))
+    monkeypatch.setattr("tilelang.tiletune.engine.collector_snapshot", lambda col: calls.append(col))
+    monkeypatch.setattr("tilelang.tiletune.engine.propagation_snapshot", lambda result: calls.append(result))
     analyze_prim_func(gemm(), target=TARGET, device_limits=LIMITS)
     assert not calls
 
@@ -79,7 +80,7 @@ def test_failed_analysis_preserves_earlier_checkpoints(tmp_path, monkeypatch):
     def fail(*args):
         raise RuntimeError("test pressure failure")
 
-    monkeypatch.setattr("tilelang.tiletune.analysis._pressure", fail)
+    monkeypatch.setattr("tilelang.tiletune.register_pressure.analyze_register_pressure", fail)
     path = tmp_path / "failure.log"
     with pytest.raises(RuntimeError, match="test pressure failure"):
         analyze_prim_func(gemm(), {"trace_path": str(path)}, target=TARGET)

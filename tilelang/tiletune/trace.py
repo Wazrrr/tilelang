@@ -84,7 +84,7 @@ def _native_value(value):
     from tilelang import tvm
     import tvm_ffi
     from tvm import tirx as tir
-    from .analysis import Region
+    from .src.ir import Region
 
     if isinstance(value, tir.Buffer):
         return _buffer(value)

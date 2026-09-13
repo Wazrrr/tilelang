@@ -8,7 +8,7 @@ import time
 from tilelang.utils.autotune_timing import timed_autotune_stage
 from .analysis import analyze_prim_func
 from .config import ANALYSIS_VERSION, TileTuneConfig, TileTuneReject
-from .budget import resolve_register_budget
+from .register_pressure import resolve_register_budget
 from .ranking import rank_records, select_top_k
 
 

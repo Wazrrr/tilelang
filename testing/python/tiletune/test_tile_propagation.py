@@ -4,7 +4,8 @@ import tilelang.language as T
 from tvm import tirx as tir
 from tvm.arith import Analyzer
 from tilelang.tiletune import analyze_prim_func
-from tilelang.tiletune.analysis import _Collector, _kernel_outputs, _propagate_tiles
+from tilelang.tiletune.src.collector import _Collector
+from tilelang.tiletune.src.propagation import _kernel_outputs, _propagate_tiles
 
 
 def tiled_gemm(repeated=False):
@@ -27,17 +28,17 @@ def tiled_gemm(repeated=False):
 
 
 def test_one_tile_traversal_preserves_accumulator_proof(monkeypatch):
-    from tilelang.tiletune import analysis
+    from tilelang.tiletune import engine
 
     calls = []
-    propagate = analysis._propagate_tiles
+    propagate = engine._propagate_tiles
 
     def observe(col, outputs):
         result = propagate(col, outputs)
         calls.append(result)
         return result
 
-    monkeypatch.setattr(analysis, "_propagate_tiles", observe)
+    monkeypatch.setattr(engine, "_propagate_tiles", observe)
     result = analyze_prim_func(tiled_gemm(), {"register_cap": 7})
     assert len(calls) == 1
     assert "propagation" not in result

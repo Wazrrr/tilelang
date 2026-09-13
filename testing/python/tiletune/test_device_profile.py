@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tilelang.tiletune import analyze_prim_func, anchor_latency, load_device_profile, profile_device, rank_records, TileTuneConfig
-from tilelang.tiletune import device_profile
+from tilelang.tiletune.profiling import device_profile
 from test_cost import LIMITS
 from test_modules import PROFILE, TARGET, attention
 from test_pipeline import matrix_pipeline
@@ -219,8 +219,8 @@ def test_gpu_fp8_example_elaborates_once_with_inferred_outputs(dtype, grouped):
 
 def test_gpu_wgmma_probe_has_nonzero_input_dependent_odd_iteration_result():
     import torch
-    from tilelang.tiletune.device_profile import _benchmark
-    from tilelang.tiletune.device_probes import tensor_core
+    from tilelang.tiletune.profiling.device_profile import _benchmark
+    from tilelang.tiletune.profiling.device_probes import tensor_core
 
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Hopper required")
@@ -240,7 +240,7 @@ def test_gpu_wgmma_probe_has_nonzero_input_dependent_odd_iteration_result():
 def test_gpu_reduction_primitives_execute_local_or_lane_work(kind):
     import torch
     import tilelang
-    from tilelang.tiletune.device_probes import reduction_primitive
+    from tilelang.tiletune.profiling.device_probes import reduction_primitive
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")

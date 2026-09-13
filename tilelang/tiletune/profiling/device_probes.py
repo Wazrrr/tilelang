@@ -84,10 +84,6 @@ def memory_copy(elements):
     return main
 
 
-def tma_roundtrip(iterations, blocks):
-    return tile_copy_roundtrip(iterations, blocks, "tma")
-
-
 def tile_copy_roundtrip(iterations, blocks, instruction="sync"):
     threads = 128
 

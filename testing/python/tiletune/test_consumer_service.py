@@ -101,7 +101,7 @@ def test_producers_do_not_count_as_scalar_consumers():
 def test_gpu_consumer_probe_thread_domains(threads):
     import torch
     import tilelang
-    from tilelang.tiletune.device_probes import reduction_primitive
+    from tilelang.tiletune.profiling.device_probes import reduction_primitive
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")

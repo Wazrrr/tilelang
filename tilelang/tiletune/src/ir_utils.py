@@ -1,6 +1,24 @@
-"""Read-only IR queries shared by family recognition and resource models."""
+"""Read-only arithmetic, control-flow and operation queries."""
 
+from math import prod
+from tilelang import tvm
 from tvm import tirx as tir
+from tvm.arith import Analyzer
+
+
+def _int(expr):
+    try:
+        return int(Analyzer().simplify(expr))
+    except (TypeError, ValueError):
+        return None
+
+
+def _exclusive(a, b):
+    return any(i == j and x != y for i, x in a.branches for j, y in b.branches)
+
+
+def _domains(loops):
+    return {v: tvm.arith.IntervalSet(r.min, r.min + r.extent - 1) for v, r, _ in loops}
 
 
 def resolve_pass_configs(func, pass_configs):
@@ -35,3 +53,18 @@ def call_names(op):
             op.metadata.value, lambda n: names.append(str(n.op.name)) if isinstance(n, tir.Call) and hasattr(n.op, "name") else None
         )
     return names
+
+
+def loop_visits(loops):
+    expression = prod(r.extent for _, r, kind in loops if kind != "4")
+    value = _int(expression)
+    if value is not None:
+        return {"min": value, "max": value, "expression": str(expression), "precision": "exact"}
+    bounds = Analyzer().int_set(expression, _domains(loops))
+    lower, upper = _int(bounds.min_value), _int(bounds.max_value)
+    return {
+        "min": lower,
+        "max": upper,
+        "expression": str(expression),
+        "precision": "conservative" if lower is not None and upper is not None else "unknown",
+    }

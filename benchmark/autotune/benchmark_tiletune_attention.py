@@ -18,7 +18,7 @@ from examples.flash_attention.example_mha_tiletune import (
     reference_attention,
 )
 from tilelang.tiletune import load_device_profile
-from tilelang.tiletune.device_profile import current_target, _identity
+from tilelang.tiletune.profiling.device_profile import current_target, _identity
 from tilelang.tiletune.config import ANALYSIS_VERSION
 
 

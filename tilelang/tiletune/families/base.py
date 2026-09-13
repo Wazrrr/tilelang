@@ -1,15 +1,14 @@
-"""Family contract and shared implementations of the analysis stages.
+"""Family recognition results and analysis policy inputs.
 
-The engine calls these stages for every family. Subclasses describe the actual
-graph and supply policy differences; liveness, service-time equations and buffer
-scheduling remain common. The generic fallback uses the same conservative dense
+Subclasses describe the actual graph and supply policy differences. The engine
+calls shared analysis stages directly. The generic fallback uses the same dense
 consumer restrictions as GEMM when predicting warp specialization.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from ..ir_utils import in_loop
+from ..src.ir_utils import in_loop
 
 
 @dataclass(frozen=True)
@@ -29,16 +28,9 @@ class KernelSpecialization:
     evidence: list = field(default_factory=list)
     matched: bool = True
 
-    def register_pressure(self, context, pressure):
-        """Estimate live storage from actual reads/writes, including loop state.
-
-        The proven accumulator lower bound is already in ``pressure``. This
-        conservative liveness estimate does not strengthen that proof.
-        """
-        from ..liveness import analyze_live_tiles
-
-        pressure["tile_liveness"] = analyze_live_tiles(context.collector, self)
-        return pressure
+    @property
+    def actual_memory_accesses(self):
+        return False
 
     def register_spill_allowance(self, config):
         """Soft demand margin; physical register capacity is never enlarged."""
@@ -48,28 +40,6 @@ class KernelSpecialization:
         from .gemm import GEMM_WARP_SPECIALIZATION
 
         return GEMM_WARP_SPECIALIZATION
-
-    def warp_specialization(self, context, pressure):
-        """Combine family consumer restrictions with the shared Hopper policy."""
-        from ..warp_specialization import predict_warp_specialization
-
-        return predict_warp_specialization(context.func, context.collector, pressure, context.pass_configs, specialization=self)
-
-    def memory_traffic(self, context):
-        """Default accounting uses backward-propagated external input tiles."""
-        from ..memory import analyze_memory
-
-        return analyze_memory(context.collector, context.tile_propagation, specialization=self, pass_configs=context.pass_configs)
-
-    def pipeline_overlap(self, context, memory, pressure):
-        """Time captured operations in program order using the shared model.
-
-        ``phase`` provides family labels. Work, copies, buffer lifetimes, loop
-        bounds and stage depth come from the collector, not a family template.
-        """
-        from ..pipeline import analyze_pipeline
-
-        return analyze_pipeline(context.collector, self, memory, pressure, context.config.performance_model, context.pass_configs)
 
     def phase(self, op):
         """Label the same operation for register-liveness and timing reports."""

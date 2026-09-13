@@ -26,7 +26,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.tiletune.config import ANALYSIS_VERSION
-from tilelang.tiletune.device_profile import current_target, _identity, load_device_profile
+from tilelang.tiletune.profiling.device_profile import current_target, _identity, load_device_profile
 
 
 TILES = [(64, 64), (64, 128), (128, 128), (128, 256), (256, 256)]
