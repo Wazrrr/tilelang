@@ -1,139 +1,97 @@
 # FlashAttention experiments
 
-Run commands from the repository root with TileLang, PyTorch, and A100 or Hopper CUDA GPUs.
-Every invocation creates a UTC timestamp directory under `--output`. Repeat a
-command to retain another run, or use `--run-name v2` for a named version.
-Existing run directories are rejected.
+Forward attention with online softmax, in causal and noncausal modes.
 
-Both experiment scripts use [kernel.py](kernel.py). The kernel uses FP16 BSHD inputs and a chunked FP32 reference. Both causal and
-noncausal attention use the same 128-configuration grid and compile pass settings.
-Kernel construction is serialized; lowering and compilation remain parallel.
+## Files
 
-## System experiments
-
-[system/run.py](system/run.py) runs the same five cases as the GEMM experiment.
-TileTune is disabled in these cases, and the whole supplied grid is tuned.
-
-| Variant | Compile/benchmark overlap | Grouped compilation | Multi-GPU benchmarking |
-| --- | --- | --- | --- |
-| `baseline` | Off | Off | Off |
-| `pipeline` | On | Off | Off |
-| `grouped` | Off | On | Off |
-| `multi_gpu` | Off | Off | On |
-| `combined` | On | On | On |
-
-Each command below runs all five variants sequentially in separate processes:
-
-```bash
-# Noncausal.
-CUDA_VISIBLE_DEVICES=0,1 python -m experiments.flash_attention.system.run \
-    --variant all --benchmark-devices 0 1 --group-size 2 \
-    --batch 1 --heads 16 --sequence 4096 --dim 128 \
-    --output experiments/results/flash_attention/system_noncausal
-
-# Causal.
-CUDA_VISIBLE_DEVICES=0,1 python -m experiments.flash_attention.system.run \
-    --variant all --benchmark-devices 0 1 --group-size 2 \
-    --batch 1 --heads 16 --sequence 4096 --dim 128 --causal \
-    --output experiments/results/flash_attention/system_causal
+```text
+flash_attention/
+├── README.md          Cases, knobs, commands, and results
+├── cases.py           Train/validation/development/final shapes
+├── spaces.py          Current/expanded/large configuration domains and rules
+├── kernel.py          Kernel builder and input-generation interface
+├── reference.py       Mathematical reference
+├── kernels/           Implemented schedules
+├── tiletune/run.py    Shared comparison protocol for this family
+└── census.py          Compilation/correctness audit
 ```
 
-For one case, replace `--variant all` with a variant from the table. Baseline,
-pipeline, and grouped cases need only one visible GPU and `--benchmark-devices 0`.
-The multi-GPU and combined cases require at least two visible GPUs; ordinals are
-logical indices after `CUDA_VISIBLE_DEVICES` is applied. Use matching GPU models.
-Multi-GPU benchmarking distributes candidates, not the work of one kernel.
+Implementations: kernels/baseline.py, kernels/tiled.py. `kernel.make_case(workload)` supplies the suite's
+builder, inputs, reference, output positions, and numerical tolerances.
+Configuration generation imports only the Python standard library.
 
-All variants use the same seeded inputs, reference, and correctness checker.
-Reference outputs are prepared on each benchmark device before tuning. Caches
-are disabled; input tensors are reused by the input supplier. Defaults are
-4 compilation workers, 10 warmup repetitions, 100 benchmark repetitions, seed
-123, and the `event` backend. Tuning wall time excludes input/reference setup.
-The comparison reports baseline wall time divided by each variant's wall time.
-Compilation stage work totals are not parallel wall times.
+## Cases
 
-## TileTune comparison
+All named-suite cases use FP16. Smoke uses the first development case.
 
-[tiletune/run.py](tiletune/run.py) supports `--method brute_force`, `tiletune`,
-and `all`. TileTune defaults to `--top-k 20`. Both methods use the same kernel,
-inputs, correctness check, and supplied configuration grid. Carver is not part
-of this experiment: its current comparison adapter is specific to FP16/BF16 GEMM.
+| Split | Case | Parameters |
+| --- | --- | --- |
+| Training | `attention_train_a` | batch=1, heads=2, sequence=256, dim=64, causal=false |
+| Training | `attention_train_b` | batch=1, heads=2, sequence=384, dim=128, causal=true |
+| Validation | `attention_validation` | batch=1, heads=2, sequence=448, dim=64, causal=true |
+| Development | `attention_noncausal` | batch=1, heads=4, sequence=512, dim=64, causal=false |
+| Development | `attention_causal` | batch=1, heads=4, sequence=640, dim=128, causal=true |
+| Final | `attention_noncausal` | batch=1, heads=4, sequence=768, dim=64, causal=false |
+| Final | `attention_causal` | batch=1, heads=4, sequence=1152, dim=128, causal=true |
 
-```bash
-# Noncausal: compare exhaustive search with TileTune's fixed top-20.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.flash_attention.tiletune.run \
-    --method all --top-k 20 \
-    --batch 1 --heads 16 --sequence 4096 --dim 128 \
-    --device-profile experiments/profiles/h200-flash_attention.json \
-    --output experiments/results/flash_attention/comparison_noncausal
+## Configuration space
 
-# Causal: compare exhaustive search with TileTune's fixed top-20.
-CUDA_VISIBLE_DEVICES=0 python -m experiments.flash_attention.tiletune.run \
-    --method all --top-k 20 \
-    --batch 1 --heads 16 --sequence 4096 --dim 128 --causal \
-    --device-profile experiments/profiles/h200-flash_attention.json \
-    --output experiments/results/flash_attention/comparison_causal
-```
+Edit `spaces.py` to change these schedule parameters: **block_M, block_N; num_stages; threads; qk_policy, pv_policy; copy_width; implementation**.
+Shapes and dtype belong in `cases.py`; they do not multiply the tuning pool.
+Structural checks and proven aliases live with the family. Generic grid/hash
+bookkeeping is shared through `experiments/common/`.
 
-`--method all` runs TileTune before brute force, in separate processes. TileTune
-measures or loads a compatible device profile, freezes its `pipeline_time`
-ranking, then compiles and benchmarks at most K eligible configurations.
-Unscored and pressure-rejected candidates are excluded from top-K. Failed
-selected candidates remain in the report and are not replaced. Brute force
-benchmarks every candidate that compiles successfully.
+Current declared pools for the first final case:
 
-The chosen winners are recompiled and remeasured in shuffled order with the same
-inputs. The comparison reports the median of 5 measurements and saves every
-sample; `--validation-repeats` changes this count. Validation never changes the
-selected winner. Device-profile preparation and final validation are reported
-separately from tuning time; top-K analysis and selection are included in tuning.
+| Preset | A100 | H200 |
+| --- | ---: | ---: |
+| current | 54 | 54 |
+| expanded | 1044 | 1854 |
+| large | 5004 | 9054 |
 
-The comparison also reports `top_k_oracle_retained_performance` (Oracle@K): the
-best exhaustive latency divided by the best exhaustive latency inside the frozen
-selected set. This evaluates shortlist quality using one measurement table.
-Candidates without successful exhaustive measurements are excluded, and their
-coverage is reported. Final validation and Oracle@K use different measurements.
+Counts precede compilation and correctness checks. Blackwell and MI355X grids
+are declared but need native device validation. Ascend needs a device manifest
+with native configuration grids and an external worker. Native target support
+is tracked in [the validation report](../validation.md).
 
-To reproduce the previous exhaustive TileTune ranking experiment, use
-`--method tiletune --top-k all`. This keeps `report_only` analysis and benchmarks
-all successfully analyzed and compiled configurations, including candidates the
-model would reject for pressure. The winner summary retains its predicted rank
-and tie interval, or null ranks and its tier when the model cannot score it.
-
-TileTune defaults to CUDA graphs, streaming-memory model rates, and grouped
-compilation disabled (`--group-size 1`). Set `--group-size 2` to enable grouping
-equally for both methods. `--backend event` and `--memory-regime cached` are
-available. Primitive profiles are fixed before candidate timing and reused when
-compatible; candidate latencies never fit or alter the model. Use a new profile
-path after an incompatible device or native build change.
-
-Correctness uses the attention example's finite-output check and elementwise
-`rtol=0.02`, `atol=0.02` comparison against the FP32 reference. The soft register
-allowance defaults to 32 registers per computing thread; change it with
-`--spill-budget-registers-per-thread`. This never enlarges physical capacity.
-Compiler spill and local-memory usage are recorded without byte limits.
-
-Reported TFLOPS count useful QK and AV work, excluding softmax: `4*B*H*D*S*S`
-for noncausal attention and `4*B*H*D*S*(S+1)/2` for causal attention. This is
-useful-work throughput, not a count of every executed instruction.
-
-## Results and small runs
-
-Every individual run writes `experiment.json`, `summary.json`, `benchmarks.tsv`,
-and `timings.tsv`. TileTune comparison methods also write `outcomes.json`, and
-the TileTune method writes its complete analysis and ranking to `tiletune.json`.
-An `all` run contains method/variant subdirectories and `comparison.json`.
-TileTune comparisons additionally save child logs and `validation_timings.tsv`.
-
-`--workers`, `--warmup`, `--rep`, `--timeout`, and `--seed` control run size.
-`--config-indices` selects a subset and preserves its original grid indices.
-Ranks and the exhaustive winner then refer only to that subset.
+## Commands
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m experiments.flash_attention.tiletune.run \
-    --method all --top-k 1 --batch 1 --heads 1 --sequence 256 --dim 128 --config-indices 81 85 87 \
-    --workers 2 --warmup 1 --rep 2 --validation-repeats 2 \
-    --output experiments/results/flash_attention/smoke
+# Inspect the final shapes and complete large configuration pools, without a GPU.
+python -m experiments.flash_attention.tiletune.run --suite final --device ampere --plan
+
+# Analyze, compile, and check up to 16 smoke configurations, without latency comparison.
+python -m experiments.flash_attention.tiletune.run --suite smoke --device ampere \
+  --output experiments/results/flash_attention/smoke-v1
+
+# Compare TileTune, random, XGBoost, and exhaustive search on development cases.
+python -m experiments.flash_attention.tiletune.run --suite development --device ampere \
+  --output experiments/results/flash_attention/development-v1
+
+# Audit expanded development pools in resumable shards.
+python -m experiments.flash_attention.census --device ampere --config-space expanded \
+  --wait-idle --output experiments/results/flash_attention/census-v1
+
+# Run final cases after the development gates pass.
+python -m experiments.flash_attention.tiletune.run --suite final --device ampere \
+  --development-report experiments/results/flash_attention/development-v1/acceptance.json \
+  --output experiments/results/flash_attention/final-v1
 ```
 
-See the [shared experiment guide](../README.md) for the directory layout.
+Use `--plan` on the census to inspect its workloads, counts, and original indices.
+Use `--resume` to continue completed census shards with the same inputs. The study
+runner verifies existing artifacts when the same output directory is supplied.
+Use a new directory after source or study-input changes.
+
+The study uses K=20, TileTune `pipeline_time`, 10% XGBoost training/validation
+samples, and seven shuffled winner checks. Final uses three seeds. The shared
+[experiment overview](../README.md) documents the full protocol and output files.
+A family acceptance result covers this family's requested cases and targets;
+complete five-target acceptance is reported by the full matrix study.
+
+## Existing fixed-grid and system experiments
+
+The existing `system/run.py` commands remain available. Existing tuning commands
+without named-suite options retain their original fixed-grid defaults. The old
+runner is in `tiletune/legacy.py`; use `--legacy --help` to see its arguments.
+See [legacy.md](legacy.md) for the complete system and fixed-grid commands.

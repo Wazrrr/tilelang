@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "repository": "https://github.com/tile-ai/tilelang-ascend",
+  "revision": "2a06f3e7ca673e6cc162c88c86d65626b5ca9b81",
+  "target": "Ascend910B",
+  "validated": false,
+  "required_runtime_observations": ["device_model", "cann_version", "torch_version", "torch_npu_version", "compiler_revision"]
+}

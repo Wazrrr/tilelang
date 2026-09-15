@@ -1,0 +1,120 @@
+"""Suite membership, original identities, and acceptance without measurements."""
+
+from pathlib import Path
+import subprocess
+import sys
+
+
+from experiments.portable.acceptance import assess_seed
+from experiments.portable.spec import Device, TARGETS, Workload
+from experiments.portable.subsets import pairwise_subset
+from experiments.portable.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
+
+
+def test_smoke_uses_same_cases_and_three_fixed_budgets():
+    assert core_cases("smoke") == core_cases("development")[::2]
+    assert len(core_cases("final")) == len(core_cases("development")) == 8
+    assert {w.dtype for w in core_cases("final")} == {"float16"}
+    for w in core_cases("final"):
+        if w.op == "kda_chunk_o":
+            assert w.parameters["sequence"] % w.parameters["chunk_size"] == 0
+    assert BUDGETS["final"]["seeds"] == [123, 456, 789]
+    assert core_cases("full") == core_cases("final")
+    assert BUDGETS["full"]["configurations"] is None
+    assert "mi355x" in CORE_TARGETS and "mi308" not in CORE_TARGETS
+    assert TARGETS["mi355x"]["mcpu"] == "gfx950"
+
+
+def test_pairwise_is_deterministic_and_preserves_indices():
+    w = Workload("softmax", "softmax", dict(rows=7, columns=93))
+    d = Device("ampere", TARGETS["ampere"])
+    configs = [dict(block_rows=r, threads=t) for r in [1, 2, 4] for t in [64, 128, 256]]
+    first = pairwise_subset(w, d, configs, 5)
+    reverse = pairwise_subset(w, d, configs[::-1], 5)
+    assert set(first["config_ids"]) == set(reverse["config_ids"])
+    assert first["indices"] == sorted(first["indices"])
+    assert first == pairwise_subset(w, d, configs, 5)
+    assert first["actual_pool_size"] == 5
+
+
+def test_equivalent_defaults_never_fill_a_budget():
+    w = Workload("gemm", "gemm", dict(m=128, n=128, k=128))
+    d = Device("ampere", TARGETS["ampere"])
+    c = dict(block_m=64, block_n=64, block_k=32, threads=128, stages=0)
+    subset = pairwise_subset(w, d, [c, dict(c, warp_policy="square", swizzle_panel=0)], 16)
+    assert subset["indices"] == [0]
+    assert subset["actual_pool_size"] == 1
+    assert subset["aliases"] == [dict(index=1, representative=0)]
+
+
+def test_no_cube_grid_is_invented_and_no_device_is_removed():
+    d = Device("ascend910b", TARGETS["ascend910b"])
+    plan = study_plan("smoke", [d])
+    assert len(plan["devices"]) == 1
+    assert len(plan["splits"]["test"]) == 4
+    assert "ascend910b" in plan["unavailable"]
+    assert plan["subsets"]["ascend910b"] == {}
+
+
+def test_missing_case_fails_even_if_other_seven_are_good():
+    cases = [w.to_dict() for w in core_cases("final")]
+    rows = [
+        dict(
+            workload=w,
+            methods=dict(tiletune=dict(status="completed", correctness="passed", tuning_seconds=1), brute_force=dict(tuning_seconds=2)),
+            diagnostics=dict(tiletune=dict(correct_score_coverage=0.95, curves={"20": dict(oracle_at_k=0.98)})),
+            validation=dict(tiletune=dict(samples_ms=[1] * 7)),
+        )
+        for w in cases
+    ]
+    assert assess_seed(cases, rows)["accepted"]
+    assert not assess_seed(cases, rows[:-1])["accepted"]
+    rows[0]["diagnostics"]["tiletune"]["correct_score_coverage"] = 0.89
+    assert not assess_seed(cases, rows)["accepted"]
+
+
+def test_planning_has_no_compiler_runtime_imports():
+    root = str(Path(__file__).resolve().parents[3])
+    code = f"import sys; sys.path.insert(0, {root!r}); from experiments.portable.suite import core_cases; assert len(core_cases('final')) == 8; assert not any(k.split('.')[0] in ('tilelang', 'tvm', 'torch') for k in sys.modules)"
+    subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)
+
+
+def test_comparison_retains_per_split_config_overrides(tmp_path, capsys):
+    from dataclasses import replace
+    import json
+    from experiments.portable.compare import main
+
+    cases = [replace(core_cases("smoke")[0], name=name).to_dict() for name in ("training", "validation", "test")]
+    for i, item in enumerate(cases):
+        item["parameters"] = dict(m=128 + i * 128, n=128, k=128)
+    configs = [dict(block_m=32, block_n=32, block_k=32, stages=0, threads=128)]
+    device = Device("ampere", TARGETS["ampere"], configs={w["name"]: configs for w in cases}, subsets={w["name"]: [0] for w in cases})
+    path = tmp_path / "splits.json"
+    path.write_text(
+        json.dumps(dict(version=1, devices=[device.to_dict()], splits=dict(zip(("train", "validation", "test"), [[w] for w in cases]))))
+    )
+    assert main(["--split-manifest", str(path), "--plan"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["devices"][0]["configs"] == device.configs
+    assert plan["devices"][0]["subsets"] == device.subsets
+
+
+def test_protocol_versions_preserve_archived_wire_identity():
+    import hashlib
+    import json
+    from experiments.portable.run import make_request, validate_request
+
+    w = core_cases("smoke")[0]
+    d = Device("ampere", TARGETS["ampere"])
+    request = make_request(w, d, dict(method="analyze"))
+    assert request["version"] == 1
+    assert validate_request(request) == (w, d)
+    request = make_request(w, d, dict(method="smoke"))
+    assert request["version"] == 2
+    assert validate_request(request) == (w, d)
+    # Early archived requests may use v1 with the same optional fields. Hash
+    # the original payload rather than silently upgrading it during reads.
+    request["version"] = 1
+    payload = {k: v for k, v in request.items() if k != "request_id"}
+    request["request_id"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    assert validate_request(request) == (w, d)

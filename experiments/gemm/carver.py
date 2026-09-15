@@ -1,15 +1,10 @@
 """Evaluate the repository's legacy Carver policy on an explicit GEMM grid."""
 
-from tilelang.carver.arch import CUDA
-from tilelang.carver.matmul_analysis import get_tensorized_func_and_tags
-from tilelang.carver.roller.policy import TensorCorePolicy
-from tilelang.carver.template import MatmulTemplate
-from tilelang.tiletune.ranking import rank_records, select_top_k
-from tvm.target import Target
-
 
 def model_target(target):
     """The old model accepts sm_90; kernels still compile for the actual sm_90a."""
+    from tvm.target import Target
+
     target = dict(Target(target).export())
     if target.get("arch") == "sm_90a":
         target["arch"] = "sm_90"
@@ -17,6 +12,13 @@ def model_target(target):
 
 
 def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True):
+    from tvm.target import Target
+    from tilelang.carver.arch import CUDA
+    from tilelang.carver.matmul_analysis import get_tensorized_func_and_tags
+    from tilelang.carver.roller.policy import TensorCorePolicy
+    from tilelang.carver.template import MatmulTemplate
+    from tilelang.tiletune.ranking import rank_records, select_top_k
+
     arch = CUDA(model_target(target))
     template = MatmulTemplate(
         M=m, N=n, K=k, trans_A=transpose_a, trans_B=transpose_b, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32"
@@ -77,3 +79,41 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
             "Candidate generation and reduction-step expansion are disabled for this common-grid comparison.",
         ],
     )
+
+
+def carver_support_reason(workload, device):
+    if device.target["kind"] != "cuda":
+        return "the existing Carver comparison adapter requires CUDA"
+    if workload.op != "gemm" or workload.dtype not in ("float16", "bfloat16"):
+        return "the existing Carver comparison adapter supports FP16/BF16 GEMM only"
+    if workload.parameters.get("batch", 1) != 1 or workload.parameters.get("epilogue", "none") != "none":
+        return "the existing Carver comparison adapter has no batched or fused-epilogue model"
+    from experiments.common.spec import configurations
+
+    if any(set(c) - {"block_m", "block_n", "block_k", "stages", "threads"} for c in configurations(workload, device)):
+        return "the existing Carver adapter does not model the expanded scheduling parameters"
+    return None
+
+
+def carver_rank(workload, device, configs, top_k):
+    reason = carver_support_reason(workload, device)
+    if reason:
+        raise ValueError(reason)
+    aliases = dict(block_m="block_M", block_n="block_N", block_k="block_K", stages="num_stages", threads="thread_num")
+    grid = [{aliases[key]: value for key, value in config.items()} for config in configs]
+    p = workload.parameters
+    report = rank_configs(
+        grid,
+        m=p["m"],
+        n=p["n"],
+        k=p["k"],
+        dtype=workload.dtype,
+        target=device.target,
+        top_k=top_k,
+        transpose_a=p.get("transpose_a", False),
+        transpose_b=p.get("transpose_b", False),
+    )
+    for record, config in zip(report["configs"], configs):
+        record["config"] = config
+    report.update(metric="carver_traffic_waves", score_units="byte-waves")
+    return report

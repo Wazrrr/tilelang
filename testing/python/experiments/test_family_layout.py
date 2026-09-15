@@ -1,0 +1,136 @@
+"""Family entry points share the frozen protocol and preserve old artifacts."""
+
+import importlib
+from dataclasses import make_dataclass
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+from experiments.common.acceptance import aggregate_study
+from experiments.common.spec import Device, TARGETS
+from experiments.suite import CORE_FAMILIES, core_cases, study_plan
+
+
+def test_standard_studies_support_runtimes_without_optional_exploration():
+    from experiments.common.run import exploration_options
+
+    old_config = make_dataclass("OldConfig", [])
+    assert exploration_options({"seed": 456}, old_config) == {}
+    with pytest.raises(ValueError, match="runtime with exploration support"):
+        exploration_options({"exploration_fraction": 0.2}, old_config)
+    new_config = make_dataclass("NewConfig", [("exploration_fraction", float), ("exploration_seed", int)])
+    assert exploration_options({"exploration_fraction": 0.2, "seed": 456, "selection_seed": 789}, new_config) == dict(
+        exploration_fraction=0.2, exploration_seed=789
+    )
+
+
+@pytest.mark.parametrize("family", CORE_FAMILIES)
+def test_family_command_plans_without_a_compiler_or_runtime(family):
+    root = str(Path(__file__).resolve().parents[3])
+    code = f"""
+import sys
+sys.path.insert(0, {root!r})
+from experiments.{family}.tiletune.run import main
+assert main(['--suite', 'smoke', '--device', 'ampere', '--config-space', 'current', '--plan']) == 0
+assert not any(name.split('.')[0] in ('tilelang', 'torch', 'tvm', 'xgboost') for name in sys.modules)
+"""
+    result = subprocess.run([sys.executable, "-I", "-S", "-c", code], capture_output=True, text=True, check=True)
+    plan = json.loads(result.stdout)
+    assert plan["families"] == [family]
+    assert len(plan["splits"]["test"]) == 1
+    assert not plan["splits"]["train"]
+    assert len(plan["subsets"]["ampere"]) == 1
+
+
+@pytest.mark.parametrize("family", CORE_FAMILIES)
+def test_family_census_uses_its_declared_cases(family, capsys):
+    runner = importlib.import_module(f"experiments.{family}.census")
+    assert runner.main(["--config-space", "current", "--plan"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert {c["workload"]["name"] for c in plan["cases"]} == {w.name for w in core_cases("development", [family])}
+    assert all(c["indices"] == list(range(c["space"]["candidate_count"])) for c in plan["cases"])
+
+
+def test_family_selection_for_all_seeds_precedes_the_oracle(tmp_path, monkeypatch):
+    from experiments import suite
+    from experiments.softmax.cases import training_cases
+
+    cases = core_cases("final", ["softmax"]) + training_cases()
+    device = Device(
+        "ampere",
+        TARGETS["ampere"],
+        performance_model={"test": True},
+        configs={w.name: [dict(block_rows=1, threads=128)] for w in cases},
+    )
+    plan = study_plan("final", [device], families=["softmax"])
+    commands = []
+    monkeypatch.setattr(suite.subprocess, "run", lambda command, **kwargs: commands.append(command))
+    assert suite.execute_comparison(plan, tmp_path, {}) == 1  # No measured results were supplied.
+    assert [c[c.index("--phase") + 1] for c in commands] == ["selection"] * 3 + ["oracle"] * 3
+    assert all(c[1:3] == ["-m", "experiments.common.comparison"] for c in commands)
+    assert all(c[c.index("--budget-fraction") + 1] == "1" for c in commands)
+    manifest = json.loads((tmp_path / "ampere-splits.json").read_text())
+    assert [len(manifest["splits"][s]) for s in ("train", "validation", "test")] == [2, 1, 2]
+    assert {w["op"] for split in manifest["splits"].values() for w in split} == {"softmax"}
+
+
+def good_comparison(case):
+    return dict(
+        workload=case,
+        methods=dict(
+            tiletune=dict(status="completed", correctness="passed", tuning_seconds=1),
+            brute_force=dict(tuning_seconds=2),
+        ),
+        diagnostics=dict(tiletune=dict(correct_score_coverage=0.95, curves={"20": dict(oracle_at_k=0.98)})),
+        validation=dict(tiletune=dict(samples_ms=[1] * 7)),
+    )
+
+
+def test_family_acceptance_has_local_costs_and_cannot_certify_the_matrix(tmp_path):
+    cases = [w.to_dict() for w in core_cases("final", ["softmax"])]
+    plan = dict(suite="final", devices=[dict(name="ampere")], budget=dict(seeds=[123]), splits=dict(test=cases), unavailable={})
+    result = tmp_path / "123/ampere/comparison.json"
+    result.parent.mkdir(parents=True)
+    result.write_text(json.dumps(dict(results=[good_comparison(c) for c in cases])))
+    profile = tmp_path / "preparation/ampere/result.json"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(json.dumps(dict(preparation_seconds=2, status="profiled")))
+    report = aggregate_study(plan, tmp_path)
+    assert report["accepted"] and report["scope"] == "families"
+    assert not report["five_target_accepted"]
+    costs = report["targets"]["ampere"]["seeds"]["123"]["costs"]["tiletune"]
+    assert costs["online_seconds"] == 2
+    assert costs["amortized_seconds_per_case"] == 2
+    # The complete case set still requires all five devices for final acceptance.
+    plan["splits"]["test"] = [w.to_dict() for w in core_cases("final")]
+    result.write_text(json.dumps(dict(results=[good_comparison(c) for c in plan["splits"]["test"]])))
+    assert not aggregate_study(plan, tmp_path)["accepted"]
+
+
+def test_xgboost_fingerprints_family_implementation_sources():
+    from experiments._common import source_hashes
+    from experiments.xgboost.data import domain, make_context
+
+    w = core_cases("final", ["gemm"])[0]
+    sources = source_hashes("experiments/common/kernels.py")
+    args = (w, "portable.gemm", TARGETS["ampere"], "A100", "event")
+    before = make_context(*args, sources)
+    sources["experiments/gemm/kernels/tiled.py"] = "changed implementation"
+    assert domain(before) != domain(make_context(*args, sources))
+    del sources["experiments/gemm/reference.py"]
+    with pytest.raises(ValueError, match="missing kernel source fingerprints"):
+        make_context(*args, sources)
+
+
+def test_legacy_audit_script_can_run_directly():
+    root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(root / "experiments/portable/audit_model.py"), "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--output" in result.stdout

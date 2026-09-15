@@ -10,6 +10,10 @@ is **not TVM's MetaSchedule XGBModel**: it does not use TVM's per-store feature
 extractor or custom pack-sum objective. It uses standard squared-error tree
 boosting on one feature row per candidate.
 
+Training and validation each use a deterministic **10% configuration subset per
+workload** by default. The subset is chosen from configuration inputs and the
+seed, without looking at latencies or failures. Test workloads remain separate.
+
 ## Install
 
 ```bash
@@ -37,14 +41,17 @@ python -m experiments.gemm.tiletune.run \
 ```
 
 Repeat with the other shapes and distinct run names. `--config-indices` can
-explicitly restrict collection to a supplied subgrid for a smoke check. The
-reader retains the supplied grid size; such a run is not a full-grid oracle.
+explicitly restrict collection to a supplied subgrid. The reader retains the
+supplied grid size; such a run is not a full-grid oracle. The training command
+below samples from those supplied pools; when using exhaustive logs, it retains
+their full recorded collection costs.
 
 ```bash
 python -m experiments.xgboost train \
   --train-runs experiments/results/xgb-data/train256 \
                experiments/results/xgb-data/train512 \
   --validation-runs experiments/results/xgb-data/validation768 \
+  --sample-fraction 0.1 \
   --output experiments/models/gemm-h200.json
 
 python -m experiments.gemm.tiletune.run \
@@ -70,7 +77,22 @@ python -m experiments.portable.run --manifest heldout.json \
   --method xgboost --xgb-model experiments/models/portable-h200.json --top-k 20
 ```
 
-Train its model using runs from `experiments.portable.run --method exhaustive`.
+For collection that measures only the sampled configurations, use the comparison
+coordinator:
+
+```bash
+python -m experiments.portable.compare --device ampere \
+  --xgb-sample-fraction 0.1 --output experiments/results/a100-sampled --wait-idle
+```
+
+The coordinator freezes each training/validation subset before launching its
+worker. Test grids and the online top-K budget are independent of this fraction.
+Collection metadata preserves the original pool and selected indices, so fitting
+does not sample an already collected subset a second time. Use a new output
+directory when changing the sampling fraction or seed; resume verifies both.
+
+Train its model using runs from `experiments.portable.run --method brute_force`
+or `--method exhaustive`.
 Pass individual case directories, or a parent containing only the intended
 exhaustive cases, to `--train-runs` and `--validation-runs`. The portable and
 dedicated runners use different kernel implementations; their model artifacts
@@ -100,19 +122,54 @@ The feature schema includes:
 Numeric values become float32 columns. Categorical values use explicit one-hot
 columns, with a separate unknown/missing category. Missing numeric knobs use
 XGBoost's missing-value representation; new feature names absent from the
-training schema are rejected. No outcome, rank, candidate index, run name,
+training schema are rejected. Version 2 artifacts construct that schema from
+the declared, unlabeled training pools, including failed or unsampled configs.
+Only the frozen subset's successful measurements contributes training labels.
+This allows an implementation-specific knob to appear at inference even if its
+implementation had no successful sampled measurements. Version 1 artifacts remain
+readable with their original schema and domain checks; retrain for changed
+kernels or additional knobs. No outcome, rank, candidate index, run name,
 TileTune estimate, or compiler counter enters the features.
 
 Training uses upstream `xgb.train`, CPU histogram trees, squared error on log
-latency, and validation early stopping. Defaults are 200 maximum rounds, depth 6,
-learning rate 0.05, seed 123, and four CPU threads. The saved best iteration is
-used for prediction. Repeated measurements of an identical candidate/context
+latency, and validation early stopping. Defaults adopt the four hyperparameters
+reported in [WaveTune, Section 5.1](https://arxiv.org/html/2604.10187v1#S5.SS1):
+600 maximum rounds (`--rounds`), depth 10 (`--max-depth`), learning rate 0.05
+(`--learning-rate`), and row subsampling 0.8 (`--subsample`). With `xgb.train`,
+`num_boost_round=600` corresponds to `n_estimators=600` in the sklearn interface.
+Our validation patience remains 20 rounds, so the saved best iteration used for
+prediction may contain fewer than 600 trees. Artifacts record the maximum,
+actually trained, and best round counts. The seed remains 123 and the standalone
+trainer uses four CPU threads by default.
+
+`--subsample=0.8` draws rows from the available training data each boosting round;
+`--sample-fraction=0.1` fixes which configurations supply measurements before
+training. These are independent: assuming successful measurements, a 1,000-config
+pool supplies 100 training rows, and each round uses approximately 80 of those.
+The other 900 configurations never supply training labels. This adopts the
+paper's reported hyperparameters while retaining our sampling, log-latency
+objective, and validation protocol; it is not a reproduction of its full setup.
+
+Repeated measurements of an identical candidate/context
 are aggregated by median before taking the logarithm. Each training workload
 receives equal total weight regardless of candidate count.
 
+`--sample-fraction` (Python: `sample_fraction`) controls both the training and
+separate validation subsets. The budget is `ceil(fraction * pool_size)`, with at
+least one configuration: the default samples 11/108 GEMM, 6/54 attention, 3/24
+chunk-KDA and 1/6 row/recurrent configurations per workload. A seeded hash of the
+canonical workload and each configuration determines selection, so changing
+candidate order, timings or failure outcomes cannot bias it. Repeated runs of
+one context share a single subset. Failed selections consume the sample budget
+and are not replaced. Fitting requires at least two successful training labels
+in total and one validation label; insufficient samples fail explicitly. A
+fraction of 1 explicitly enables full-pool training. To restore the previous
+training hyperparameters as well, pass `--rounds 200 --max-depth 6 --subsample 1`.
+
 ## Data and comparison contracts
 
-- Training and validation are explicit, nonempty sets of exhaustive runs.
+- Training and validation are explicit, nonempty sets of runs completed over
+  their supplied pools, including the coordinator's sampled pools.
   Entire mathematical workloads are disjoint: changing a name, candidate subset,
   kernel implementation, or device cannot disguise overlap.
 - Inference refuses workloads used for either training or validation. Test
@@ -134,7 +191,9 @@ receives equal total weight regardless of candidate count.
 
 The model JSON contains the booster, feature schema, training settings, XGBoost
 version, best iteration, domain identities, split membership, run fingerprints,
-measurement counts, available collection durations, and fitting time. Existing
+measurement counts, available collection durations, and fitting time. New
+artifacts also record the sampling policy, fraction, seed, original pool sizes,
+selected configurations and successful selected counts for each workload. Existing
 files are not overwritten. Old runs missing required source fingerprints or
 compiler/runtime identity may require recollection for live evaluation.
 
@@ -145,5 +204,12 @@ they exclude process startup and separately prepared primitive profiles. Do not
 describe a pretrained baseline as having zero training cost. Comparison winners
 are assessed with the same K and the same held-out oracle grid.
 
-Read `data.py` → `model.py` → `integration.py` / `execution.py`. The TileTune core
+Read `data.py` → `sampling.py` → `model.py` → `integration.py` / `execution.py`. The TileTune core
 cost equations and compiler passes are unchanged by this baseline.
+
+Uniform sampling remains the default. Opt into implementation-stratified sampling
+with `--sampling-policy implementation_stratified_config_hash_v1`. Each workload
+still uses exactly `ceil(0.1 * pool_size)` attempted configurations: allocate up to
+three per implementation round-robin, then distribute the remainder proportionally
+to available capacity. Failed samples are not replaced. Training and validation
+are sampled independently, and the policy is recorded in the artifact.

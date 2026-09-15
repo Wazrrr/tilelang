@@ -5,9 +5,9 @@ from dataclasses import replace
 import pytest
 
 from experiments.portable.baselines import carver_support_reason, exhaustive_selection
-from experiments.portable.compare import split_workloads
+from experiments.portable.compare import main, split_workloads, training_sample
 from experiments.portable.diagnostics import assess, spearman
-from experiments.portable.spec import Device, TARGETS, default_workloads
+from experiments.portable.spec import Device, TARGETS, configurations, default_workloads
 
 
 def test_split_whole_workloads_and_reject_alias_leakage():
@@ -18,6 +18,35 @@ def test_split_whole_workloads_and_reject_alias_leakage():
         split_workloads([workloads[0], replace(workloads[0], name="alias")], dict(train=[0.5], test=[1]))
     with pytest.raises(ValueError, match="overlap"):
         split_workloads(workloads, dict(train=[1], test=[1]))
+
+
+def test_training_collection_samples_before_measurement_and_preserves_original_indices():
+    device = Device("ampere", TARGETS["ampere"])
+    workload = default_workloads()[0]
+    configs = configurations(workload, device)
+    sample = training_sample(workload, device, fraction=0.1, seed=123)
+    assert len(configs) == 108 and len(sample["config_indices"]) == 11
+    assert sample["xgb_sampling"]["pool_configs"] == configs
+    assert sample["config_indices"] == sample["xgb_sampling"]["selected_indices"]
+    subset = [91, 40, 18, 72, 3, 5]
+    sample = training_sample(workload, device, fraction=0.5, seed=123, config_indices=subset)
+    assert len(sample["config_indices"]) == 3
+    assert sample["xgb_sampling"]["pool_configs"] == [configs[i] for i in subset]
+    assert sample["config_indices"] == [subset[i] for i in sample["xgb_sampling"]["selected_indices"]]
+
+
+def test_comparison_freezes_training_fraction_separately_from_online_budget(capsys):
+    import json
+
+    for args, fraction in (([], 0.1), (["--xgb-sample-fraction", "0.25"], 0.25)):
+        assert main(["--plan", "--workloads", "gemm_nn", *args]) == 0
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["xgb_sampling"]["fraction"] == fraction
+        assert plan["xgb_sampling"]["seed"] == 123
+        assert plan["budget_fraction"] == 0.1
+        assert plan["xgb_training"] == dict(rounds=600, max_depth=10, learning_rate=0.05, subsample=0.8, early_stopping_rounds=20)
+    with pytest.raises(SystemExit):
+        main(["--plan", "--xgb-sample-fraction", "nan"])
 
 
 def test_diagnostics_keep_unscored_oracle_winner_and_failed_selections():

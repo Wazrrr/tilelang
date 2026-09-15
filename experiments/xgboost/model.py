@@ -13,8 +13,14 @@ import statistics
 import time
 
 from .data import digest, domain, features, workload_key
+from .sampling import DEFAULT_SAMPLE_FRACTION, SAMPLING_POLICY, SAMPLING_POLICIES, sample_runs
 
-VERSION = 1
+VERSION = 2
+DEFAULT_ROUNDS = 600
+DEFAULT_MAX_DEPTH = 10
+DEFAULT_LEARNING_RATE = 0.05
+DEFAULT_SUBSAMPLE = 0.8
+EARLY_STOPPING_ROUNDS = 20
 
 
 def _libraries():
@@ -36,6 +42,14 @@ def _schema(rows):
             raise ValueError(f"feature changes type: {key}")
         schema.append(dict(name=key, categories=sorted(set(values)) if all(strings) else None))
     return schema
+
+
+def _declared_schema(runs):
+    # The pool is known before profiling. Its knobs/categories are not labels.
+    # In particular a failed or unsampled implementation can introduce a knob.
+    return _schema(
+        [features(run["context"], config) for run in runs for config in (run.get("sampling") or {}).get("pool_configs", run["configs"])]
+    )
 
 
 def _matrix(rows, schema):
@@ -87,8 +101,21 @@ def _samples(runs):
     return rows, labels, groups
 
 
-def train(training, validation, output, *, rounds=200, max_depth=6, learning_rate=0.05, seed=123, workers=4):
-    """Fit on training workloads; early stopping uses separate validation cases."""
+def train(
+    training,
+    validation,
+    output,
+    *,
+    sample_fraction=DEFAULT_SAMPLE_FRACTION,
+    sampling_policy=SAMPLING_POLICY,
+    rounds=DEFAULT_ROUNDS,
+    max_depth=DEFAULT_MAX_DEPTH,
+    learning_rate=DEFAULT_LEARNING_RATE,
+    subsample=DEFAULT_SUBSAMPLE,
+    seed=123,
+    workers=4,
+):
+    """Fit a configuration subset; early stopping samples separate validation shapes."""
     np, xgb = _libraries()
     output = Path(output)
     if output.exists():
@@ -97,6 +124,8 @@ def train(training, validation, output, *, rounds=200, max_depth=6, learning_rat
         raise ValueError("explicit training and validation runs are required")
     if any(type(value) is not int or value <= 0 for value in (rounds, max_depth, workers)) or not 0 < learning_rate <= 1:
         raise ValueError("invalid training budgets or learning rate")
+    if isinstance(subsample, bool) or not 0 < subsample <= 1:
+        raise ValueError("subsample must be in (0, 1]")
     train_keys = {workload_key(run["context"]) for run in training}
     validation_keys = {workload_key(run["context"]) for run in validation}
     if train_keys & validation_keys:
@@ -104,11 +133,17 @@ def train(training, validation, output, *, rounds=200, max_depth=6, learning_rat
     domains = {digest(domain(run["context"])): domain(run["context"]) for run in training}
     if any(digest(domain(run["context"])) not in domains for run in validation):
         raise ValueError("validation must use a training device, kernel implementation/source, and benchmark backend")
+    training, training_sampling = sample_runs(training, fraction=sample_fraction, seed=seed, policy=sampling_policy)
+    validation, validation_sampling = sample_runs(validation, fraction=sample_fraction, seed=seed, policy=sampling_policy)
     rows, labels, groups = _samples(training)
     valid_rows, valid_labels, _ = _samples(validation)
     if len(rows) < 2:
-        raise ValueError("at least two measured training candidates are required")
-    schema = _schema(rows)
+        raise ValueError(
+            "at least two measured training candidates are required in the frozen sample; increase sample fraction or training shapes"
+        )
+    if not valid_rows:
+        raise ValueError("the frozen validation sample has no successful measurements; failed samples are not replaced")
+    schema = _declared_schema(training)
     counts = Counter(groups)
     weights = np.asarray([len(rows) / (len(counts) * counts[group]) for group in groups])
     params = dict(
@@ -118,6 +153,7 @@ def train(training, validation, output, *, rounds=200, max_depth=6, learning_rat
         device="cpu",
         max_depth=max_depth,
         eta=learning_rate,
+        subsample=subsample,
         seed=seed,
         nthread=workers,
     )
@@ -125,7 +161,12 @@ def train(training, validation, output, *, rounds=200, max_depth=6, learning_rat
     train_data = xgb.DMatrix(_matrix(rows, schema), label=labels, weight=weights, nthread=workers)
     valid_data = xgb.DMatrix(_matrix(valid_rows, schema), label=valid_labels, nthread=workers)
     booster = xgb.train(
-        params, train_data, num_boost_round=rounds, evals=[(valid_data, "validation")], early_stopping_rounds=20, verbose_eval=False
+        params,
+        train_data,
+        num_boost_round=rounds,
+        evals=[(valid_data, "validation")],
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        verbose_eval=False,
     )
     best_rounds = int(booster.best_iteration) + 1
     prediction = booster.predict(valid_data, iteration_range=(0, best_rounds))
@@ -136,10 +177,25 @@ def train(training, validation, output, *, rounds=200, max_depth=6, learning_rat
         validation_workloads=sorted(validation_keys),
         fit_seconds=time.perf_counter() - started,
         validation_log_rmse=float(np.sqrt(np.mean((prediction - np.asarray(valid_labels)) ** 2))),
+        boosting=dict(
+            max_rounds=rounds,
+            early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+            trained_rounds=booster.num_boosted_rounds(),
+            best_rounds=best_rounds,
+        ),
         training_runs=[run["provenance"] for run in training],
         validation_runs=[run["provenance"] for run in validation],
         training_workload_descriptions={workload_key(run["context"]): run["context"]["workload"] for run in training},
         validation_workload_descriptions={workload_key(run["context"]): run["context"]["workload"] for run in validation},
+        sampling=dict(
+            policy=sampling_policy,
+            fraction=sample_fraction,
+            seed=seed,
+            training=training_sampling,
+            validation=validation_sampling,
+            failure_policy="selected failures consume the sample budget and are not replaced",
+            collection_cost_note="source collection durations are unchanged; subsampling exhaustive logs does not reduce their collection cost",
+        ),
     )
     for name, runs in (("training", training), ("validation", validation)):
         times = [run["provenance"]["collection_seconds"] for run in runs]
@@ -153,6 +209,7 @@ def train(training, validation, output, *, rounds=200, max_depth=6, learning_rat
         params=params,
         best_rounds=best_rounds,
         schema=schema,
+        schema_source="declared_training_pools_without_labels",
         domains=list(domains.values()),
         training=report,
         booster=json.loads(booster.save_raw(raw_format="json")),
@@ -173,11 +230,14 @@ class Predictor:
             raise ValueError("XGBoost model changed after the experiment request was frozen")
         self.artifact = artifact = json.loads(data)
         if (
-            artifact.get("version") != VERSION
-            or artifact.get("feature_version") != VERSION
+            artifact.get("version") not in (1, VERSION)
+            or artifact.get("feature_version") != artifact.get("version")
             or artifact.get("method") != "xgboost_config_features"
         ):
             raise ValueError("unsupported XGBoost artifact/schema")
+        sampling = artifact.get("training", {}).get("sampling")
+        if sampling is not None and sampling.get("policy") not in SAMPLING_POLICIES:
+            raise ValueError("unsupported XGBoost sampling policy metadata")
         self.workers = workers
         self.booster = xgb.Booster(params={"nthread": workers, "device": "cpu"})
         self.booster.load_model(bytearray(json.dumps(artifact["booster"]).encode()))

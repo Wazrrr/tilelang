@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiletune-core"
+version = "0.1.0"
+description = "Compiler-independent TileTune facts, evaluation, and selection"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["tiletune_core"]
+package-dir = {tiletune_core = "."}

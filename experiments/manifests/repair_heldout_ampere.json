@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "name": "ampere",
+      "target": {
+        "kind": "cuda",
+        "arch": "sm_80"
+      }
+    }
+  ],
+  "workloads": [
+    {
+      "name": "gemm_wide_interpolation",
+      "op": "gemm",
+      "parameters": {
+        "m": 768,
+        "n": 1536,
+        "k": 768
+      },
+      "config_space": "expanded"
+    },
+    {
+      "name": "gemm_tall_extrapolation",
+      "op": "gemm",
+      "parameters": {
+        "m": 3072,
+        "n": 384,
+        "k": 2304
+      },
+      "config_space": "expanded"
+    },
+    {
+      "name": "attention_causal_interpolation",
+      "op": "attention",
+      "parameters": {
+        "batch": 1,
+        "heads": 4,
+        "sequence": 896,
+        "dim": 64,
+        "causal": true
+      },
+      "config_space": "expanded"
+    },
+    {
+      "name": "attention_noncausal_extrapolation",
+      "op": "attention",
+      "parameters": {
+        "batch": 1,
+        "heads": 4,
+        "sequence": 1792,
+        "dim": 128,
+        "causal": false
+      },
+      "config_space": "expanded"
+    },
+    {
+      "name": "kda_interpolation",
+      "op": "kda_chunk_o",
+      "parameters": {
+        "batch": 1,
+        "heads": 4,
+        "sequence": 896,
+        "dim": 64,
+        "value_dim": 128,
+        "chunk_size": 128
+      },
+      "config_space": "expanded"
+    },
+    {
+      "name": "kda_extrapolation",
+      "op": "kda_chunk_o",
+      "parameters": {
+        "batch": 1,
+        "heads": 4,
+        "sequence": 1536,
+        "dim": 192,
+        "value_dim": 64,
+        "chunk_size": 256
+      },
+      "config_space": "expanded"
+    },
+    {
+      "name": "softmax_tail_interpolation",
+      "op": "softmax",
+      "parameters": {
+        "rows": 769,
+        "columns": 1793
+      },
+      "config_space": "expanded"
+    },
+    {
+      "name": "softmax_tail_extrapolation",
+      "op": "softmax",
+      "parameters": {
+        "rows": 1537,
+        "columns": 4097
+      },
+      "config_space": "expanded"
+    }
+  ]
+}

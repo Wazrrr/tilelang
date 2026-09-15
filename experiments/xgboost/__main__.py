@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 
 from .data import read_runs
-from .model import Predictor, evaluate, train
+from .model import DEFAULT_LEARNING_RATE, DEFAULT_MAX_DEPTH, DEFAULT_ROUNDS, DEFAULT_SUBSAMPLE, Predictor, evaluate, train
+from .sampling import DEFAULT_SAMPLE_FRACTION, SAMPLING_POLICY, SAMPLING_POLICIES
 
 
 def main(argv=None):
@@ -15,9 +16,19 @@ def main(argv=None):
     training.add_argument("--train-runs", nargs="+", required=True, type=Path)
     training.add_argument("--validation-runs", nargs="+", required=True, type=Path)
     training.add_argument("--output", type=Path, required=True)
-    training.add_argument("--rounds", type=int, default=200)
-    training.add_argument("--max-depth", type=int, default=6)
-    training.add_argument("--learning-rate", type=float, default=0.05)
+    training.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=DEFAULT_SAMPLE_FRACTION,
+        help="Fraction of each training/validation configuration pool (default: 0.1)",
+    )
+    training.add_argument("--sampling-policy", choices=SAMPLING_POLICIES, default=SAMPLING_POLICY)
+    training.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    training.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+    training.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
+    training.add_argument(
+        "--subsample", type=float, default=DEFAULT_SUBSAMPLE, help="Training-row fraction per boosting round (default: 0.8)"
+    )
     training.add_argument("--seed", type=int, default=123)
     training.add_argument("--workers", type=int, default=4)
     evaluation = commands.add_parser("evaluate")
@@ -31,9 +42,12 @@ def main(argv=None):
             read_runs(args.train_runs),
             read_runs(args.validation_runs),
             args.output,
+            sample_fraction=args.sample_fraction,
+            sampling_policy=args.sampling_policy,
             rounds=args.rounds,
             max_depth=args.max_depth,
             learning_rate=args.learning_rate,
+            subsample=args.subsample,
             seed=args.seed,
             workers=args.workers,
         )

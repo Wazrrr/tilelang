@@ -14,19 +14,39 @@ from experiments.portable.spec import Device, TARGETS, Workload
 from experiments.portable.run import make_request, validate_request, validate_result
 from experiments.xgboost.data import canonical_workload, features, make_context, read_runs, workload_key
 from experiments.xgboost.model import Predictor, evaluate, train
+from experiments.xgboost.sampling import sample_runs, sampling_plan
 
 
 GRID = [{"block_rows": b, "threads": t} for b in (1, 2, 4) for t in (128, 256)]
 
 
-def write_run(path, rows, *, name="softmax", failed=()):
+def test_declared_pool_schema_includes_knobs_without_successful_training_labels(tmp_path):
+    pytest.importorskip("xgboost")
+    training = read_runs([write_run(tmp_path / "train", 16)])
+    validation = read_runs([write_run(tmp_path / "validation", 32)])
+    heldout = read_runs([write_run(tmp_path / "test", 64)])
+    extra = dict(block_rows=2, threads=128, implementation="streamed", block_cols=512)
+    # This candidate has no label at all. Only its declared inputs are available.
+    training[0]["configs"].append(extra)
+    path = tmp_path / "model.json"
+    report = train(training, validation, path, sample_fraction=0.5, rounds=5, workers=1)
+    assert report["training_samples"] < len(training[0]["configs"])
+    artifact = json.loads(path.read_text())
+    assert artifact["schema_source"] == "declared_training_pools_without_labels"
+    assert "config.block_cols" in {field["name"] for field in artifact["schema"]}
+    assert len(Predictor(path, workers=1).predict(heldout[0]["context"], [extra])) == 1
+
+
+def write_run(path, rows, *, name="softmax", failed=(), sample_fraction=None):
     path.mkdir(parents=True)
     workload = Workload(name, "softmax", dict(rows=rows, columns=128))
+    plan = sampling_plan(canonical_workload(workload), GRID, fraction=sample_fraction) if sample_fraction is not None else None
+    indices = plan["selected_indices"] if plan is not None else list(range(len(GRID)))
     experiment = dict(
         workload=workload.to_dict(),
         device=Device("test", TARGETS["hopper"]).to_dict(),
-        settings=dict(method="exhaustive"),
-        configs=GRID,
+        settings=dict(method="exhaustive", **({"xgb_sampling": plan} if plan is not None else {})),
+        configs=[GRID[i] for i in indices],
         device_observation=dict(name="Test GPU", target=TARGETS["hopper"]),
         source_sha256={"experiments/portable/kernels.py": "same-kernel-source"},
         native_build="test-compiler-build",
@@ -34,11 +54,13 @@ def write_run(path, rows, *, name="softmax", failed=()):
     records = [
         dict(
             index=i,
-            config=config,
-            status="compilation_failed" if i in failed else "benchmarked",
-            latency_ms=None if i in failed else 4 / config["block_rows"] + 0.1 * (config["threads"] == 256) + rows / 10000,
+            config=GRID[original],
+            status="compilation_failed" if original in failed else "benchmarked",
+            latency_ms=None
+            if original in failed
+            else 4 / GRID[original]["block_rows"] + 0.1 * (GRID[original]["threads"] == 256) + rows / 10000,
         )
-        for i, config in enumerate(GRID)
+        for i, original in enumerate(indices)
     ]
     (path / "experiment.json").write_text(json.dumps(experiment))
     (path / "tiletune.json").write_text(json.dumps(dict(configs=records)))
@@ -53,7 +75,8 @@ def trained(tmp_path):
     validation = read_runs([write_run(tmp_path / "validation", 32)])
     heldout = read_runs([write_run(tmp_path / "test", 64)])
     path = tmp_path / "model.json"
-    train(training, validation, path, rounds=40, learning_rate=0.2, max_depth=3, workers=1)
+    # Explicit full-pool fixture for the existing learned-order assertions.
+    train(training, validation, path, sample_fraction=1, rounds=40, learning_rate=0.2, max_depth=3, workers=1)
     return path, training, validation, heldout
 
 
@@ -311,9 +334,89 @@ def test_repeated_runs_are_aggregated_before_training(tmp_path):
     pytest.importorskip("xgboost")
     training = read_runs([write_run(tmp_path / "train1", 16), write_run(tmp_path / "train2", 16)])
     validation = read_runs([write_run(tmp_path / "validation", 32)])
-    result = train(training, validation, tmp_path / "model.json", rounds=2, workers=1)
-    assert result["training_samples"] == len(GRID)
+    result = train(training, validation, tmp_path / "model.json", sample_fraction=0.5, rounds=2, workers=1)
+    assert result["training_samples"] == len(GRID) // 2
     assert len(result["training_runs"]) == 2
+
+
+@pytest.mark.parametrize("fraction", [0, -0.1, 1.1, True, float("nan"), float("inf")])
+def test_invalid_sampling_fractions(fraction):
+    with pytest.raises(ValueError, match="sample fraction"):
+        sampling_plan({"shape": 32}, GRID, fraction=fraction)
+
+
+def test_sampling_is_reproducible_and_independent_of_pool_order():
+    workload = canonical_workload(Workload("softmax", "softmax", dict(rows=16, columns=128)))
+    plans = [sampling_plan(workload, GRID, fraction=0.5, seed=seed) for seed in (123, 123, 456)]
+    assert plans[0] == plans[1]
+    assert plans[0]["selected_indices"] != plans[2]["selected_indices"]
+    reversed_grid = list(reversed(GRID))
+    reversed_plan = sampling_plan(workload, reversed_grid, fraction=0.5)
+    assert sorted((GRID[i] for i in plans[0]["selected_indices"]), key=str) == sorted(
+        (reversed_grid[i] for i in reversed_plan["selected_indices"]), key=str
+    )
+
+
+@pytest.mark.parametrize("collected_subset", [False, True])
+def test_default_training_samples_each_shape_once_and_ignores_other_labels(tmp_path, collected_subset):
+    pytest.importorskip("xgboost")
+    fraction = 0.1 if collected_subset else None
+    training = read_runs(
+        [
+            write_run(tmp_path / "train1", 16, sample_fraction=fraction),
+            write_run(tmp_path / "train2", 32, sample_fraction=fraction),
+        ]
+    )
+    validation = read_runs([write_run(tmp_path / "validation", 64, sample_fraction=fraction)])
+    first_path = tmp_path / "first.json"
+    first = train(training, validation, first_path, workers=1)
+    artifact = json.loads(first_path.read_text())
+    assert artifact["params"]["max_depth"] == 10
+    assert artifact["params"]["eta"] == 0.05
+    assert artifact["params"]["subsample"] == 0.8
+    boosting = first["boosting"]
+    assert boosting["max_rounds"] == 600 and boosting["early_stopping_rounds"] == 20
+    assert 1 <= boosting["best_rounds"] <= boosting["trained_rounds"] <= 600
+    assert boosting["best_rounds"] == artifact["best_rounds"]
+    assert first["training_samples"] == 2 and first["validation_samples"] == 1
+    assert first["sampling"]["fraction"] == 0.1
+    for split in ("training", "validation"):
+        for item in first["sampling"][split]:
+            assert item["pool_size"] == 6 and item["selected_count"] == item["measured_count"] == 1
+            assert item["collection_sampled"] == collected_subset
+    changed_training, changed_validation = deepcopy(training), deepcopy(validation)
+    for runs in (changed_training, changed_validation):
+        for run in runs:
+            selected = sampling_plan(run["context"]["workload"], GRID)["selected_indices"]
+            for sample in run["samples"]:
+                if sample["config"] not in [GRID[i] for i in selected]:
+                    sample["latency_ms"] = float("nan")  # would fail XGBoost if admitted as a label
+    second_path = tmp_path / "second.json"
+    second = train(changed_training, changed_validation, second_path, workers=1)
+    assert first["sampling"] == second["sampling"]
+    assert json.loads(first_path.read_text())["booster"] == json.loads(second_path.read_text())["booster"]
+    assert first["training_collection_seconds"] == 2  # retain the source collection cost
+
+
+def test_sampled_failures_consume_budget_and_do_not_refill(tmp_path):
+    pytest.importorskip("xgboost")
+    training = read_runs([write_run(tmp_path / "train1", 16), write_run(tmp_path / "train2", 32)])
+    validation = read_runs([write_run(tmp_path / "validation", 64)])
+    selected = sampling_plan(training[0]["context"]["workload"], GRID)["selected_indices"]
+    training[0]["samples"] = [sample for sample in training[0]["samples"] if sample["index"] not in selected]
+    _, report = sample_runs(training)
+    failed = next(item for item in report if item["workload"] == workload_key(training[0]["context"]))
+    assert failed["selected_count"] == 1 and failed["measured_count"] == 0
+    with pytest.raises(ValueError, match="frozen sample"):
+        train(training, validation, tmp_path / "model.json", rounds=2, workers=1)
+    assert not (tmp_path / "model.json").exists()
+
+
+def test_presampled_collection_cannot_silently_change_fraction_or_seed(tmp_path):
+    runs = read_runs([write_run(tmp_path / "train", 16, sample_fraction=0.5)])
+    for fraction, seed in ((0.1, 123), (0.5, 456)):
+        with pytest.raises(ValueError, match="sampling plan"):
+            sample_runs(runs, fraction=fraction, seed=seed)
 
 
 @pytest.mark.parametrize("family", ["gemm_fp8", "flash_attention"])
@@ -339,3 +442,34 @@ def test_comparison_children_include_xgboost_and_keep_fingerprint(tmp_path, monk
     monkeypatch.setattr(runner, "remeasure_winners", lambda *args: None)
     assert not runner.run_all(args)
     assert children == ["tiletune", "xgboost", "brute_force"]
+
+
+@pytest.mark.parametrize("sizes", [(2, 2, 2), (2, 31, 67), (1, 4, 98), (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1), (60, 60, 80)])
+@pytest.mark.parametrize("seed", [123, 456, 789])
+def test_stratified_exact_budget_and_order_independence(sizes, seed):
+    import math
+    from experiments.xgboost.sampling import STRATIFIED_POLICY
+
+    configs = [dict(implementation=str(group), tile=i) for group, n in enumerate(sizes) for i in range(n)]
+    plan = sampling_plan({"shape": 32}, configs, seed=seed, policy=STRATIFIED_POLICY)
+    assert len(plan["selected_indices"]) == math.ceil(0.1 * sum(sizes))
+    assert sum(s["attempted_quota"] for s in plan["strata"]) == len(plan["selected_indices"])
+    assert all(s["attempted_quota"] <= s["capacity"] for s in plan["strata"])
+    reversed_plan = sampling_plan({"shape": 32}, list(reversed(configs)), seed=seed, policy=STRATIFIED_POLICY)
+    assert {json.dumps(configs[i], sort_keys=True) for i in plan["selected_indices"]} == {
+        json.dumps(list(reversed(configs))[i], sort_keys=True) for i in reversed_plan["selected_indices"]
+    }
+    if math.ceil(0.1 * sum(sizes)) >= sum(min(3, n) for n in sizes):
+        assert all(s["attempted_quota"] >= min(3, s["capacity"]) for s in plan["strata"])
+
+
+def test_stratified_quotas_use_round_robin_then_largest_remainder():
+    from experiments.xgboost.sampling import STRATIFIED_POLICY
+
+    configs = [dict(implementation=name, tile=i) for name, n in [("a", 10), ("b", 40), ("c", 150)] for i in range(n)]
+    plan = sampling_plan({}, configs, policy=STRATIFIED_POLICY)
+    # 20 attempts: 3 each, then 11 * [7, 37, 147] / 191.
+    assert [s["attempted_quota"] for s in plan["strata"]] == [3, 5, 12]
+    tiny = sampling_plan({}, [dict(implementation=str(i)) for i in range(20)], policy=STRATIFIED_POLICY)
+    assert sum(s["attempted_quota"] > 0 for s in tiny["strata"]) == 2
+    assert sum(s["unmet_initial_quota"] for s in tiny["strata"]) == 18

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "devices": [{"name": "ampere", "target": {"kind": "cuda", "arch": "sm_80"}}],
+  "workloads": [
+    {"name": "gemm_nn", "op": "gemm", "parameters": {"m": 1024, "n": 1024, "k": 1024}, "config_space": "expanded"},
+    {"name": "gemm_tall", "op": "gemm", "parameters": {"m": 4096, "n": 256, "k": 1024}, "config_space": "expanded"},
+    {"name": "gemm_bias_relu", "op": "gemm", "parameters": {"m": 1024, "n": 1024, "k": 1024, "epilogue": "bias_relu"}, "config_space": "expanded"},
+    {"name": "flashattention", "op": "attention", "parameters": {"batch": 1, "heads": 4, "sequence": 1024, "dim": 64}, "config_space": "expanded"},
+    {"name": "flashattention_causal", "op": "attention", "parameters": {"batch": 1, "heads": 4, "sequence": 1024, "dim": 64, "causal": true}, "config_space": "expanded"},
+    {"name": "kda_recurrent", "op": "kda_recurrent", "parameters": {"batch": 1, "heads": 4, "sequence": 256, "dim": 64, "value_dim": 64}, "config_space": "expanded"},
+    {"name": "kda_chunk_o", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 4, "sequence": 1024, "dim": 128, "value_dim": 128, "chunk_size": 128}, "config_space": "expanded"},
+    {"name": "softmax", "op": "softmax", "parameters": {"rows": 1024, "columns": 2048}, "config_space": "expanded"},
+    {"name": "rmsnorm", "op": "rmsnorm", "parameters": {"rows": 1024, "columns": 2048}, "config_space": "expanded"},
+    {"name": "reduce_sum", "op": "reduce_sum", "parameters": {"rows": 1024, "columns": 2048}, "config_space": "expanded"},
+    {"name": "elementwise", "op": "elementwise", "parameters": {"rows": 1024, "columns": 4096}, "config_space": "expanded"}
+  ]
+}

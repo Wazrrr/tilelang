@@ -13,7 +13,7 @@ def digest(value):
 
 def canonical_workload(workload):
     """Names and search grids do not distinguish training/test workloads."""
-    from experiments.portable.spec import Workload
+    from experiments.common.spec import Workload
 
     w = workload if isinstance(workload, Workload) else Workload(**workload)
     defaults = {
@@ -44,11 +44,27 @@ def make_context(workload, implementation, target, device_name, backend, source_
     if not arch or not device_name:
         raise ValueError("XGBoost needs an explicit architecture and observed device name")
     arch = arch.rstrip("af") if kind == "cuda" else arch.split(":")[0] if kind == "hip" else arch
-    paths = ["experiments/portable/kernels.py"] if implementation.startswith("portable.") else [f"experiments/{implementation}/kernel.py"]
+    reorganized = "experiments/common/kernels.py" in source_hashes
+    suite_kernel = "experiments/common/kernels.py" if reorganized else "experiments/portable/kernels.py"
+    paths = [suite_kernel] if implementation.startswith("portable.") else [f"experiments/{implementation}/kernel.py"]
     if implementation in ("portable.attention", "flash_attention"):
         paths += ["examples/flash_attention/example_mha_fwd_bshd.py", "examples/flash_attention/example_mha_tiletune.py"]
+    if implementation.startswith("portable."):
+        paths += sorted(path for path in source_hashes if path.startswith("experiments/portable/kernels_") and path.endswith(".py"))
     if implementation == "gemm_fp8":
         paths += ["examples/gemm_fp8/example_tilelang_gemm_fp8.py"]
+    if reorganized:
+        from experiments.families import FAMILIES
+
+        family = FAMILIES[implementation.removeprefix("portable.")] if implementation.startswith("portable.") else implementation
+        paths += ["experiments/_kernel.py", "experiments/families.py", f"experiments/{family}/kernel.py"]
+        if family != "gemm_fp8":
+            paths += [f"experiments/{family}/reference.py"]
+        # Family builders now import implementation files. Fingerprint those
+        # sources and shared execution code, while retaining archived domains.
+        paths += sorted(
+            path for path in source_hashes if path.startswith((f"experiments/{family}/", "experiments/common/")) and path.endswith(".py")
+        )
     missing = set(paths) - source_hashes.keys()
     if missing:
         raise ValueError(f"missing kernel source fingerprints: {sorted(missing)}")
@@ -215,6 +231,7 @@ def read_runs(paths):
                 context=context_from_experiment(experiment),
                 configs=configs,
                 samples=successes,
+                sampling=experiment.get("settings", {}).get("xgb_sampling"),
                 provenance=dict(
                     experiment=str(path),
                     experiment_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
