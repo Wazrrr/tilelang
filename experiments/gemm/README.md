@@ -47,7 +47,13 @@ Current declared pools for the first final case:
 | --- | ---: | ---: |
 | current | 108 | 108 |
 | expanded | 2060 | 3000 |
-| large | 6180 | 9000 |
+| large | 1024 | 1024 |
+| exhaustive | 6180 | 9000 |
+
+`large` retains the original 108 configurations, protected central and
+rectangular tile neighborhoods, and deterministic parameter coverage. Both
+archived A100 GEMM sweep winners remain in the pool. `exhaustive` reproduces the
+old uncapped `large` domain; see the [shared preset rules](../common/README.md#configuration-spaces).
 
 Counts precede compilation and correctness checks. Blackwell and MI355X grids
 are declared but need native device validation. Ascend needs a device manifest

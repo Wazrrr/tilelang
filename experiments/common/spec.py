@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 from itertools import product
 import re
 
+from .spaces import PRESETS
+
 
 TARGETS = {
     "ampere": {"kind": "cuda", "arch": "sm_80"},
@@ -43,8 +45,8 @@ class Workload:
     config_space: str = "current"
 
     def __post_init__(self):
-        if self.config_space not in ("current", "expanded", "large"):
-            raise ValueError("config_space must be current, expanded, or large")
+        if self.config_space not in PRESETS:
+            raise ValueError(f"config_space must be one of {', '.join(PRESETS)}")
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", self.name):
             raise ValueError("workload name must be a single safe path component")
         if self.op not in _PARAMETERS:

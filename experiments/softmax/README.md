@@ -48,6 +48,10 @@ Current declared pools for the first final case:
 | current | 6 | 6 |
 | expanded | 409 | 409 |
 | large | 691 | 691 |
+| exhaustive | 691 | 691 |
+
+Softmax's complete pool is already below the 1,024-config `large` cap, so its
+configuration identities and order are unchanged.
 
 Counts precede compilation and correctness checks. Blackwell and MI355X grids
 are declared but need native device validation. Ascend needs a device manifest

@@ -43,7 +43,7 @@ def test_nested_spaces_preserve_existing_indices_and_account_for_every_candidate
     w = next(w for w in default_workloads() if w.op == op)
     d = Device("ampere", TARGETS["ampere"])
     previous = []
-    for preset in ("current", "expanded", "large"):
+    for preset in ("current", "expanded", "exhaustive"):
         space = configuration_space(replace(w, config_space=preset), d)
         configs = space["configs"]
         assert configs[: len(previous)] == previous
@@ -53,6 +53,73 @@ def test_nested_spaces_preserve_existing_indices_and_account_for_every_candidate
         assert all(a["index"] < len(configs) for a in space["aliases"])
         previous = configs
     assert len(previous) >= 200
+
+
+@pytest.mark.parametrize("target", ["ampere", "hopper", "blackwell", "mi355x"])
+@pytest.mark.parametrize("op", ["gemm", "attention", "kda_recurrent", "kda_chunk_o", "softmax", "elementwise"])
+def test_large_caps_pools_preserving_current_configs_coverage_and_audit(target, op):
+    w = next(w for w in default_workloads() if w.op == op)
+    d = Device(target, TARGETS[target])
+    current = configurations(w, d)
+    full = configuration_space(replace(w, config_space="exhaustive"), d)
+    compact = configuration_space(replace(w, config_space="large"), d)
+    assert compact["configs"][: len(current)] == current
+    assert compact["candidate_count"] == min(1024, full["candidate_count"])
+    assert compact["generated_count"] == (
+        compact["candidate_count"] + compact["budget_omitted_count"] + compact["alias_count"] + compact["rejected_count"]
+    )
+    if full["candidate_count"] <= 1024:
+        assert compact["configs"] == full["configs"]
+        assert "selection" not in compact
+        return
+    selection = compact["selection"]
+    assert selection["covered_features"] == selection["total_features"]
+    assert compact["configs"] == [full["configs"][i] for i in selection["indices"]]
+    assert len(set(compact["config_ids"])) == len(compact["configs"])
+    for alias in compact["aliases"]:
+        if alias["index"] is None:
+            assert alias["exhaustive_index"] not in selection["indices"]
+        else:
+            assert selection["indices"][alias["index"]] == alias["exhaustive_index"]
+
+
+def test_large_retains_measured_gemm_and_attention_winners():
+    d = Device("ampere", TARGETS["ampere"])
+    gemm = replace(default_workloads()[0], config_space="large")
+    pool = configurations(gemm, d)
+    # Winners of the archived 4096^3 and 8192^3 complete A100 sweeps.
+    for stages, panel in ((4, 0), (2, 8)):
+        assert dict(block_m=128, block_n=128, block_k=32, stages=stages, threads=128, warp_policy="square", swizzle_panel=panel) in pool
+    # Previously measured TileTune winners remain available too.
+    for stages, panel in ((4, 0), (2, 8)):
+        assert dict(block_m=128, block_n=256, block_k=16, stages=stages, threads=256, warp_policy="square", swizzle_panel=panel) in pool
+    attention = replace(next(w for w in default_workloads() if w.op == "attention"), config_space="large")
+    pool = configurations(attention, d)
+    for m, stage, qk in ((32, 3, "square"), (64, 2, "full_row")):
+        assert (
+            dict(
+                implementation="tiled", block_M=m, block_N=32, num_stages=stage, threads=256, qk_policy=qk, pv_policy="square", copy_width=8
+            )
+            in pool
+        )
+    assert pool == configurations(attention, d)
+
+
+def test_large_retains_measured_kda_winners():
+    w = replace(next(w for w in default_workloads() if w.op == "kda_chunk_o"), config_space="large")
+    pool = configurations(w, Device("ampere", TARGETS["ampere"]))
+    for m, v, intra, threads in ((64, 64, 3, 256), (16, 128, 2, 128)):
+        assert (
+            dict(implementation="tiled", block_m=m, block_k=16, block_v=v, block_s=16, stages=4, intra_stages=intra, threads=threads)
+            in pool
+        )
+
+
+def test_large_preserves_oversized_explicit_pools():
+    w = replace(default_workloads()[0], config_space="large", configs=[dict(native_tile=i) for i in range(1100)])
+    d = Device("ampere", TARGETS["ampere"])
+    assert configurations(w, d) == w.configs
+    assert configurations(replace(w, configs=None), replace(d, configs={w.name: w.configs})) == w.configs
 
 
 def test_presets_are_not_new_mathematical_workloads_and_do_not_expand_training_fraction():
@@ -92,7 +159,8 @@ import sys
 from dataclasses import replace
 from experiments.portable.spec import *
 w = replace(default_workloads()[0], config_space='large')
-assert len(configurations(w, Device('ampere', TARGETS['ampere']))) > 1000
+assert len(configurations(w, Device('ampere', TARGETS['ampere']))) == 1024
+assert len(configurations(replace(w, config_space='exhaustive'), Device('ampere', TARGETS['ampere']))) == 6180
 assert not {'torch','tilelang','xgboost','numpy'} & sys.modules.keys()
 """
     subprocess.run([sys.executable, "-c", code], check=True)

@@ -47,7 +47,13 @@ Current declared pools for the first final case:
 | --- | ---: | ---: |
 | current | 420 | 420 |
 | expanded | 3336 | 3480 |
-| large | 7384 | 7704 |
+| large | 1024 | 1024 |
+| exhaustive | 7384 | 7704 |
+
+`large` retains the original 420 configurations and protected small-key tiled
+schedules before filling the remaining slots by deterministic parameter
+coverage. Recurrent KDA also uses a 1,024-config cap. `exhaustive` reproduces
+the old uncapped `large` domain; see the [shared preset rules](../common/README.md#configuration-spaces).
 
 Counts precede compilation and correctness checks. Blackwell and MI355X grids
 are declared but need native device validation. Ascend needs a device manifest

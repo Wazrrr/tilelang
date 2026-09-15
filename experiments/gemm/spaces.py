@@ -21,6 +21,29 @@ def expanded_configurations(w, large):
     )
 
 
+def protected_configurations(workload):
+    """Keep central tiles with all stage/policy/swizzle choices in large."""
+    yield from _grid(
+        block_m=[64, 128],
+        block_n=[64, 128],
+        block_k=[32, 64],
+        stages=[0, 1, 2, 3, 4],
+        threads=[128, 256],
+        warp_policy=POLICIES,
+        swizzle_panel=[0, 4, 8],
+    )
+    for m, n in ((128, 256), (256, 128)):
+        yield from _grid(
+            block_m=[m],
+            block_n=[n],
+            block_k=[16],
+            stages=[0, 1, 2, 3, 4],
+            threads=[128, 256],
+            warp_policy=["square"],
+            swizzle_panel=[0, 4, 8],
+        )
+
+
 def advanced_configurations():
     """The existing 288-configuration advanced-autotune implementation."""
     return _grid(

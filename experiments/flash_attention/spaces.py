@@ -27,6 +27,21 @@ def legacy_configurations():
     return _grid(block_M=[32, 64, 128, 256], block_N=[32, 64, 128, 256], num_stages=[0, 1, 2, 3], threads=[128, 256])
 
 
+def protected_configurations(workload):
+    """Retain common tiled attention layouts and automatic/vectorized copies."""
+    for qk, pv in (("square", "square"), ("full_row", "square"), ("full_row", "full_row")):
+        yield from _grid(
+            implementation=["tiled"],
+            block_M=[32, 64, 128],
+            block_N=[32, 64, 128],
+            num_stages=[0, 2, 3, 4],
+            threads=[128, 256],
+            qk_policy=[qk],
+            pv_policy=[pv],
+            copy_width=[None, 8],
+        )
+
+
 def legality_reason(w, device, c):
     from experiments.common.mma import tile_reason
 

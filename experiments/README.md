@@ -42,7 +42,10 @@ python -m experiments.softmax.tiletune.run --suite development --device ampere -
 
 A development run uses two test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
-Final uses the full `large` pools and seeds 123, 456, and 789.
+Final uses the `large` pools capped at 1,024 configurations per case and seeds
+123, 456, and 789. Smaller pools stay unchanged. The cap retains the original
+grids and protected family schedules, then fills the remaining slots by
+deterministic parameter coverage. All methods use the same pool.
 
 ```bash
 python -m experiments.gemm.tiletune.run --suite development --device ampere \
@@ -84,6 +87,12 @@ Edit mathematical shapes in each family's `cases.py` and schedule parameters
 in `spaces.py`. Each family owns its structural legality and equivalence rules;
 `common/spaces.py` handles deterministic enumeration and audit records. Counts
 are declared candidates before compilation and correctness validation.
+
+`large` is the bounded preset for routine experiments. `expanded` keeps its
+historical grids; `exhaustive` reproduces the former uncapped `large` pools for
+occasional validation through the common run/comparison/census commands.
+The [configuration-space reference](common/README.md#configuration-spaces)
+describes protected schedules, counts, and index migration.
 
 The final manifest at [manifests/five_target_final.json](manifests/five_target_final.json)
 is a frozen snapshot of the family definitions. Final planning checks they match.

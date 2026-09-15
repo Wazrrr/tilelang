@@ -1,6 +1,6 @@
 """Declared schedule domains; planning needs only the Python standard library.
 
-The common pool is independent of TileTune predictions and measured timings.
+Enumeration never reads TileTune predictions or measured timings.
 Current entries keep their indices; newly generated aliases point to them.
 """
 
@@ -11,8 +11,9 @@ import json
 
 from .mma import mma_partition as mma_partition
 
-SPACE_VERSION = 1
-PRESETS = ("current", "expanded", "large")
+SPACE_VERSION = 2
+PRESETS = ("current", "expanded", "large", "exhaustive")
+LARGE_CONFIG_LIMIT = 1024
 POLICIES = ("square", "full_row", "full_col")
 
 
@@ -57,8 +58,8 @@ def expand_space(w, device, current, *, explicit=False):
         seen = {}
         for i, c in enumerate(configs):
             seen.setdefault(config_id(canonical_config(w, c, device)), i)
-        # Generate expanded first so large always retains its indices.
-        for large in [False, True] if w.config_space == "large" else [False]:
+        # Exhaustive preserves the old large pool and its original indices.
+        for large in [False, True] if w.config_space in ("large", "exhaustive") else [False]:
             for c in _new_configs(w, large):
                 generated += 1
                 reason = legality_reason(w, device, c)
@@ -72,7 +73,7 @@ def expand_space(w, device, current, *, explicit=False):
                 seen[key] = len(configs)
                 configs.append(c)
                 ids.append(config_id(c))
-    return dict(
+    space = dict(
         version=SPACE_VERSION,
         preset="explicit" if explicit else w.config_space,
         configs=configs,
@@ -80,6 +81,7 @@ def expand_space(w, device, current, *, explicit=False):
         generated_count=generated,
         candidate_count=len(configs),
         retained_current_count=len(current),
+        budget_omitted_count=0,
         rejected_count=len(rejected),
         rejection_reasons=dict(Counter(r["reason"] for r in rejected)),
         alias_count=len(aliases),
@@ -89,7 +91,43 @@ def expand_space(w, device, current, *, explicit=False):
         distinct_program_count=None,
         correct_count=None,
     )
+    if not explicit and w.config_space == "large" and len(configs) > LARGE_CONFIG_LIMIT:
+        _limit_large_space(w, device, space)
+    return space
+
+
+def _limit_large_space(workload, device, space):
+    from experiments.families import family_module
+    from .subsets import pairwise_subset
+
+    configs = space["configs"]
+    protected = getattr(family_module(workload.op, "spaces"), "protected_configurations", lambda w: ())
+    keys = {config_id(canonical_config(workload, c, device)) for c in protected(workload)}
+    required = [
+        i for i, c in enumerate(configs) if i < space["retained_current_count"] or config_id(canonical_config(workload, c, device)) in keys
+    ]
+    selection = pairwise_subset(workload, device, configs, LARGE_CONFIG_LIMIT, required_indices=required)
+    indices = selection["indices"]
+    remap = {old: new for new, old in enumerate(indices)}
+    # An alias of an omitted candidate has no index in the compact pool.
+    # Keep its exhaustive index so every generated entry remains auditable.
+    for alias in space["aliases"]:
+        alias["exhaustive_index"] = alias["index"]
+        alias["index"] = remap.get(alias["index"])
+    space.update(
+        configs=[configs[i] for i in indices],
+        config_ids=selection["config_ids"],
+        candidate_count=len(indices),
+        budget_omitted_count=len(configs) - len(indices),
+        selection=dict(selection, policy="protected_then_greedy_pairwise_then_canonical_hash", source_preset="exhaustive"),
+    )
 
 
 def space_summary(space):
-    return {k: v for k, v in space.items() if k not in ("configs", "config_ids", "aliases", "rejected")}
+    summary = {k: v for k, v in space.items() if k not in ("configs", "config_ids", "aliases", "rejected")}
+    if "selection" in summary:
+        summary["selection"] = {
+            k: v for k, v in summary["selection"].items() if k not in ("indices", "config_ids", "required_indices", "aliases", "rejected")
+        }
+        summary["selection"]["required_count"] = len(space["selection"]["required_indices"])
+    return summary

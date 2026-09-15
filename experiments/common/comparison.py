@@ -23,6 +23,7 @@ import sys
 import time
 
 from .run import make_request, run_case, write_json
+from .spaces import PRESETS
 from .spec import Device, TARGETS, Workload, configurations, default_workloads, load_manifest, support_reason
 from experiments.xgboost.data import canonical_workload
 from experiments.xgboost.model import DEFAULT_LEARNING_RATE, DEFAULT_MAX_DEPTH, DEFAULT_ROUNDS, DEFAULT_SUBSAMPLE, EARLY_STOPPING_ROUNDS
@@ -159,7 +160,7 @@ def main(argv=None):
     parser.add_argument("--device", choices=TARGETS, default="ampere")
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--workloads", nargs="+")
-    parser.add_argument("--config-space", choices=("current", "expanded", "large"))
+    parser.add_argument("--config-space", choices=PRESETS)
     parser.add_argument(
         "--methods",
         nargs="+",

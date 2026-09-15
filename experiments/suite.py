@@ -17,6 +17,7 @@ from tiletune_core.contracts import digest
 from experiments.common.run import make_request, run_case, write_json
 from experiments.common.spec import Device, TARGETS, configuration_space
 from experiments.common.subsets import pairwise_subset
+from experiments.common.spaces import PRESETS
 
 CORE_OPS = ("gemm", "attention", "kda_chunk_o", "softmax")
 CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
@@ -25,7 +26,7 @@ BUDGETS = {
     "smoke": dict(cases=4, configurations=16, seeds=[123], compare=False),
     "development": dict(cases=8, configurations=256, seeds=[123], compare=True),
     "final": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
-    # A full-space benchmark can be requested before the development gates.
+    # A complete large-preset benchmark can precede the development gates.
     # It uses the final shapes/protocol without claiming final acceptance.
     "full": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
 }
@@ -253,9 +254,7 @@ def main(argv=None, *, family=None):
         parser.set_defaults(families=[family])
     else:
         parser.add_argument("--families", nargs="+", choices=CORE_FAMILIES, default=list(CORE_FAMILIES))
-    parser.add_argument(
-        "--config-space", choices=("current", "expanded", "large"), help="Development preset override; final/full use large"
-    )
+    parser.add_argument("--config-space", choices=PRESETS, help="Development preset override; final/full use the capped large preset")
     parser.add_argument("--device-manifest", type=Path, help="JSON list of explicit Device objects, including external worker argv")
     parser.add_argument("--output", type=Path, default=Path("experiments/results") / (f"{family}/study" if family else "five-target-study"))
     parser.add_argument("--plan", action="store_true")

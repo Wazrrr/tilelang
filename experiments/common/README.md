@@ -1,28 +1,68 @@
 # Shared experiment runner reference
 
-## Expanded configuration spaces
+## Configuration spaces
 
-Use `--config-space expanded` or `--config-space large` with `run`, `compare`,
-or `census`. Workload manifests also accept `"config_space": "expanded"`.
+Use `--config-space large` with `run`, `compare`, or `census` for a pool of
+at most 1,024 configurations. `--config-space exhaustive` restores the former
+uncapped `large` domain; `expanded` retains its historical domain.
+Workload manifests accept the same preset names.
 The default `current` preset preserves the existing grids and indices, including
 the user's tiled KDA implementations. Explicit workload/device config lists
-retain precedence. Larger presets retain the smaller preset's candidates in
-the same order. Mathematical shapes, dtype, causal mode and chunk size are
+retain precedence, including lists longer than 1,024 entries. Every generated
+preset retains the `current` candidates at their original indices. `large` is
+a compact subset of `exhaustive`, rather than a superset of `expanded`.
+Mathematical shapes, dtype, causal mode and chunk size are
 workload properties, not configuration-count multipliers.
 
 For default FP16 workloads on A100, the declared pools are:
 
-| Family | Current | Expanded | Large |
-| --- | ---: | ---: | ---: |
-| GEMM and variants | 108 | 2,060 | 6,180 |
-| Attention and causal attention | 54 | 1,044 | 5,004 |
-| Recurrent KDA | 114 | 1,326 | 1,656 |
-| Chunk-output KDA | 420 | 3,336 | 7,384 |
-| Softmax / RMSNorm / row sum | 6 each | 409 each | 691 each |
-| Elementwise | 6 | 279 | 399 |
+| Family | Current | Expanded | Large | Exhaustive |
+| --- | ---: | ---: | ---: | ---: |
+| GEMM and variants | 108 | 2,060 | 1,024 | 6,180 |
+| Attention and causal attention | 54 | 1,044 | 1,024 | 5,004 |
+| Recurrent KDA | 114 | 1,326 | 1,024 | 1,656 |
+| Chunk-output KDA | 420 | 3,336 | 1,024 | 7,384 |
+| Softmax / RMSNorm / row sum | 6 each | 409 each | 691 each | 691 each |
+| Elementwise | 6 | 279 | 399 | 399 |
 
 These counts are before compilation, correctness validation and generated
 code equivalence checks. They are not claims of that many valid unique programs.
+
+### Keeping useful schedules
+
+Before reducing `large`, retain the complete `current` grid and the static
+`protected_configurations` declared by each family:
+
+- GEMM retains 64/128 tiles with K=32/64, all stages, warp policies and swizzles,
+  plus 128×256 and 256×128 tiles with K=16 and square warp policy.
+- Attention retains 32/64/128 tiles with common QK/PV layout combinations,
+  automatic or 8-wide copies, and stages 0/2/3/4.
+- Chunk-output KDA retains K=16 schedules across row/value/causal tiles and
+  both pipeline stage counts, alongside its complete original grid.
+
+The remaining slots use greedy pairwise parameter coverage, then canonical
+configuration hashes to break ties. Enumeration reads no measurement files or
+model scores and uses the same policy for training, validation, and test cases.
+The protected neighborhoods include both archived A100 GEMM sweep winners and
+the previously measured TileTune winners for GEMM, attention, and chunk KDA.
+This preserves those known candidates; it does not establish that every unseen
+shape's best configuration survives the cap.
+
+Space version 2 records the selection policy, protected indices, feature
+coverage, and source `exhaustive` indices in `config-space.json`.
+`budget_omitted_count` counts unique schedules omitted by the cap separately
+from structural rejections and aliases. Alias records keep their exhaustive
+index and use a null compact index when their representative was omitted.
+Outside the retained `current` prefix, compact indices can change; config hashes
+remain stable. Existing larger-pool measurements and heuristic files remain
+historical records of their original pool. Use a new output directory and a
+matching reference when running the new preset.
+
+```bash
+# Inspect the old complete domain without executing it.
+python -m experiments.common.run --plan --devices ampere \
+  --workloads gemm_nn flashattention --config-space exhaustive
+```
 
 Each family's `spaces.py` declares its conditional parameter domains. GEMM parameters include
 `warp_policy` and `swizzle_panel`. Attention accepts independent `qk_policy`,
@@ -560,7 +600,8 @@ standard named suites work with the existing runtime API.
 
 `python -m experiments.suite --suite smoke --plan` plans four families
 with deterministic subsets. Development uses eight cases and up to 256
-configurations; final uses full meaningful spaces and three seeds. See
+configurations; final uses the complete capped `large` pools (up to 1,024 each)
+and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 

@@ -59,6 +59,21 @@ def legality_reason(w, device, c):
     return tile_reason(w, device, [(c.get("block_m", w.parameters["chunk_size"]), c["block_v"])], c["threads"])
 
 
+def protected_configurations(workload):
+    """Keep small-key chunk schedules alongside the original KDA grids."""
+    if workload.op == "kda_chunk_o":
+        yield from _grid(
+            implementation=["tiled"],
+            block_m=[16, 32, 64],
+            block_k=[16],
+            block_v=[64, 128],
+            block_s=[16, 32, 64],
+            stages=[0, 2, 3, 4],
+            intra_stages=[0, 2, 3],
+            threads=[128, 256],
+        )
+
+
 def canonical_config(w, c, device=None):
     c = dict(c)
     defaults = (

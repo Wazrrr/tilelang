@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 
 from experiments.portable.acceptance import assess_seed
 from experiments.portable.spec import Device, TARGETS, Workload
@@ -45,6 +46,21 @@ def test_equivalent_defaults_never_fill_a_budget():
     assert subset["indices"] == [0]
     assert subset["actual_pool_size"] == 1
     assert subset["aliases"] == [dict(index=1, representative=0)]
+
+
+def test_required_subset_members_use_the_budget_and_seed_coverage():
+    w = Workload("softmax", "softmax", dict(rows=7, columns=93))
+    d = Device("ampere", TARGETS["ampere"])
+    configs = [dict(block_rows=r, threads=t) for r in (1, 2, 4) for t in (64, 128, 256)]
+    subset = pairwise_subset(w, d, configs, 5, required_indices=[0, 8])
+    assert {0, 8} <= set(subset["indices"])
+    assert subset["actual_pool_size"] == 5
+    reverse = pairwise_subset(w, d, configs[::-1], 5, required_indices=[0, 8])
+    assert set(subset["config_ids"]) == set(reverse["config_ids"])
+    with pytest.raises(ValueError, match="exceed"):
+        pairwise_subset(w, d, configs, 1, required_indices=[0, 8])
+    with pytest.raises(ValueError, match="inside"):
+        pairwise_subset(w, d, configs, 5, required_indices=[9])
 
 
 def test_no_cube_grid_is_invented_and_no_device_is_removed():
