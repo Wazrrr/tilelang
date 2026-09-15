@@ -4,6 +4,36 @@ from math import prod
 from .src.ir_utils import _int
 
 
+def planned_buffer_versions(col, buffer):
+    """Bound versions using the same def/use stages as InjectSoftwarePipeline.
+
+    Keep region overlap conservative. Unsupported/nested plans use the original
+    stage-depth estimate. This consumes the already charged planning result.
+    """
+    plans = getattr(col, "ampere_plans", {})
+    if not plans or any(len(op.pipeline_stages) > 1 for op in col.operations):
+        return None
+    versions = 1
+    for plan in plans.values():
+        if plan.get("status") != "predicted":
+            return None
+        reads, writes = [], []
+        for event in plan["events"]:
+            for index in event["operations"]:
+                op = col.operations[index]
+                if any(r.buffer.same_as(buffer) for r in op.reads):
+                    reads.append(event)
+                if any(r.buffer.same_as(buffer) for r in op.writes):
+                    writes.append(event)
+        if not writes:
+            continue
+        count = max((event["stage"] for event in reads), default=-1) - min(event["stage"] for event in writes) + 1
+        if count >= 2 and not any(w["order"] < r["order"] and w["stage"] < r["stage"] for w in writes for r in reads):
+            count -= 1
+        versions = max(versions, count)
+    return versions
+
+
 def analyze_shared_memory(col, buffer_facts, pass_configs=None):
     def product(values):
         values = [_int(v) for v in values]
@@ -20,6 +50,9 @@ def analyze_shared_memory(col, buffer_facts, pass_configs=None):
             if any(r.buffer.same_as(buffer) for r in op.writes):
                 factors.append(product(max(1, s) if s is not None else None for s in op.pipeline_stages))
         stages = max(factors) if all(x is not None for x in factors) else None
+        planned = planned_buffer_versions(col, buffer)
+        if planned is not None:
+            stages = planned
         shared.append(
             {
                 "buffer": buffer.name,
@@ -28,6 +61,7 @@ def analyze_shared_memory(col, buffer_facts, pass_configs=None):
                 "shape": [str(x) for x in buffer.shape],
                 "logical_bytes": logical,
                 "pipeline_copies_estimate": stages,
+                "pipeline_copies_basis": "compiler def/use stages and order" if planned is not None else "requested pipeline depth",
                 "allocated_bytes_estimate": logical * stages if logical is not None and stages is not None else None,
             }
         )
@@ -38,7 +72,8 @@ def analyze_shared_memory(col, buffer_facts, pass_configs=None):
         "shared_memory_allocated_sum_bytes": storage["allocated_sum_bytes"],
         "shared_storage_plan": storage,
         "assumptions": [
-            "only shared buffers written in a pipeline receive stage copies; layout padding and compiler barriers are unmodeled",
+            "verified pipeline plans bound buffer versions by def/use stage and order; otherwise requested depth is conservative",
+            "layout padding and compiler barriers are unmodeled",
             "shared tile lifetimes predict storage reuse across disjoint regions; entire repeated loops remain overlapping",
             "shared arena size is an estimate, not a compiler allocation guarantee or a rejection bound",
         ],

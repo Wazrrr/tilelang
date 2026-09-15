@@ -34,7 +34,8 @@ rank, then benchmark”:
    `top_k` adds a full-grid analysis pass before compilation, freezes the first K
    finite eligible scores, and reuses selected PrimFuncs. Unselected candidates
    remain in the report; compilation and benchmark failures never refill K.
-3. **`pipeline_time` is optional.** The default metric is `traffic_waves`.
+3. **`pipeline_time` is the default ranking metric.** Select `traffic_waves`
+   explicitly for traffic-based ranking without a timing profile.
    Pipeline timing requires an explicitly supplied performance profile and a
    supported schedule. Missing timing information does not silently fall back
    to a traffic score.

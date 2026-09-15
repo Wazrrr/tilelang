@@ -234,9 +234,11 @@ num_waves = ceil(grid_CTAs / (SM_count × resident_CTAs_per_SM))
 traffic_waves_score = (logical_traffic_bytes_per_CTA + 1) × num_waves
 ```
 
-The default metric is `traffic_waves`. Select `pipeline_time` with an explicit
-device profile for timing-aware ranking. Matrix work uses aggregate tensor and
-shared-memory service ceilings, plus an optional WGMMA per-warpgroup ceiling.
+The default metric is `pipeline_time`, which requires an explicit device profile
+and a supported schedule. Missing timing information leaves scores unknown;
+there is no automatic fallback. Select `ranking_metric="traffic_waves"` for
+traffic-based ranking without a timing profile. Matrix work uses aggregate tensor
+and shared-memory service ceilings, plus an optional WGMMA per-warpgroup ceiling.
 Scalar, exponential and reduction components use:
 
 ```text
@@ -337,3 +339,14 @@ candidate. Version 13 added A100 profile selection and MMA reduction-map predict
 The [v12 H200 findings](tiletune_validation.md) summarize
 the preceding experiments and known limitations. A100 runtime/performance results
 must be collected on an A100 node; cross-compilation alone is not that validation.
+
+Analysis version 21 adds bounded region schedules, verified explicit reduction
+ownership, compiler-derived shared-buffer versions, distinct allocation/policy
+diagnostics, and opt-in unknown-cost exploration. `pipeline_time` remains the
+default. See the [expanded-space implementation and validation](tiletune_expanded_repair_implementation.md)
+for coverage, compatibility, opt-in settings, and remaining ranking limits.
+
+Analysis version 22 exports resolved CUDA facts and delegates numerical cost,
+resource, scheduling, and ranking calculations to the standalone `tiletune_core`
+package. See the [Hopper reproduction guide](tiletune_hopper_reproduction.md)
+for the committed experiment protocol and H100/H200 commands.

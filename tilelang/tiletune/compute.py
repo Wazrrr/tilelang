@@ -1,12 +1,12 @@
 """Operation work, fragment ownership and effective service cycles."""
 
 from collections import Counter, OrderedDict
+from copy import deepcopy
 from itertools import product
 from math import prod
 import operator
 from tilelang import tvm
 from tvm import tirx as tir
-from .profiling.profile_schema import CONSUMER_RATE_FIELDS
 from .src.ir_utils import _int, call_names
 
 _CACHE = OrderedDict()
@@ -73,7 +73,68 @@ def operation_work(op, col=None):
     return work
 
 
-def scalar_fragment_work(op, layout):
+def _regular_projection_counter(op, layout, axes):
+    """Exact cardinalities for disjoint thread bit fields, in O(sum(axis sizes)).
+
+    This proves separability from the expression tree and checks disjoint bit
+    fields over each complete axis domain. It never guesses from a few points.
+    Arbitrary coupled mappings fall back to the bounded reference enumerator.
+    """
+    variables = [v for v, _, _ in axes]
+    forward = list(layout.get_forward_vars())[-len(op.metadata.indices) :]
+    expression = tir.stmt_functor.substitute(layout.thread, dict(zip(forward, op.metadata.indices)))
+    used = set()
+    tir.stmt_functor.post_order_visit(expression, lambda n: used.add(n) if isinstance(n, tir.Var) else None)
+    extra = [v for v in used if v not in variables]
+    layout_variables = set()
+    tir.stmt_functor.post_order_visit(layout.thread, lambda n: layout_variables.add(n) if isinstance(n, tir.Var) else None)
+    if any(v not in layout_variables or v in forward for v in extra):
+        raise ValueError("scalar indices depend on a nonparallel coordinate")
+    if len(extra) > 1:
+        raise ValueError("coupled or unresolved scalar ownership")
+    dimensions = list(axes) + [(v, 0, _int(layout.replicate_size)) for v in extra]
+    terms = {v: [] for v, _, _ in dimensions}
+    constants = []
+
+    def split(expr):
+        if isinstance(expr, tir.Add):
+            split(expr.a)
+            split(expr.b)
+            return
+        dependencies = set()
+        tir.stmt_functor.post_order_visit(expr, lambda n: dependencies.add(n) if isinstance(n, tir.Var) else None)
+        if not dependencies:
+            constants.append(_int(expr))
+        elif len(dependencies) == 1 and next(iter(dependencies)) in terms:
+            terms[next(iter(dependencies))].append(expr)
+        else:
+            raise ValueError("thread expression couples multiple scalar axes")
+
+    split(expression)
+    if any(n is None or n < 0 for n in constants):
+        raise ValueError("unresolved thread offset")
+    occupied = sum(constants)
+    counts = []
+    for var, lo, n in dimensions:
+        evaluate = _evaluator(sum(terms[var], tir.IntImm(var.dtype, 0)), [var])
+        values = {evaluate([i]) for i in range(lo, lo + n)}
+        bits = 0
+        for value in values:
+            if value < 0:
+                raise ValueError("negative thread contribution")
+            bits |= value
+        if bits & occupied:
+            raise ValueError("thread contributions overlap")
+        occupied |= bits
+        counts.append(len(values))
+
+    def count(mask):
+        return prod(n if i in mask else counts[i] for i, (_, _, n) in enumerate(dimensions))
+
+    return count
+
+
+def scalar_fragment_work(op, layout, *, reference=False):
     """Count per-thread expression values, including replication and local CSE.
 
     Only pure scalar expressions with compiler-inferred ownership enter this
@@ -93,13 +154,22 @@ def scalar_fragment_work(op, layout):
     extra = [var for var in used if not any(var.same_as(v) for v in forward)]
     if len(extra) > 1:
         raise ValueError("unresolved scalar layout replication")
-    owner = _evaluator(layout.thread, forward + extra)
-    indices = [_evaluator(index, variables) for index in op.metadata.indices]
-    points = [
-        (owner([index(coords) for index in indices] + ([replica] if extra else [])), coords)
-        for coords in product(*(range(lo, lo + n) for _, lo, n in axes))
-        for replica in range(replication)
-    ]
+    try:
+        if reference:
+            raise ValueError("bounded reference requested")
+        count = _regular_projection_counter(op, layout, axes)
+    except ValueError:
+        owner = _evaluator(layout.thread, forward + extra)
+        indices = [_evaluator(index, variables) for index in op.metadata.indices]
+        points = [
+            (owner([index(coords) for index in indices] + ([replica] if extra else [])), coords)
+            for coords in product(*(range(lo, lo + n) for _, lo, n in axes))
+            for replica in range(replication)
+        ]
+
+        def count(mask):
+            return len({(thread, *(coords[i] for i in mask)) for thread, coords in points})
+
     counts = {}
 
     def amount(node):
@@ -107,7 +177,7 @@ def scalar_fragment_work(op, layout):
         tir.stmt_functor.post_order_visit(node, lambda n: used.add(n) if isinstance(n, tir.Var) else None)
         mask = tuple(i for i, var in enumerate(variables) if var in used)
         if mask not in counts:
-            counts[mask] = len({(thread, *(coords[i] for i in mask)) for thread, coords in points})
+            counts[mask] = count(mask)
         return counts[mask]
 
     result = dict(elementwise_ops=0, exp_ops=0)
@@ -143,7 +213,7 @@ def scalar_fragment_work(op, layout):
                 visit(arg)
 
     visit(op.metadata.value)
-    result["elementwise_ops"] = max(result["elementwise_ops"], len(set(points)))
+    result["elementwise_ops"] = max(result["elementwise_ops"], count(tuple(range(len(axes)))))
     return result
 
 
@@ -238,7 +308,7 @@ def fragment_reduction_work(layout, shape, axis, subgroup_size=32, *, allow_inte
     variables = forward_vars[-len(shape) :]
     key = (str(layout.thread), tuple(str(v) for v in variables), tuple(shape), axis, replication, subgroup_size, allow_interwarp)
     if key in _CACHE:
-        return dict(_CACHE[key])
+        return deepcopy(_CACHE[key])
     used = set()
     tir.stmt_functor.post_order_visit(layout.thread, lambda n: used.add(n) if isinstance(n, tir.Var) else None)
     extra = [v for v in used if not any(v.same_as(x) for x in variables)]
@@ -300,7 +370,7 @@ def fragment_reduction_work(layout, shape, axis, subgroup_size=32, *, allow_inte
     _CACHE[key] = result
     if len(_CACHE) > 256:
         _CACHE.popitem(last=False)
-    return dict(result)
+    return deepcopy(result)
 
 
 def reduction_work(op, col, pressure, participants, layout_cache):
@@ -323,7 +393,14 @@ def reduction_work(op, col, pressure, participants, layout_cache):
             raise ValueError("partial reduction fragment requires a region mapping")
         layout = col.layouts.get(meta.src.data)
         source = "explicit fragment layout"
+        if getattr(col, "ampere_layout_unknown", None):
+            raise ValueError(f"ownership failed compiler validation: {col.ampere_layout_unknown}")
         inferred = False
+        verified = getattr(col, "inferred_layouts", {}).get(meta.src.data)
+        if layout is not None and verified is not None:
+            if not tvm.ir.structural_equal(layout, verified):
+                raise ValueError("explicit ownership disagrees with compiler layout")
+            source, inferred = "explicit fragment ownership verified by compiler LayoutInference", True
         if layout is None:
             layout = getattr(col, "inferred_layouts", {}).get(meta.src.data)
             if layout is not None:
@@ -353,97 +430,24 @@ def reduction_work(op, col, pressure, participants, layout_cache):
                 layout_cache[meta.src] = layouts[meta.src]
             layout = layout_cache[meta.src]
             source = "compiler MMA/WGMMA fragment layout prediction"
+        if inferred:
+            if pressure.get("target_arch") not in ("sm_80", "sm_86", "sm_89"):
+                raise ValueError("inter-warp collective verification requires the Ampere CUDA lowering")
+            if _int(layout.get_thread_size()) != consumer_threads(op):
+                raise ValueError("partial thread-domain collective is not modeled")
         subgroup = pressure.get("target_model", {}).get("subgroup_size", 32)
         if subgroup is None and pressure.get("target_model", {}).get("kind") is None:
             subgroup = 32  # Preserve the original no-target fragment contract.
         result.update(fragment_reduction_work(layout, shape, axis, subgroup, allow_interwarp=inferred), mapping_source=source)
-        if result.get("shared_pairs") and _int(meta.batch) != 1:
-            raise ValueError("batched inter-warp reduction scheduling is not modeled")
+        if result.get("shared_pairs"):
+            if _int(meta.batch) != 1:
+                raise ValueError("batched inter-warp reduction scheduling is not modeled")
+            dtype = tvm.DataType(meta.src.dtype)
+            result["workspace_bytes"] = consumer_threads(op) * dtype.bits * dtype.lanes // 8
     except Exception as error:
         result["precision"] = "unknown"
         result["reason"] = str(error)
     return result
 
 
-def estimate_phase_cycles(phase, profile, concurrent_ctas):
-    """Apply aggregate SM rates and optional consumer/warpgroup ceilings."""
-    terms = {}
-
-    def service(amount, rate_key):
-        if not amount:
-            return 0
-        rate = profile.get(rate_key)
-        if not rate:
-            return None
-        aggregate = amount * concurrent_ctas / rate
-        if rate_key not in CONSUMER_RATE_FIELDS or not profile.get("consumer_rates"):
-            return aggregate
-        # A CTA cannot use all SM issue capacity when too few consumer
-        # warps are ready. Producer warps do not execute these operations.
-        row = profile["consumer_rates"].get(str(phase.get("consumer_threads")), {})
-        single = row.get(rate_key)
-        return max(aggregate, amount / single) if single else None
-
-    for key, amount in phase["work"].items():
-        if key == "reduction_ops":
-            terms[key] = 0
-            continue
-        if amount is None:
-            return None
-        rate_key = {
-            "gemm_flops": "gemm_flops_per_cycle",
-            "shared_bytes": "shared_bytes_per_cycle",
-            "elementwise_ops": "elementwise_ops_per_cycle",
-            "exp_ops": "exp_ops_per_cycle",
-            "rsqrt_ops": "rsqrt_ops_per_cycle",
-            "reduction_ops": "reduction_ops_per_cycle",
-        }[key]
-        if amount and not profile.get(rate_key):
-            return None
-        terms[key] = service(amount, rate_key)
-        if terms[key] is None:
-            return None
-    if phase["work"]["reduction_ops"]:
-        reduction = phase.get("reduction") or {}
-        if reduction.get("precision") != "predicted" or reduction["dtype"] != profile.get("reduction_dtype", "float32"):
-            return None
-        kind = reduction["operator"]
-        for operation in ("local", "shuffle"):
-            amount = reduction[f"{operation}_pairs"]
-            rate = profile.get(f"reduction_{operation}_{kind}_per_cycle")
-            if amount and not rate:
-                return None
-            cycles = service(amount, f"reduction_{operation}_{kind}_per_cycle")
-            if cycles is None:
-                return None
-            terms["reduction_ops"] += cycles
-        if reduction.get("shared_pairs"):
-            pairs = reduction["shared_pairs"]
-            combine = service(pairs, f"reduction_local_{kind}_per_cycle")
-            dtype = tvm.DataType(reduction["dtype"])
-            shared = service(pairs * 2 * dtype.bits * dtype.lanes / 8, "shared_bytes_per_cycle")
-            if combine is None or shared is None or profile.get("barrier_cycles") is None:
-                return None
-            terms["reduction_ops"] += (
-                combine + shared + (reduction["barrier_rounds"] + reduction.get("workspace_reuse_barriers", 0)) * profile["barrier_cycles"]
-            )
-    # Matrix instructions consume tensor-core and shared-memory service;
-    # scalar/reduction/exp phases execute in program order.
-    group_service = 0
-    group_rate = profile.get("wgmma_flops_per_cycle_per_warpgroup")
-    if group_rate and phase["work"]["gemm_flops"]:
-        participants = phase.get("compute_participants") or {}
-        if participants.get("precision") != "predicted":
-            return None
-        if participants["instruction"] == "cuda.wgmma":
-            groups = participants.get("warpgroups")
-            if not groups:
-                return None
-            group_service = phase["work"]["gemm_flops"] / (groups * group_rate)
-    return (
-        max(terms["gemm_flops"], terms["shared_bytes"], group_service)
-        + terms["elementwise_ops"]
-        + terms["exp_ops"]
-        + terms.get("rsqrt_ops", 0)
-        + terms["reduction_ops"]
-    )
+from tiletune_core.compute import estimate_phase_cycles as estimate_phase_cycles

@@ -172,7 +172,7 @@ def test_recurrent_kda_traffic_and_timing_boundary():
     workload = next(w for w in default_workloads(True) if w.name == "kda_recurrent")
     case = make_case(workload)
     func = case.build(**configurations(workload, Device("hopper", TARGETS["hopper"]))[0])
-    report = analyze_prim_func(func, target=TARGETS["hopper"], device_limits=ILLUSTRATIVE_LIMITS)
+    report = analyze_prim_func(func, {"ranking_metric": "traffic_waves"}, target=TARGETS["hopper"], device_limits=ILLUSTRATIVE_LIMITS)
     memory = report["modules"]["memory_traffic"]
     assert memory["traffic_bytes_per_block"] == 7232
     assert {t["buffer"] for t in memory["input_tiles"]} == {"Q", "K", "V", "G", "Beta"}
@@ -228,7 +228,7 @@ def test_hip_compile_reuses_frozen_ir_and_preserves_flag_ownership(monkeypatch):
         return func
 
     session = TileTuneSession(
-        TileTuneConfig(enabled=True, mode="report_only", top_k=1),
+        TileTuneConfig(enabled=True, mode="report_only", top_k=1, ranking_metric="traffic_waves"),
         configs,
         ["-DSESSION_FLAG=1"],
         target=target,

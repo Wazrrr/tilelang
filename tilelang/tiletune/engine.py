@@ -77,12 +77,6 @@ def run_modules(context, pressure):
         shared = shared_memory.analyze_shared_memory(context.collector, context.buffer_facts, context.pass_configs)
         memory["assumptions"] += shared.pop("assumptions")
         memory.update(shared)
-        waves = occupancy.analyze_waves(context.collector, memory, pressure, context.device_limits)
-        tile_cost = combine_tile_cost(memory, waves)
-        modules.update(memory_traffic=memory, waves=waves)
-        trace.record("memory", lambda: memory)
-        trace.record("waves", lambda: waves)
-
         pipeline_result = pipeline.analyze_pipeline(
             context.collector,
             memory,
@@ -93,9 +87,42 @@ def run_modules(context, pressure):
             family_name=specialization.name,
             phase_labels=phase_labels,
         )
+        if "region_memory" in pipeline_result:
+            memory.update(pipeline_result["region_memory"])
+        workspace = max(((p.get("reduction") or {}).get("workspace_bytes", 0) for p in pipeline_result["phases"]), default=0)
+        memory["collective_workspace_bytes_estimate"] = workspace
+        if memory["shared_memory_bytes_estimate"] is not None:
+            memory["shared_memory_bytes_estimate"] += workspace
+        if workspace:
+            memory["assumptions"].append(
+                "serial scalar collectives reuse one thread-sized workspace; workspace remains separate from the tile arena"
+            )
+        waves = occupancy.analyze_waves(context.collector, memory, pressure, context.device_limits)
+        tile_cost = combine_tile_cost(memory, waves)
+        modules.update(memory_traffic=memory, waves=waves)
+        trace.record("memory", lambda: memory)
+        trace.record("waves", lambda: waves)
+
         modules["pipeline_overlap"] = pipeline_result
         trace.record("pipeline", lambda: pipeline_result)
-        ranking = apply_ranking_metric(tile_cost, waves, pipeline_result, context.config, specialization, pressure["register_demand"])
+        target_kind = (pressure.get("target_model") or {}).get("kind")
+        if target_kind == "cuda":
+            from .facts import cuda_facts
+            from tiletune_core.cuda import evaluate_cuda_facts
+
+            facts = cuda_facts(memory, waves, pipeline_result, context.config, specialization, pressure)
+            evaluation = evaluate_cuda_facts(facts)
+            ranking = evaluation.details["ranking"]
+            trace.record("resolved_facts", facts.to_dict)
+            if context.config.facts_path:
+                import json
+                from pathlib import Path
+
+                path = Path(context.config.facts_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(facts.to_dict(), indent=2, allow_nan=False) + "\n")
+        else:
+            ranking = apply_ranking_metric(tile_cost, waves, pipeline_result, context.config, specialization, pressure["register_demand"])
         modules["ranking"] = ranking
         trace.record("ranking", lambda: ranking)
         tile_cost.update(score=ranking["score"], score_formula=ranking["formula"], ranking_metric=ranking["metric"])
@@ -107,7 +134,15 @@ def run_modules(context, pressure):
 
     for name, result in modules.items():
         result["implementation"] = specialization.name if name != "waves" else "generic"
-    return {"specialization": specialization.to_dict(), "modules": modules, "pressure": pressure, "tile_cost": tile_cost}
+    from .diagnostics import analysis_diagnostics
+
+    return {
+        "specialization": specialization.to_dict(),
+        "modules": modules,
+        "pressure": pressure,
+        "tile_cost": tile_cost,
+        "diagnostics": analysis_diagnostics(modules),
+    }
 
 
 def analyze_kernel(func, config, target, device_limits, pass_configs, trace_context):

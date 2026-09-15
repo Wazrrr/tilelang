@@ -81,7 +81,8 @@ def resolve_target(target=None):
         from tilelang.rocm.target import normalize_rocm_arch, rocm_warp_size_for_arch
 
         arch = normalize_rocm_arch(arch)
-        return TargetModel(kind, arch, "cdna3" if arch == "gfx942" else "rocm", rocm_warp_size_for_arch(arch), None, True, True)
+        family = {"gfx942": "cdna3", "gfx950": "cdna4"}.get(arch, "rocm")
+        return TargetModel(kind, arch, family, rocm_warp_size_for_arch(arch), None, True, True)
     if kind in ("ascend", "ascendc", "pto", "npuir"):
         return TargetModel(kind, arch, "ascend", None, None, False, False)
     return TargetModel(kind, arch, "unknown", None, None, False, False)

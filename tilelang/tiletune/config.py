@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 20
+ANALYSIS_VERSION = 22
 
 
 @dataclass(frozen=True)
@@ -18,13 +18,28 @@ class TileTuneConfig:
     report_path: str | None = None
     ranking: bool = True
     top_k: int | None = None  # Analyze the full grid, then compile at most this many scored candidates.
+    exploration_fraction: float = 0.0  # Opt-in unknown-cost attempts; pure ranking remains the default.
+    exploration_seed: int = 123
     device_limits: dict | None = None
     specialization: str = "auto"
-    ranking_metric: str = "traffic_waves"
+    ranking_metric: str = "pipeline_time"
     performance_model: dict | None = None
     trace_path: str | None = None  # Append intermediate analysis snapshots for manual review.
+    facts_path: str | None = None  # Optional portable compiler-fact artifact.
 
     def __post_init__(self):
+        if self.facts_path is not None and (not isinstance(self.facts_path, str) or not self.facts_path.strip()):
+            raise ValueError("facts_path must be a nonempty string or None")
+        if (
+            isinstance(self.exploration_fraction, bool)
+            or not isinstance(self.exploration_fraction, (int, float))
+            or not 0 <= self.exploration_fraction <= 1
+        ):
+            raise ValueError("exploration_fraction must be in [0, 1]")
+        if type(self.exploration_seed) is not int or self.exploration_seed < 0:
+            raise ValueError("exploration_seed must be a nonnegative integer")
+        if self.exploration_fraction and self.top_k is None:
+            raise ValueError("exploration requires top_k")
         if self.trace_path is not None and (not isinstance(self.trace_path, str) or not self.trace_path.strip()):
             raise ValueError("trace_path must be a nonempty string or None")
         if self.specialization not in ("auto", "generic", "gemm", "attention"):
@@ -77,6 +92,7 @@ class TileTuneConfig:
         values = asdict(self)
         values.pop("report_path")
         values.pop("trace_path")
+        values.pop("facts_path")
         return {"analysis_version": ANALYSIS_VERSION, **values}
 
 

@@ -61,7 +61,8 @@ def test_gpu_exhaustive(tmp_path, grouped, mode):
         assert "analysis" in report["stage_cost_percent"]
         assert len(report["ranking"]) == 2
         assert sorted(r["index"] for r in report["ranking"]) == [0, 1]
-        assert all(r["tile_cost"]["score"] is not None for r in report["configs"])
+        assert report["settings"]["ranking_metric"] == "pipeline_time"
+        assert all(r["tile_cost"]["score"] is None for r in report["configs"])  # no timing profile
         assert all(r["tile_cost"]["input_bytes_per_block"] > 0 for r in report["configs"])
 
 

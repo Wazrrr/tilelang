@@ -102,7 +102,9 @@ def test_attention_winner_physical_occupancy_is_independent_of_soft_scoring(caus
     assert cost["num_waves_estimate"] == 4
     assert after["modules"]["ranking"]["conditional_on_spill_allowance"]
     assert after["modules"]["ranking"]["spill_traffic_modeled"] is False
-    assert after["pressure"]["decision"] == before["pressure"]["decision"]
+    assert after["pressure"]["decision"]["would_reject"] == before["pressure"]["decision"]["would_reject"]
+    assert before["pressure"]["decision"]["classification"] == "allocation_uncertainty"
+    assert after["pressure"]["decision"]["classification"] == "permitted"
     assert after["pressure"]["modeled_lower_bound"] == before["pressure"]["modeled_lower_bound"] == 128
     assert after["modules"]["memory_traffic"] == before["modules"]["memory_traffic"]
 

@@ -2,6 +2,7 @@
 
 from math import prod
 from tvm.arith import Analyzer
+from .src.structural_key import StructuralKey
 from .src.ir_utils import _int, _domains, loop_visits
 from .src.regions import _bound, _clip_global
 
@@ -39,11 +40,16 @@ def analyze_global_memory(col, propagated, buffer_facts, *, loop, actual_accesse
         sources = [(region, op.loops, op.index) for op in col.operations for region in op.reads if region.buffer.scope() == "global"]
     for region, loops, operation in sources:
         visits = loop_visits(loops)
-        entry = tile(_clip_global(region, loops), loops, visits["max"])
+        clipped = _clip_global(region, loops)
+        entry = tile(clipped, loops, visits["max"])
         entry.update(visits=visits, operation=operation, loop_variables=[str(v) for v, _, kind in loops if kind != "4"])
         if visits["precision"] != "exact":
             entry["precision"] = visits["precision"]
-        key = (hash(region.buffer), str(entry["ranges"]), str([(str(v), str(r)) for v, r, kind in loops if kind != "4"]))
+        key = (
+            region.buffer,
+            tuple((StructuralKey(r.min), StructuralKey(r.extent)) for r in clipped.ranges),
+            tuple((v, StructuralKey(r)) for v, r, kind in loops if kind != "4"),
+        )
         if actual_accesses:
             key = (*key, operation)
         if key not in seen:

@@ -25,6 +25,7 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
     physical = {}
     sm_registers = (device_limits or config.device_limits or {}).get("registers_per_sm")
     resources, reasons = {}, []
+    physical_reasons, policy_reasons = [], []
     unknown = not function_names
     for name in function_names:
         item = resource_usage.get(name)
@@ -82,7 +83,25 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
             }
             unknown |= physical[name]["status"] == "unknown"
             if exceeds:
-                reasons.append(f"{name}: initial CTA register allocation {allocation} exceeds SM capacity {sm_registers}")
+                reason = f"{name}: initial CTA register allocation {allocation} exceeds SM capacity {sm_registers}"
+                reasons.append(reason)
+                physical_reasons.append(reason)
+            limits = device_limits or config.device_limits or {}
+            if info is not None:
+                for field, observed, cap in (
+                    ("launch threads", threads, limits.get("max_threads_per_block")),
+                    (
+                        "shared memory",
+                        info.dynamic_smem_bytes + (item.static_smem_bytes or 0)
+                        if item is not None and info.dynamic_smem_bytes is not None
+                        else None,
+                        limits.get("shared_memory_per_block"),
+                    ),
+                ):
+                    if observed is not None and cap is not None and observed > cap:
+                        reason = f"{name}: {field} {observed} exceeds device limit {cap}"
+                        physical_reasons.append(reason)
+                        reasons.append(reason)
         unknown |= any(counters[field] is None for field in ("registers", "spill_stores_bytes", "spill_loads_bytes", "local_bytes"))
         for field, cap in (
             ("spill_stores_bytes", config.max_spill_bytes),
@@ -91,12 +110,26 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
             ("registers", register_budget["budget"]),
         ):
             if cap is not None and counters[field] is not None and counters[field] > cap:
-                reasons.append(f"{name}: {field}={counters[field]} exceeds {cap}")
+                reason = f"{name}: {field}={counters[field]} exceeds {cap}"
+                reasons.append(reason)
+                if field == "registers" and register_budget["budget_source"] == "architecture register limit":
+                    physical_reasons.append(reason)
+                else:
+                    policy_reasons.append(reason)
     return {
         "keep": not reasons or config.mode == "report_only",
         "would_reject": bool(reasons),
         "status": "reject" if reasons else "unknown" if unknown else "pass",
         "reasons": reasons,
+        "classification": "resource_violation"
+        if physical_reasons
+        else "policy_rejection"
+        if reasons
+        else "allocation_uncertainty"
+        if unknown
+        else "permitted",
+        "physical_reasons": physical_reasons,
+        "policy_reasons": [reason for reason in reasons if reason not in physical_reasons],
         "resources": resources,
         "physical_register_allocation": physical,
         **register_budget,
@@ -186,6 +219,13 @@ class TileTuneSession:
                 continue
         self.ranking = rank_records(self.records)
         indices = select_top_k(self.ranking, self.config.top_k)
+        explored = []
+        if self.config.exploration_fraction:
+            from .ranking import select_with_exploration
+
+            indices, explored = select_with_exploration(
+                self.ranking, self.records, self.config.top_k, fraction=self.config.exploration_fraction, seed=self.config.exploration_seed
+            )
         selected = set(indices)
         for record in self.records:
             record["selected"] = record["index"] in selected
@@ -202,6 +242,15 @@ class TileTuneSession:
             "failure_policy": "no replacement after compilation or benchmark failure",
             "wall_time_ms": (time.perf_counter() - started) * 1000,
         }
+        if self.config.exploration_fraction:
+            self.selection.update(
+                method="TileTune + exploration",
+                exploration_policy="implementation_schedule_hash_v1",
+                exploration_fraction=self.config.exploration_fraction,
+                exploration_seed=self.config.exploration_seed,
+                explored_indices=explored,
+                unknown_policy="seeded permitted unknown-cost candidates; no replacement",
+            )
         return indices
 
     def post_compile(self, idx, resource_usage, launch_infos, *, target=None):

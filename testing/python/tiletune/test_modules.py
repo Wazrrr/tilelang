@@ -59,7 +59,7 @@ def test_same_modules_and_unchanged_ir(family):
 @pytest.mark.parametrize("layout", ["bshd", "bhsd"])
 @pytest.mark.parametrize("causal", [False, True])
 def test_attention_traffic_liveness_and_causal_bounds(layout, causal):
-    result = analyze_prim_func(attention(layout, causal), target=TARGET, device_limits=LIMITS)
+    result = analyze_prim_func(attention(layout, causal), {"ranking_metric": "traffic_waves"}, target=TARGET, device_limits=LIMITS)
     assert result["specialization"]["name"] == "attention"
     assert not result["tile_propagation"]["unknown"]
     memory = result["modules"]["memory_traffic"]
@@ -90,7 +90,7 @@ def test_pipeline_stages_help_only_through_modeled_overlap():
     results = [
         analyze_prim_func(
             gemm(stages=s, extent=16),
-            {"ranking_metric": "pipeline_time", "performance_model": PROFILE},
+            {"performance_model": PROFILE},
             target=TARGET,
             device_limits=LIMITS,
         )
@@ -124,6 +124,8 @@ def test_attention_timing_contains_both_gemms_softmax_and_once_only_query():
 
 def test_profiles_and_specializations_are_in_cache_identity():
     default = TileTuneConfig().to_cache_key_dict()
+    assert default == TileTuneConfig(ranking_metric="pipeline_time").to_cache_key_dict()
+    assert default != TileTuneConfig(ranking_metric="traffic_waves").to_cache_key_dict()
     assert default != TileTuneConfig(specialization="attention").to_cache_key_dict()
     assert default != TileTuneConfig(ranking_metric="pipeline_time", performance_model=PROFILE).to_cache_key_dict()
     assert TileTuneConfig(report_path="one").to_cache_key_dict() == TileTuneConfig(report_path="two").to_cache_key_dict()
@@ -135,7 +137,7 @@ def test_profiles_and_specializations_are_in_cache_identity():
 def test_unmatched_specialization_and_missing_profile_remain_eligible():
     for config in (
         {"specialization": "attention"},
-        {"ranking_metric": "pipeline_time"},
+        {},
         {"ranking_metric": "pipeline_time", "performance_model": {"global_bytes_per_cycle": 64}},
     ):
         result = analyze_prim_func(gemm(stages=2), config, target=TARGET, device_limits=LIMITS)

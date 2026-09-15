@@ -19,7 +19,8 @@ def analyze_live_tiles(col, buffer_facts, *, loop):
 
     thread_dims = [_int(v) for k, v in col.threads.items() if k.startswith("threadIdx.")]
     threads = prod(thread_dims) if thread_dims and all(thread_dims) else None
-    loop_ops = [op for op in col.operations if in_loop(op, loop)]
+    loops = col.serial_loops + col.pipeline_loops
+    loop_ops = [[op for op in col.operations if in_loop(op, item)] for item in loops]
     carried = []
     entries = []
     for buffer in col.buffers:
@@ -31,12 +32,14 @@ def analyze_live_tiles(col, buffer_facts, *, loop):
         replication = facts.replication
         if bits is not None:
             bits = bits * threads if private and threads else bits * replication if replication else None
-        touches = [op for op in loop_ops if any(r.buffer.same_as(buffer) for r in op.reads + op.writes)]
-        is_carried = bool(
-            touches
-            and any(r.buffer.same_as(buffer) for r in touches[0].reads)
-            and any(any(r.buffer.same_as(buffer) for r in op.writes) for op in touches)
-        )
+        is_carried = False
+        for operations in loop_ops:
+            touches = [op for op in operations if any(r.buffer.same_as(buffer) for r in op.reads + op.writes)]
+            is_carried |= bool(
+                touches
+                and any(r.buffer.same_as(buffer) for r in touches[0].reads)
+                and any(any(r.buffer.same_as(buffer) for r in op.writes) for op in touches)
+            )
         if is_carried:
             carried.append(buffer)
         entries.append((buffer, bits, is_carried))
@@ -52,7 +55,7 @@ def analyze_live_tiles(col, buffer_facts, *, loop):
                 old.index >= op.index and not _exclusive(old, op) and any(r.buffer.same_as(buffer) for r in old.reads)
                 for old in col.operations
             )
-            if (before and after) or (is_carried and in_loop(op, loop)):
+            if (before and after) or (is_carried and any(in_loop(op, item) for item in loops)):
                 active.append(
                     {
                         "buffer": buffer.name,

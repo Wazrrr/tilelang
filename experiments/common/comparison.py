@@ -512,7 +512,7 @@ def main(argv=None):
                 request = make_request(
                     w, device, dict(settings, method="remeasure", methods=methods, validation_repeats=args.validation_repeats)
                 )
-                from .suite import _existing_or_run
+                from experiments.suite import _existing_or_run
 
                 measured = _existing_or_run(request, output / "winner-remeasurement")
                 write_json(

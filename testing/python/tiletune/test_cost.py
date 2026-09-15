@@ -19,7 +19,9 @@ LIMITS = {
 @pytest.mark.parametrize("stages", [0, 1, 2, 3])
 @pytest.mark.parametrize("trans_a,trans_b", [(False, False), (True, True)])
 def test_gemm_tile_traffic_and_pipeline_storage(stages, trans_a, trans_b):
-    result = analyze_prim_func(gemm(stages=stages, trans_a=trans_a, trans_b=trans_b), device_limits=LIMITS)
+    result = analyze_prim_func(
+        gemm(stages=stages, trans_a=trans_a, trans_b=trans_b), {"ranking_metric": "traffic_waves"}, device_limits=LIMITS
+    )
     cost = result["tile_cost"]
     assert cost["precision"] == "estimate"
     assert {r["buffer"] for r in cost["input_tiles"]} == {"A", "B"}
