@@ -5,12 +5,8 @@ from importlib import import_module
 FAMILIES = {
     "gemm": "gemm",
     "attention": "flash_attention",
-    "kda_recurrent": "kda",
     "kda_chunk_o": "kda",
     "softmax": "softmax",
-    "rmsnorm": "vector",
-    "reduce_sum": "vector",
-    "elementwise": "vector",
 }
 
 

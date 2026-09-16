@@ -1,7 +1,10 @@
 # Autotuning experiments
 
 Each kernel family owns its cases, implementations, references, configuration
-spaces, and experiment commands. Start in the family folder:
+spaces, and experiment commands.
+
+For a new kernel family, follow the [agent guide](.agent). For existing kernels,
+start in the family folder:
 
 | Family | Final FP16 cases | Commands and implementation |
 | --- | --- | --- |
@@ -16,15 +19,13 @@ spaces, and experiment commands. Start in the family folder:
 experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
 ├── flash_attention/         Same family conventions
-├── kda/                     Chunk-output study and recurrent implementation
-├── softmax/                 Full-row and streamed softmax
-├── vector/                  Other normalization/reduction/elementwise kernels
-├── gemm_fp8/                Existing FP8 fixed-grid and system experiments
+├── kda/                     Direct chunk-output example study
+├── softmax/                 Direct online-softmax example study
 ├── common/                  Shared execution and comparison protocol
+├── utils/                   Monitoring, baseline storage, result I/O and shared helpers
 ├── xgboost/                 Shared sampling, training, and prediction
 ├── suite.py                 Complete matrix or selected-family coordinator
 ├── manifests/               Canonical frozen study/device manifests
-├── portable/                Compatibility entry points
 └── results/                 Generated artifacts, ignored by Git
 ```
 
@@ -42,10 +43,11 @@ python -m experiments.softmax.tiletune.run --suite development --device ampere -
 
 A development run uses two test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
-Final uses the `large` pools capped at 1,024 configurations per case and seeds
-123, 456, and 789. Smaller pools stay unchanged. The cap retains the original
-grids and protected family schedules, then fills the remaining slots by
-deterministic parameter coverage. All methods use the same pool.
+The four final kernels call their [example builders directly](example_alignment.md).
+Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
+KDA 720, and softmax 224 configs per case. There is no cap or structural
+prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
+budgets select indices from that pool.
 
 ```bash
 python -m experiments.gemm.tiletune.run --suite development --device ampere \
@@ -55,12 +57,15 @@ python -m experiments.gemm.tiletune.run --suite final --device ampere \
   --output experiments/results/gemm/final-v1
 ```
 
-A named-suite command compares TileTune, random selection, XGBoost, and the
-exhaustive oracle. Selection uses fixed K=20 and `pipeline_time`; XGBoost uses
+A named-suite command compares TileTune, Carver, XGBoost, and the
+exhaustive oracle. Final selection uses K=20 and `pipeline_time`; XGBoost uses
 10% of each of two training pools and one validation pool per family. Its
 settings are 600 rounds, depth 10, learning rate 0.05, subsampling 0.8, and
-validation patience 20. All seeds' selections finish before test oracles;
-winners receive seven shuffled checks. Preparation costs are recorded separately.
+validation patience 20. Baselines use one fixed seed (123 by default) and are
+reused across TileTune's three repeats and later revisions. Each new TileTune
+winner receives seven checks. Preparation costs are recorded separately.
+The existing Carver adapter supports CUDA GEMM; attention, KDA and softmax record
+`unsupported` with its reason rather than substitute another model.
 
 The family command checks acceptance for its requested cases and targets. Its
 report identifies the scope; full five-target final acceptance requires all four
@@ -80,6 +85,117 @@ for explicit worker environments and profiles. The five targets are A100,
 H200, B200/GB200, MI355X, and Ascend 910B/A2. Native implementations and calibrated
 profiles still need device validation; Ascend requires supplied native grids
 and its external worker. Planning a target does not establish hardware support.
+The reusable baseline workflow currently executes on local CUDA devices.
+The lower-level `experiments.common.comparison` and external worker protocol
+remain available for independently configured HIP/Ascend studies.
+
+## Reuse baselines across TileTune revisions
+
+```bash
+python -m experiments.suite --suite full --devices hopper \
+  --baseline-root experiments/results/baselines \
+  --output experiments/results/tiletune/revision-a
+
+# After changing TileTune, use a new run directory and the same baseline root.
+python -m experiments.suite --suite full --devices hopper \
+  --baseline-root experiments/results/baselines \
+  --output experiments/results/tiletune/revision-b
+```
+
+`full` uses all eight final cases and complete pools without asserting final
+acceptance. Family commands support the same flags. Baselines are collected once
+per family/device/experiment identity under `baseline-root/TARGET/FAMILY/HASH/`.
+The bundle contains all oracle outcomes, Carver rankings or explicit unsupported
+records, frozen XGBoost models, training/validation records and test rankings.
+Its completion manifest hashes the artifacts; reuse verifies them without writing
+to the bundle. Incomplete collections are archived and never treated as complete.
+
+The identity covers example kernels, ordered pools, shapes/dtypes, compiler
+sources/toolchain, runtime/driver, GPU model and measurement settings. Baseline
+implementations, XGBoost settings and `--baseline-seed` also identify the bundle.
+Changes confined to `tilelang/tiletune/` or `tiletune_core/`, TileTune repeat seeds,
+and evaluation K reuse the same baselines. Compiler/JIT/profiler or kernel changes
+select a new bundle. The kernel compiler must be rebuilt after native source
+changes; source identity does not rebuild the installed compiler.
+
+New run directories contain `baselines.json` references and per-case links to the
+three saved baselines. Only TileTune executes again. Baseline collection uses
+K=20 for its measured shortlist, but saves complete rankings for offline curves.
+Use `--top-k` with `--suite full` for another TileTune online budget. Each case
+also writes `oracle-curves.json` for K=1/5/10/20/50 and the requested K. A curve at
+another K is a retrospective ranking evaluation, not a measurement of new tuning
+cost. Original baseline costs are labeled as coming from the baseline bundle.
+
+## System optimization ablations
+
+All four family `system/run.py` entry points use the shared
+[system runner](common/system.py) and the same two final FP16 cases/pools:
+
+```bash
+python -m experiments.kda.system.run --plan
+python -m experiments.kda.system.run --variant all \
+  --output experiments/results/kda/system-v1
+```
+
+Replace `kda` with `gemm`, `flash_attention` or `softmax`. `--variant all` runs
+`baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined` in fresh processes
+with cold caches, identical inputs and numerical checks. Pipeline overlaps
+compilation/benchmarking; grouped combines compilation; multi_gpu distributes
+benchmarking; combined enables all three. `--workloads` selects final case names;
+`--config-indices` selects explicit original indices for development checks.
+These replace the former GEMM/attention shape-specific system CLI.
+
+By default the system runner uses all currently idle visible GPUs of one model.
+`--gpus` selects physical indices; multi_gpu/combined require at least two.
+System and local CUDA TileTune/baseline workers record observations every second.
+A foreign compute process rejects the invocation; partial artifacts remain for
+inspection and cannot complete a baseline bundle. Use a new system output or
+rerun an incomplete baseline collection after the GPU becomes idle. Polling
+cannot exclude overlap shorter than one second. The sharded brute-force runner
+additionally retries contaminated shards automatically.
+
+## Compare saved selections against the oracle
+
+The offline script uses result JSONs only; it requires Python 3.10+ and no
+TileLang, accelerator runtime, GPU, or XGBoost installation.
+
+```bash
+bash experiments/compare_results.sh \
+  --oracle /path/to/case/brute_force/outcomes.json \
+  --tiletune /path/to/case/tiletune/tiletune.json \
+  --carver /path/to/case/carver/carver.json \
+  --xgboost /path/to/case/xgboost/xgboost.json \
+  --top-k 1 5 10 20 50 \
+  --output /path/to/comparison.json
+```
+
+Omit `--xgboost` when unused. Each method is optional; supply at least one.
+Run once per workload/device/seed. Input paths can also be method directories.
+`--oracle` accepts an `outcomes.json` list, a `brute_force.json` report with
+`configs`, an `oracle.json` object with `records`, or a heuristic JSON whose
+`reference` points to the full oracle table. Heuristic references are hash
+checked; their separate winner-validation timings are not mixed into the sweep.
+A winner-only summary cannot evaluate unmeasured top-K alternatives.
+
+**Oracle@K = oracle best latency / fastest successful oracle latency among the
+method's first K configs.** 100% means the shortlist contains an oracle-optimal
+config. The printed table shows best latency in milliseconds, Oracle@K, latency
+gap, available/successful config counts and the winning oracle index. The JSON
+also saves winning config dictionaries, selected indices, mapped oracle indices
+and input hashes. Configuration dictionaries are matched exactly; local indices
+may differ. When present, recorded workload, target, device, source and build
+metadata are checked for conflicts. Bare record lists require the caller to
+supply matching workloads and measurement domains.
+
+By default, curves use the saved ranking's finite, eligible entries in saved
+order. Failed compilation/checks consume K and receive no replacements. Missing
+or incomplete oracle records and mismatched configs are errors. A prefix with
+no successful candidate is reported as N/A. Fewer available candidates than K are explicitly
+marked as a shortfall. The `saved` row separately evaluates the actual recorded
+selection, including any exploration choices. Use `--order selected` to evaluate
+only prefixes of `selection.selected_indices`; this cannot reconstruct larger
+shortlists that were never saved. Curves are retrospective diagnostics and do
+not represent new tuning or benchmarking runs.
 
 ## Configuration spaces and results
 
@@ -88,11 +204,12 @@ in `spaces.py`. Each family owns its structural legality and equivalence rules;
 `common/spaces.py` handles deterministic enumeration and audit records. Counts
 are declared candidates before compilation and correctness validation.
 
-`large` is the bounded preset for routine experiments. `expanded` keeps its
-historical grids; `exhaustive` reproduces the former uncapped `large` pools for
-occasional validation through the common run/comparison/census commands.
-The [configuration-space reference](common/README.md#configuration-spaces)
-describes protected schedules, counts, and index migration.
+All four final families use only `expanded`, with the example's native parameter
+names. Their full grids include the original example configs/defaults. Explicit
+CUDA/HIP configs must be members of these grids. Separate vector workloads
+retain their existing presets. The
+[configuration-space reference](common/README.md#configuration-spaces)
+documents counts, failure recording and index migration.
 
 The final manifest at [manifests/five_target_final.json](manifests/five_target_final.json)
 is a frozen snapshot of the family definitions. Final planning checks they match.
@@ -108,6 +225,16 @@ Source, profiles, settings, and configuration subsets are recorded in
 | `acceptance.json` | Per-case and per-seed gates, costs, and study scope |
 
 See [common/README.md](common/README.md) for worker and diagnostic details,
-[xgboost/README.md](xgboost/README.md) for the learned baseline, and
-[legacy.md](legacy.md) for existing fixed-grid/system experiments.
-Old `experiments.portable` commands and imports remain compatible.
+[xgboost/README.md](xgboost/README.md) for the learned baseline.
+Family `system/run.py` commands benchmark compiler execution strategies using
+the same example builders; they are separate from tuner quality.
+
+The retired FP8/vector experiments, compatibility modules, and repair-study
+runner have been removed. The shared runner also uses the eight family-owned
+cases; `--smoke` chooses their development shapes.
+Use the canonical `experiments.common.*` commands and `experiments.suite`.
+Source fingerprints cover active code roots and exclude `results/`; historical
+measurements retain their original hashes. Begin a new run after code changes.
+
+See [workflow validation](workflow_validation.md) for the offline tests, GPU
+checks of all eight cases, and measured baseline-reuse verification.

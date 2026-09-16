@@ -1,7 +1,7 @@
 """One family definition, three deterministic budgets, five explicit targets.
 
-Planning and freezing need only Python. Execution reuses the isolated worker and
-comparison protocol. Final selections for every seed finish before any oracle.
+Planning and freezing need only Python. Execution reuses isolated workers and
+immutable baselines independently of TileTune revisions and repeat seeds.
 """
 
 import argparse
@@ -9,14 +9,13 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
-import subprocess
-import sys
 
 from experiments.families import FAMILIES, family_module
 from tiletune_core.contracts import digest
-from experiments.common.run import make_request, run_case, write_json
+from experiments.common.run import make_request, run_case
+from experiments.utils.io import write_json
 from experiments.common.spec import Device, TARGETS, configuration_space
-from experiments.common.subsets import pairwise_subset
+from experiments.utils.subsets import pairwise_subset
 from experiments.common.spaces import PRESETS
 
 CORE_OPS = ("gemm", "attention", "kda_chunk_o", "softmax")
@@ -26,7 +25,7 @@ BUDGETS = {
     "smoke": dict(cases=4, configurations=16, seeds=[123], compare=False),
     "development": dict(cases=8, configurations=256, seeds=[123], compare=True),
     "final": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
-    # A complete large-preset benchmark can precede the development gates.
+    # A complete expanded-pool benchmark can precede the development gates.
     # It uses the final shapes/protocol without claiming final acceptance.
     "full": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
 }
@@ -52,8 +51,8 @@ def core_cases(suite, families=None):
 def study_plan(suite, devices=None, *, families=None, config_space=None):
     tests = core_cases(suite, families)
     families = [FAMILIES[op] for op in CORE_OPS if any(w.op == op for w in tests)]
-    if suite in ("final", "full") and config_space not in (None, "large"):
-        raise ValueError("final/full suites require the frozen large configuration space")
+    if suite in ("final", "full") and config_space is not None and any(w.config_space != config_space for w in tests):
+        raise ValueError("final/full suites require each family's frozen configuration space")
     budget = dict(BUDGETS[suite], cases=len(tests))
     devices = devices or [Device(name, TARGETS[name], expected_device_pattern=DEVICE_PATTERNS[name]) for name in CORE_TARGETS]
     splits = dict(train=[], validation=[], test=tests)
@@ -92,7 +91,7 @@ def study_plan(suite, devices=None, *, families=None, config_space=None):
         splits={k: [w.to_dict() for w in v] for k, v in splits.items()},
         subsets=audits,
         unavailable=availability,
-        methods=["brute_force", "random", "xgboost", "tiletune"],
+        methods=["brute_force", "carver", "xgboost", "tiletune"],
         validation_repeats=7,
         memory_regime="streaming",
         failure_policy="attempts without replacement",
@@ -110,7 +109,7 @@ def study_plan(suite, devices=None, *, families=None, config_space=None):
 
 
 def freeze(plan, output, settings):
-    from experiments._common import source_hashes
+    from experiments.utils.cli import source_hashes
 
     profiles = {}
     for device in plan["devices"]:
@@ -134,7 +133,11 @@ def _existing_or_run(request, output):
     if (output / "result.json").exists():
         if json.loads((output / "request.json").read_text()) != request:
             raise ValueError("resumed case request differs from the frozen request")
-        return validate_result(json.loads((output / "result.json").read_text()), request)
+        result = validate_result(json.loads((output / "result.json").read_text()), request)
+        monitor = output / "monitor.json"
+        retry = result["status"] == "failed" and monitor.exists() and json.loads(monitor.read_text())["status"] in ("contended", "timeout")
+        if not retry:
+            return result
     if output.exists():
         from datetime import datetime, timezone
 
@@ -167,83 +170,12 @@ def execute_smoke(plan, output, settings):
     return int(any(r["status"] != "smoke_passed" for r in results))
 
 
-def execute_comparison(plan, output, settings):
-    # The existing comparison runner owns training, ranking, measurement, and
-    # per-case artifact verification. This wrapper owns suite and seed ordering.
-    from experiments.common.spec import Workload
+def execute_comparison(plan, output, settings, *, baseline_root=None, baseline_seed=123):
+    from experiments.common.study import execute
 
-    prepared, failures = [], []
-    for description in plan["devices"]:
-        device = Device(**description)
-        if device.name not in plan["unavailable"] and not device.profiles and not device.performance_model:
-            if not device.worker:
-                from experiments.common.comparison import wait_for_idle
-
-                wait_for_idle(output)
-            request = make_request(
-                Workload(**plan["splits"]["test"][0]), device, dict(settings, method="profile", memory_regime=plan["memory_regime"])
-            )
-            result = _existing_or_run(request, output / "preparation" / device.name)
-            if result["status"] != "profiled":
-                failures.append(dict(device=device.name, phase="profile", result=result))
-                continue
-            device = replace(device, profiles=result["profiles"])
-        prepared.append(device.to_dict())
-    # All seeds reference the same profile path/hash, making shared oracle
-    # requests identical. Profile preparation is paid once per target.
-    write_json(output / "prepared-devices.json", prepared)
-    for phase in ("selection", "oracle"):
-        for device in prepared:
-            if device["name"] in plan["unavailable"]:
-                continue
-            split_path = output / (device["name"] + "-splits.json")
-            write_json(split_path, dict(version=1, devices=[device], splits=plan["splits"]))
-            for seed in plan["budget"]["seeds"]:
-                destination = output / str(seed) / device["name"]
-                command = [
-                    sys.executable,
-                    "-m",
-                    "experiments.common.comparison",
-                    "--split-manifest",
-                    str(split_path),
-                    "--methods",
-                    "tiletune",
-                    "random",
-                    "xgboost",
-                    "--top-k",
-                    "20",
-                    "--budget-fraction",
-                    "1",
-                    "--xgb-sample-fraction",
-                    "0.1",
-                    "--validation-repeats",
-                    "7",
-                    "--seed",
-                    str(seed),
-                    "--phase",
-                    phase,
-                    "--oracle-root",
-                    str(output / "oracle"),
-                    "--output",
-                    str(destination),
-                ]
-                for name, value in settings.items():
-                    command.extend(("--" + name.replace("_", "-"), str(value)))
-                if destination.exists():
-                    command.append("--resume")
-                try:
-                    subprocess.run(command, check=True)
-                except subprocess.CalledProcessError as error:
-                    failures.append(dict(device=device["name"], seed=seed, phase=phase, reason=str(error), command=command))
-                    write_json(output / "execution-failures.json", failures)
-    from experiments.common.acceptance import aggregate_study
-
-    report = aggregate_study(plan, output)
-    report["execution_failures"] = failures
-    report["accepted"] &= not failures
-    report["five_target_accepted"] &= not failures
-    write_json(output / "acceptance.json", report)
-    return int(not report["accepted"])
+    return execute(
+        plan, output, settings, baseline_root=baseline_root or Path("experiments/results/baselines").resolve(), baseline_seed=baseline_seed
+    )
 
 
 def main(argv=None, *, family=None):
@@ -254,9 +186,23 @@ def main(argv=None, *, family=None):
         parser.set_defaults(families=[family])
     else:
         parser.add_argument("--families", nargs="+", choices=CORE_FAMILIES, default=list(CORE_FAMILIES))
-    parser.add_argument("--config-space", choices=PRESETS, help="Development preset override; final/full use the capped large preset")
+    parser.add_argument(
+        "--config-space",
+        choices=PRESETS,
+        help="Core families use expanded; final/full use the complete frozen pools",
+    )
     parser.add_argument("--device-manifest", type=Path, help="JSON list of explicit Device objects, including external worker argv")
     parser.add_argument("--output", type=Path, default=Path("experiments/results") / (f"{family}/study" if family else "five-target-study"))
+    parser.add_argument(
+        "--baseline-root",
+        type=Path,
+        default=Path("experiments/results/baselines"),
+        help="Shared immutable baselines across TileTune run directories",
+    )
+    parser.add_argument(
+        "--baseline-seed", type=int, default=123, help="Fixed XGBoost collection/training seed, independent of TileTune repeats"
+    )
+    parser.add_argument("--top-k", type=int, default=20, help="TileTune online budget; final acceptance uses K=20")
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--freeze", action="store_true", help="freeze reviewable inputs without executing the study")
     parser.add_argument("--development-report", type=Path, help="passing development acceptance.json required for final execution")
@@ -275,12 +221,28 @@ def main(argv=None, *, family=None):
         plan = study_plan(args.suite, devices, families=args.families, config_space=args.config_space)
     except ValueError as error:
         parser.error(str(error))
+    if args.top_k < 1 or args.baseline_seed < 0:
+        parser.error("positive top-k and nonnegative baseline seed required")
+    if args.suite == "final" and args.top_k != 20:
+        parser.error("final acceptance uses K=20; use --suite full for other online budgets")
+    plan.update(top_k=args.top_k, baseline_seed=args.baseline_seed, baseline_root=str(args.baseline_root.resolve()))
     if args.plan:
         print(json.dumps(plan, indent=2))
         return 0
     settings = {k: getattr(args, k) for k in ("workers", "warmup", "rep", "timeout", "case_timeout")}
     if any(v <= 0 for v in settings.values()):
         parser.error("execution budgets must be positive")
+    if not args.freeze:
+        import os
+        from experiments.utils.monitor import snapshot, idle_gpus
+
+        if "CUDA_VISIBLE_DEVICES" not in os.environ and any(d.target["kind"] == "cuda" and not d.worker for d in devices):
+            import re
+
+            available = [g for g in idle_gpus(snapshot()) if any(re.search(d.expected_device_pattern or ".*", g["name"]) for d in devices)]
+            if not available:
+                parser.error("no matching idle CUDA GPU; retry when one is available")
+            os.environ["CUDA_VISIBLE_DEVICES"] = available[0]["uuid"]
     output = args.output.resolve()
     freeze(plan, output, settings)
     if args.freeze:
@@ -299,7 +261,11 @@ def main(argv=None, *, family=None):
             or any(not gate.get("targets", {}).get(d.name, {}).get("seeds") for d in devices)
         ):
             parser.error("final execution requires passing development gates for every requested target")
-    return execute_smoke(plan, output, settings) if args.suite == "smoke" else execute_comparison(plan, output, settings)
+    return (
+        execute_smoke(plan, output, settings)
+        if args.suite == "smoke"
+        else execute_comparison(plan, output, settings, baseline_root=args.baseline_root.resolve(), baseline_seed=args.baseline_seed)
+    )
 
 
 if __name__ == "__main__":

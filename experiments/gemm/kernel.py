@@ -1,12 +1,19 @@
-"""GEMM builders: the suite tiled kernel and the legacy advanced kernel."""
+"""Inputs and numerical reference for the advanced example's GEMM kernel."""
 
-from .kernels.advanced import make_kernel as make_kernel, make_inputs as make_inputs
-from .kernels.tiled import gemm_case as gemm_case
-from .reference import reference as reference
-from .spaces import advanced_configurations
-
-make_case = gemm_case
+from examples.gemm.example_gemm_advanced_autotune import make_autotune_kernel_builder
+from experiments.utils.kernel import KernelCase, _random
+from .reference import reference
+from .spaces import support_reason
 
 
-def get_configs():
-    return advanced_configurations()
+def make_case(workload):
+    reason = support_reason(workload)
+    if reason:
+        raise ValueError(reason)
+    p, dtype = workload.parameters, workload.dtype
+    m, n, k = p["m"], p["n"], p["k"]
+
+    def inputs(device, generator):
+        return [_random(shape, dtype, device, generator) for shape in ((m, k), (n, k))]
+
+    return KernelCase(make_autotune_kernel_builder(m, n, k, dtype), inputs, reference, [2])

@@ -22,8 +22,10 @@ import subprocess
 import sys
 import time
 
+from experiments.utils.io import write_json
 from .spec import Device, TARGETS, Workload, configuration_space, configurations, default_workloads, load_manifest, support_reason
-from .spaces import PRESETS, space_summary
+from .spec import PRESETS
+from .spaces import space_summary
 
 
 def exploration_options(settings, config_type):
@@ -37,13 +39,6 @@ def exploration_options(settings, config_type):
     if options["exploration_fraction"]:
         raise ValueError("exploration requires a TileTune runtime with exploration support")
     return {}
-
-
-def write_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, default=str, allow_nan=False) + "\n")
-    temporary.replace(path)
 
 
 def make_request(workload, device, settings):
@@ -175,29 +170,42 @@ def targets_match(requested, observed):
     return left == right
 
 
-def run_external(request, device, output):
+def run_external(request, device, output, *, monitor=False):
     request_path, result_path = output / "request.json", output / "result.json"
     write_json(request_path, request)
     started = time.perf_counter()
+    command = [*device.worker, str(request_path.resolve()), str(result_path.resolve())]
+    if monitor:
+        from experiments.utils.monitor import run_monitored, snapshot, visible_gpus
+
+        gpus = visible_gpus(snapshot())[:1]
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpus[0]["uuid"])
+        run_monitored(command, output, gpus, cwd=device.worker_cwd, env=env, timeout=request["settings"]["case_timeout"])
+    else:
+        _run_unmonitored(command, device.worker_cwd, output, request["settings"]["case_timeout"])
+    result = validate_result(json.loads(result_path.read_text()), request)
+    result["worker_wall_seconds"] = time.perf_counter() - started
+    result["contention_monitor"] = "monitor.json" if monitor else "external worker must provide contention evidence"
+    return result
+
+
+def _run_unmonitored(command, cwd, output, timeout):
     with (output / "worker.log").open("w") as log:
         process = subprocess.Popen(
-            [*device.worker, str(request_path.resolve()), str(result_path.resolve())],
-            cwd=device.worker_cwd,
+            command,
+            cwd=cwd,
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         try:
-            process.wait(timeout=request["settings"]["case_timeout"])
+            process.wait(timeout=timeout)
         except BaseException:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
             raise
     if process.returncode:
         raise RuntimeError(f"worker exited with code {process.returncode}; see worker.log")
-    result = validate_result(json.loads(result_path.read_text()), request)
-    result["worker_wall_seconds"] = time.perf_counter() - started
-    return result
 
 
 def run_native(request, output):
@@ -216,7 +224,7 @@ def run_native(request, output):
     from tilelang.tiletune import TileTuneConfig, current_target, query_device_limits, resolve_target
     from tilelang.tiletune.runtime import TileTuneSession
     from tilelang.cache.kernel_cache import KernelCache
-    from experiments._common import source_hashes
+    from experiments.utils.cli import source_hashes
     from .kernels import make_case
 
     target = resolve_target(device.target)
@@ -329,7 +337,7 @@ def run_native(request, output):
     if indices is None and device.subsets:
         indices = device.subsets.get(workload.name)
     if indices is not None:
-        from experiments._common import select_configs
+        from experiments.utils.cli import select_configs
 
         indices, configs = select_configs(configs, indices)
     else:
@@ -400,6 +408,7 @@ def run_native(request, output):
             device_limits=limits,
             source_sha256=hashes,
             native_build=native_build,
+            measurement_identity=settings.get("measurement_identity"),
             device_observation=result.get("device_observation"),
             performance_model=performance_model,
             profile_identity=profile_identity,
@@ -482,7 +491,7 @@ def run_native(request, output):
             return dict(result, status="model_unavailable", reason=str(error), configs=len(configs))
         raise
     report = tuner.tiletune_report
-    from experiments._tiletune import winner_summary
+    from experiments.utils.tiletune import winner_summary
 
     chosen = winner_summary(report, winner.config, winner.latency)
     chosen["original_index"] = indices[chosen["index"]]
@@ -518,11 +527,22 @@ def run_case(request, output):
                 worker_cwd=str(Path(__file__).resolve().parents[2]),
             )
         )
-        result = run_external(request, worker_device, output)
+        result = run_external(
+            request,
+            worker_device,
+            output,
+            monitor=not device.worker and device.target["kind"] == "cuda" and request["settings"]["method"] != "analyze",
+        )
     except Exception as error:
         import traceback
 
         (output / "error.log").write_text(traceback.format_exc())
+        monitor_path = output / "monitor.json"
+        if monitor_path.exists() and json.loads(monitor_path.read_text())["status"] in ("contended", "timeout"):
+            for name in ("outcomes.json", "brute_force.json", "carver.json", "xgboost.json", "tiletune.json", "validation.json"):
+                path = output / name
+                if path.exists():
+                    path.rename(path.with_name("discarded-" + name))
         result = dict(
             version=request["version"],
             request_id=request["request_id"],
@@ -545,7 +565,7 @@ def worker_main(request_path, result_path):
     os.environ["TILELANG_AUTOTUNE_TIMING_LOG"] = str(output / "timings.tsv")
     try:
         from contextlib import nullcontext
-        from .locking import device_lease
+        from experiments.utils.locking import device_lease
 
         with nullcontext() if request["settings"]["method"] == "analyze" else device_lease(device.target):
             result = run_native(request, output)

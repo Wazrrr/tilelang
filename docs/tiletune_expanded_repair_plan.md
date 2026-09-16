@@ -1,5 +1,9 @@
 # Repair plan for TileTune on expanded configuration spaces
 
+Historical design checkpoint. The repair-study runner and its manifests are now
+retired; use the [current experiments](../experiments/README.md) for executable
+commands. Original measurement artifacts retain their recorded provenance.
+
 2026-09-15. This plan follows the completed A100 expanded-pool pilot and a new
 source audit plus CPU profiling of eight representative configurations. It
 proposes model and selection changes; those changes have not been implemented.
@@ -47,8 +51,9 @@ Code: [family selection](../tilelang/tiletune/families/__init__.py),
 [pipeline analysis](../tilelang/tiletune/pipeline.py),
 [Ampere planning](../tilelang/tiletune/ampere.py),
 [CTA work distribution](../tilelang/tiletune/schedule.py),
-[kernel implementations](../experiments/portable/kernels.py),
-and [streamed reductions](../experiments/portable/kernels_expanded.py).
+[kernel implementations](../experiments/common/kernels.py),
+and the retained [compiler regression fixtures](../testing/python/tiletune/regression_kernels.py).
+The former supplementary vector experiment runner has been removed.
 
 ### 2. Explicit ownership cannot use an existing inter-warp reduction model
 

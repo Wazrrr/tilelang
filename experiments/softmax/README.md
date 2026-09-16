@@ -1,24 +1,12 @@
 # Softmax experiments
 
-Full-row softmax and streamed column tiles with full-row normalization.
+The named suite calls [online softmax](../../examples/online_softmax/online_softmax.py) (`softmax_kernel`) directly.
+The example uses two column passes and a log2/exp2 normalization recurrence. Its tail mask is shared with the experiment.
 
-## Files
-
-```text
-softmax/
-├── README.md          Cases, knobs, commands, and results
-├── cases.py           Train/validation/development/final shapes
-├── spaces.py          Current/expanded/large configuration domains and rules
-├── kernel.py          Kernel builder and input-generation interface
-├── reference.py       Mathematical reference
-├── kernels/           Implemented schedules
-├── tiletune/run.py    Shared comparison protocol for this family
-└── census.py          Compilation/correctness audit
-```
-
-Implementations: kernels/baseline.py, kernels/streamed.py. `kernel.make_case(workload)` supplies the suite's
-builder, inputs, reference, output positions, and numerical tolerances.
-Configuration generation imports only the Python standard library.
+`kernel.py` supplies input generation, the numerical reference and output
+indices. The TileLang program is built directly by the example. `spaces.py`
+defines the single configuration pool using the example's parameter names;
+`cases.py` defines shapes. Planning imports only the Python standard library.
 
 ## Cases
 
@@ -36,59 +24,71 @@ All named-suite cases use FP16. Smoke uses the first development case.
 
 ## Configuration space
 
-Edit `spaces.py` to change these schedule parameters: **block_rows, block_cols; threads; vector; row_threads; implementation**.
-Shapes and dtype belong in `cases.py`; they do not multiply the tuning pool.
-Structural checks and proven aliases live with the family. Generic grid/hash
-bookkeeping is shared through `experiments/common/`.
+Every case uses the same complete **224-config `expanded` pool**:
 
-Current declared pools for the first final case:
+| Parameter | Values |
+| --- | --- |
+| `BLOCK_M` | 1, 2, 4, 8, 16, 32, 64 |
+| `BLOCK_N` | 128, 256, 512, 1024, 2048, 4096, 8192, 16384 |
+| `threads` | 64, 128, 256, 512 |
 
-| Preset | A100 | H200 |
-| --- | ---: | ---: |
-| current | 6 | 6 |
-| expanded | 409 | 409 |
-| large | 691 | 691 |
-| exhaustive | 691 | 691 |
+The example has no autotune grid. Its default launch (1/8192/128) is
+included in this 224-config expansion. Only native row/column tiles and launch
+threads vary; the example's two passes, log2/exp2 recurrence and tail mask are
+preserved.
 
-Softmax's complete pool is already below the 1,024-config `large` cap, so its
-configuration identities and order are unchanged.
-
-Counts precede compilation and correctness checks. Blackwell and MI355X grids
-are declared but need native device validation. Ascend needs a device manifest
-with native configuration grids and an external worker. Native target support
-is tracked in [the validation report](../validation.md).
+Space version 5 has no alternative `current`, `large` or `exhaustive` presets
+for this family. There is no cap, protected subset, target-dependent domain or
+structural prefilter. Every declared candidate is attempted in a full sweep;
+compilation and correctness failures remain recorded. Counts describe candidate
+configs, not a guarantee of that many valid or distinct compiled programs.
+Explicit CUDA/HIP configs must select members of this pool. Smoke and
+development budgets select original indices without changing the pool.
 
 ## Commands
 
 ```bash
-# Inspect the final shapes and complete large configuration pools, without a GPU.
-python -m experiments.softmax.tiletune.run --suite final --device ampere --plan
+# Inspect final cases and complete pools without a GPU.
+python -m experiments.softmax.tiletune.run --suite final --device hopper --plan
 
-# Analyze, compile, and check up to 16 smoke configurations, without latency comparison.
-python -m experiments.softmax.tiletune.run --suite smoke --device ampere \
-  --output experiments/results/softmax/smoke-v1
+# Analyze, compile and check a 16-config subset.
+python -m experiments.softmax.tiletune.run --suite smoke --device hopper \
+  --output experiments/results/softmax/smoke-v5
 
-# Compare TileTune, random, XGBoost, and exhaustive search on development cases.
-python -m experiments.softmax.tiletune.run --suite development --device ampere \
-  --output experiments/results/softmax/development-v1
-
-# Audit expanded development pools in resumable shards.
-python -m experiments.softmax.census --device ampere --config-space expanded \
-  --wait-idle --output experiments/results/softmax/census-v1
-
-# Run final cases after the development gates pass.
-python -m experiments.softmax.tiletune.run --suite final --device ampere \
-  --development-report experiments/results/softmax/development-v1/acceptance.json \
-  --output experiments/results/softmax/final-v1
+# Audit the complete development pools on idle devices.
+python -m experiments.softmax.census --device hopper --config-space expanded \
+  --wait-idle --output experiments/results/softmax/census-v5
 ```
 
-Use `--plan` on the census to inspect its workloads, counts, and original indices.
-Use `--resume` to continue completed census shards with the same inputs. The study
-runner verifies existing artifacts when the same output directory is supplied.
-Use a new directory after source or study-input changes.
+The [shared runner](../common/README.md) describes brute-force collection,
+contention monitoring, timing provenance and comparison runs. Named final
+comparisons use K=20, seeds 123/456/789 and seven shuffled winner checks; they
+require a passing development report. Native support needs device validation;
+planning a target does not establish that its compiler supports every candidate.
+Use a new output directory after source or configuration changes.
 
-The study uses K=20, TileTune `pipeline_time`, 10% XGBoost training/validation
-samples, and seven shuffled winner checks. Final uses three seeds. The shared
-[experiment overview](../README.md) documents the full protocol and output files.
-A family acceptance result covers this family's requested cases and targets;
-complete five-target acceptance is reported by the full matrix study.
+## Recorded results
+
+No new GPU sweep has been recorded for this configuration update. Earlier H200
+heuristic JSONs are preserved under
+`experiments/results/pre-three-single-pools-20260916/softmax/heuristics/H200/`.
+They describe old kernels and pools. Current measurements belong in
+`heuristics/H200/` with their own config IDs, timings and source provenance.
+
+## System ablations and reusable baselines
+
+```bash
+python -m experiments.softmax.system.run --variant all --plan
+python -m experiments.softmax.system.run --variant all \
+  --output experiments/results/softmax/system-v1
+python -m experiments.softmax.tiletune.run --suite full --device hopper \
+  --baseline-root experiments/results/baselines \
+  --output experiments/results/softmax/tiletune-revision-a
+```
+
+System runs support baseline, pipeline, grouped, multi_gpu and combined modes
+on both final FP16 cases. New TileTune output directories reuse verified baseline
+bundles while the kernels, pools and measurement environment remain compatible.
+Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
+explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)
+for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

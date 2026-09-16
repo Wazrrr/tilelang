@@ -34,7 +34,7 @@ def test_family_command_plans_without_a_compiler_or_runtime(family):
 import sys
 sys.path.insert(0, {root!r})
 from experiments.{family}.tiletune.run import main
-assert main(['--suite', 'smoke', '--device', 'ampere', '--config-space', 'current', '--plan']) == 0
+assert main(['--suite', 'smoke', '--device', 'ampere', '--config-space', {"expanded"!r}, '--plan']) == 0
 assert not any(name.split('.')[0] in ('tilelang', 'torch', 'tvm', 'xgboost') for name in sys.modules)
 """
     result = subprocess.run([sys.executable, "-I", "-S", "-c", code], capture_output=True, text=True, check=True)
@@ -48,33 +48,16 @@ assert not any(name.split('.')[0] in ('tilelang', 'torch', 'tvm', 'xgboost') for
 @pytest.mark.parametrize("family", CORE_FAMILIES)
 def test_family_census_uses_its_declared_cases(family, capsys):
     runner = importlib.import_module(f"experiments.{family}.census")
-    assert runner.main(["--config-space", "current", "--plan"]) == 0
+    assert runner.main(["--config-space", "expanded", "--plan"]) == 0
     plan = json.loads(capsys.readouterr().out)
     assert {c["workload"]["name"] for c in plan["cases"]} == {w.name for w in core_cases("development", [family])}
     assert all(c["indices"] == list(range(c["space"]["candidate_count"])) for c in plan["cases"])
 
 
-def test_family_selection_for_all_seeds_precedes_the_oracle(tmp_path, monkeypatch):
-    from experiments import suite
-    from experiments.softmax.cases import training_cases
-
-    cases = core_cases("final", ["softmax"]) + training_cases()
-    device = Device(
-        "ampere",
-        TARGETS["ampere"],
-        performance_model={"test": True},
-        configs={w.name: [dict(block_rows=1, threads=128)] for w in cases},
-    )
-    plan = study_plan("final", [device], families=["softmax"])
-    commands = []
-    monkeypatch.setattr(suite.subprocess, "run", lambda command, **kwargs: commands.append(command))
-    assert suite.execute_comparison(plan, tmp_path, {}) == 1  # No measured results were supplied.
-    assert [c[c.index("--phase") + 1] for c in commands] == ["selection"] * 3 + ["oracle"] * 3
-    assert all(c[1:3] == ["-m", "experiments.common.comparison"] for c in commands)
-    assert all(c[c.index("--budget-fraction") + 1] == "1" for c in commands)
-    manifest = json.loads((tmp_path / "ampere-splits.json").read_text())
-    assert [len(manifest["splits"][s]) for s in ("train", "validation", "test")] == [2, 1, 2]
-    assert {w["op"] for split in manifest["splits"].values() for w in split} == {"softmax"}
+def test_named_suite_declares_three_baselines_and_independent_tiletune_repeats():
+    plan = study_plan("full", [Device("hopper", TARGETS["hopper"])])
+    assert plan["methods"] == ["brute_force", "carver", "xgboost", "tiletune"]
+    assert plan["budget"]["seeds"] == [123, 456, 789]
 
 
 def good_comparison(case):
@@ -111,24 +94,30 @@ def test_family_acceptance_has_local_costs_and_cannot_certify_the_matrix(tmp_pat
 
 
 def test_xgboost_fingerprints_family_implementation_sources():
-    from experiments._common import source_hashes
+    from experiments.utils.cli import source_hashes
     from experiments.xgboost.data import domain, make_context
 
     w = core_cases("final", ["gemm"])[0]
     sources = source_hashes("experiments/common/kernels.py")
     args = (w, "portable.gemm", TARGETS["ampere"], "A100", "event")
     before = make_context(*args, sources)
-    sources["experiments/gemm/kernels/tiled.py"] = "changed implementation"
+    example = "examples/gemm/example_gemm_advanced_autotune.py"
+    assert example in before["kernel_sha256"]
+    sources[example] = "changed example implementation"
+    assert domain(before) != domain(make_context(*args, sources))
+    before = make_context(*args, sources)
+    sources["experiments/gemm/kernel.py"] = "changed implementation"
     assert domain(before) != domain(make_context(*args, sources))
     del sources["experiments/gemm/reference.py"]
     with pytest.raises(ValueError, match="missing kernel source fingerprints"):
         make_context(*args, sources)
 
 
-def test_legacy_audit_script_can_run_directly():
+def test_audit_command_plans_without_runtime():
     root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
-        [sys.executable, "-I", "-S", str(root / "experiments/portable/audit_model.py"), "--help"],
+        [sys.executable, "-S", "-m", "experiments.common.audit_model", "--help"],
+        cwd=root,
         capture_output=True,
         text=True,
         check=True,

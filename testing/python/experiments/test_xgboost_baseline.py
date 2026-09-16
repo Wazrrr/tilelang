@@ -2,16 +2,14 @@
 
 from copy import deepcopy
 import hashlib
-import importlib
 import json
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 
-from experiments.portable.spec import Device, TARGETS, Workload
-from experiments.portable.run import make_request, validate_request, validate_result
+from experiments.common.spec import Device, TARGETS, Workload
+from experiments.common.run import make_request, validate_request, validate_result
 from experiments.xgboost.data import canonical_workload, features, make_context, read_runs, workload_key
 from experiments.xgboost.model import Predictor, evaluate, train
 from experiments.xgboost.sampling import sample_runs, sampling_plan
@@ -48,7 +46,17 @@ def write_run(path, rows, *, name="softmax", failed=(), sample_fraction=None):
         settings=dict(method="exhaustive", **({"xgb_sampling": plan} if plan is not None else {})),
         configs=[GRID[i] for i in indices],
         device_observation=dict(name="Test GPU", target=TARGETS["hopper"]),
-        source_sha256={"experiments/portable/kernels.py": "same-kernel-source"},
+        source_sha256={
+            p: "same-kernel-source"
+            for p in (
+                "experiments/common/kernels.py",
+                "experiments/utils/kernel.py",
+                "experiments/families.py",
+                "experiments/softmax/kernel.py",
+                "experiments/softmax/reference.py",
+                "examples/online_softmax/online_softmax.py",
+            )
+        },
         native_build="test-compiler-build",
     )
     records = [
@@ -81,7 +89,7 @@ def trained(tmp_path):
 
 
 def test_optional_imports_do_not_load_accelerator_or_ml_runtime():
-    code = "import experiments.xgboost.model, experiments.xgboost.data, experiments.xgboost.integration; import sys; assert not {'xgboost', 'torch', 'tilelang', 'numpy'} & sys.modules.keys()"
+    code = "import experiments.xgboost.model, experiments.xgboost.data; import sys; assert not {'xgboost', 'torch', 'tilelang', 'numpy'} & sys.modules.keys()"
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
@@ -108,26 +116,33 @@ def test_split_is_semantic_not_run_name_or_configuration_subset(tmp_path):
     validation[0]["samples"] = validation[0]["samples"][3:]
     with pytest.raises(ValueError, match="workload overlap"):
         train(training, validation, tmp_path / "bad.json")
+    sources = dict.fromkeys(
+        [
+            "experiments/utils/kernel.py",
+            "experiments/families.py",
+            "experiments/gemm/kernel.py",
+            "experiments/gemm/reference.py",
+            "examples/gemm/example_gemm_advanced_autotune.py",
+        ],
+        "same",
+    )
     first = make_context(
-        Workload("a", "gemm", dict(m=32, n=64, k=128)),
+        Workload("a", "gemm", dict(m=32, n=64, k=128, transpose_b=True)),
         "gemm",
         TARGETS["hopper"],
         "Test GPU",
         "event",
-        {"experiments/gemm/kernel.py": "same"},
+        sources,
     )
     second = make_context(
-        Workload("alias", "gemm", dict(m=32, n=64, k=128, batch=1, transpose_a=False)),
+        Workload("alias", "gemm", dict(m=32, n=64, k=128, batch=1, transpose_a=False, transpose_b=True)),
         "gemm",
         TARGETS["hopper"],
         "Test GPU",
         "event",
-        {"experiments/gemm/kernel.py": "same"},
+        sources,
     )
     assert workload_key(first) == workload_key(second)
-    a = dict(workload=canonical_workload(Workload("a", "rmsnorm", dict(rows=4, columns=8, epsilon=1))))
-    b = dict(workload=canonical_workload(Workload("b", "rmsnorm", dict(rows=4, columns=8, epsilon=1.0))))
-    assert workload_key(a) == workload_key(b)
 
 
 def test_duplicate_configurations_cannot_ambiguously_identify_the_winner(trained):
@@ -143,7 +158,7 @@ def test_model_cannot_silently_change_execution_domain(trained, change):
     if change == "device":
         context["device"]["name"] = "Another GPU"
     elif change == "source":
-        context["kernel_sha256"]["experiments/portable/kernels.py"] = "changed-kernel"
+        context["kernel_sha256"]["experiments/common/kernels.py"] = "changed-kernel"
     elif change == "backend":
         context["benchmark_backend"] = "cudagraph"
     else:
@@ -219,7 +234,7 @@ def test_features_exclude_measurements_and_analytical_scores(trained):
 
 def test_selected_elaboration_failures_leave_the_remaining_budget_intact():
     import tilelang  # Initialize the repository's TVM before importing its Target.
-    from experiments.xgboost.execution import prepare_selected
+    from experiments.common.execution import prepare_selected
 
     tried = []
 
@@ -237,18 +252,18 @@ def test_selected_elaboration_failures_leave_the_remaining_budget_intact():
 
 
 def _build_with_bad_rows(block_rows, threads):
-    from experiments.portable.kernels import make_case
+    from experiments.common.kernels import make_case
 
     if block_rows <= 0:
         raise ValueError("bad selected tile")
-    return make_case(Workload("softmax", "softmax", dict(rows=16, columns=128))).build(block_rows, threads)
+    return make_case(Workload("softmax", "softmax", dict(rows=16, columns=128))).build(BLOCK_M=block_rows, BLOCK_N=128, threads=threads)
 
 
 @pytest.mark.parametrize("all_failed", [False, True])
 def test_gpu_frozen_selection_keeps_elaboration_failures_and_original_indices(tmp_path, monkeypatch, all_failed):
     import torch
-    from experiments.portable.kernels import make_case
-    from experiments.xgboost.execution import run_selected
+    from experiments.common.kernels import make_case
+    from experiments.common.execution import run_selected
     from tilelang.tiletune import current_target
 
     if not torch.cuda.is_available():
@@ -417,31 +432,6 @@ def test_presampled_collection_cannot_silently_change_fraction_or_seed(tmp_path)
     for fraction, seed in ((0.1, 123), (0.5, 456)):
         with pytest.raises(ValueError, match="sampling plan"):
             sample_runs(runs, fraction=fraction, seed=seed)
-
-
-@pytest.mark.parametrize("family", ["gemm_fp8", "flash_attention"])
-def test_comparison_children_include_xgboost_and_keep_fingerprint(tmp_path, monkeypatch, family):
-    from experiments._common import prepare_run, write_json
-
-    runner = importlib.import_module(f"experiments.{family}.tiletune.run")
-    model = tmp_path / "model.json"
-    model.write_text("model placeholder; child execution is mocked")
-    args = runner.parse_args(["--method", "all", "--xgb-model", str(model), "--top-k", "2", "--output", str(tmp_path / "runs")])
-    prepare_run(args)
-    children = []
-
-    def run_child(command, *, stdout, stderr):
-        child = runner.parse_args(command[3:])
-        assert child.xgb_model == model and child.xgb_model_sha256 == args.xgb_model_sha256
-        prepare_run(child)
-        write_json(child.output / "summary.json", dict(method=child.method, status="failed"))
-        children.append(child.method)
-        return SimpleNamespace(returncode=1)
-
-    monkeypatch.setattr(runner.subprocess, "run", run_child)
-    monkeypatch.setattr(runner, "remeasure_winners", lambda *args: None)
-    assert not runner.run_all(args)
-    assert children == ["tiletune", "xgboost", "brute_force"]
 
 
 @pytest.mark.parametrize("sizes", [(2, 2, 2), (2, 31, 67), (1, 4, 98), (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1), (60, 60, 80)])

@@ -57,14 +57,25 @@ def test_parallel_scalar_work_counts_tile_elements():
 
 @pytest.mark.parametrize("name", ["softmax", "rmsnorm", "reduce_sum", "kda_recurrent"])
 def test_generic_reductions_use_compiler_ownership(name):
-    from experiments.portable.spec import default_workloads, configurations, Device
-    from experiments.portable.kernels import make_case
+    if name == "kda_recurrent":
+        from regression_kernels import recurrent_program
 
-    workload = next(w for w in default_workloads() if w.name == name)
-    case = make_case(workload)
-    func = case.build(**configurations(workload, Device("ampere", AMPERE))[0])
+        func = recurrent_program(1, 8, 256, 64, 64, "float16", 16, 128)
+        pass_configs = {}
+    elif name == "softmax":
+        from regression_kernels import softmax_program
+
+        # Preserve the FP32-reduction graph this profile was calibrated for.
+        # The experiment's online example also needs log2 and FP16-max rates.
+        func = softmax_program(1024, 2048, "float16", 4, 256, 128, 1, 1)
+        pass_configs = {}
+    else:
+        from regression_kernels import row_reduction_program
+
+        func = row_reduction_program(4096, 4096, "float16", name, 1e-6, 1, 128)
+        pass_configs = {}
     before = func.script()
-    result = analyze(func, case.pass_configs)
+    result = analyze(func, pass_configs)
     pipeline = result["modules"]["pipeline_overlap"]
     assert not pipeline["unknown"]
     assert result["tile_cost"]["score"] > 0

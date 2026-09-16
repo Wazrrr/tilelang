@@ -166,12 +166,12 @@ export CUDA_HOME=/root/cuda-12.4
 export CXX=/usr/bin/g++-10
 export PYTHON=/root/tilelang/.venv/bin/python
 export CMAKE_COMMAND=/root/miniconda3/envs/minf/bin/cmake
-bash experiments/portable/run_accelerator.sh --build \
+bash experiments/common/run_accelerator.sh --build \
   --device ampere --workers 8 --warmup 10 --rep 50 \
   --validation-repeats 7 --wait-idle \
   --output experiments/results/a100-repeat
 ```
 
-The general [runner](../experiments/portable/run_accelerator.sh) accepts an explicit accelerator manifest and workload/configuration overrides. Native CUDA/HIP workers share the request/result protocol; Carver's adapter currently requires CUDA and supported GEMM semantics. Ascend needs an external compiler worker and its own winner-remeasurement implementation. No other accelerator's runtime performance was tested in this task. See the [portable experiment guide](../experiments/portable/README.md) for manifests, planning, resume checks and support boundaries.
+The general [runner](../experiments/common/run_accelerator.sh) accepts an explicit accelerator manifest and workload/configuration overrides. Native CUDA/HIP workers share the request/result protocol; Carver's adapter currently requires CUDA and supported GEMM semantics. Ascend needs an external compiler worker and its own winner-remeasurement implementation. No other accelerator's runtime performance was tested in this task. See the [portable experiment guide](../experiments/common/README.md) for manifests, planning, resume checks and support boundaries.
 
 Raw experiment output is retained locally under `experiments/results/` and ignored by Git. The report and runner changes are uncommitted. The earlier local New Carver work remains preserved in `stash@{0}` (`pre-pull-dev-2026-09-13-local-new-carver-work`).

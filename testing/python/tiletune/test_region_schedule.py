@@ -2,13 +2,13 @@
 
 import pytest
 import tilelang.language as T
-from experiments.portable.kernels_expanded import row_program
+from regression_kernels import softmax_program
 from test_ampere import analyze
 
 
 @pytest.mark.parametrize("rows,columns", [(8, 256), (7, 259), (1, 17)])
 def test_two_pass_softmax_counts_each_masked_access(rows, columns):
-    result = analyze(row_program(rows, columns, "float16", "softmax", 1e-6, 4, 128, 128, 1, 4))
+    result = analyze(softmax_program(rows, columns, "float16", 4, 128, 128, 1, 4))
     pipeline = result["modules"]["pipeline_overlap"]
     assert not pipeline["unknown"], pipeline
     assert pipeline["timing"] is not None

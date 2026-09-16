@@ -1,10 +1,14 @@
 # Expanded TileTune repair implementation
 
+Historical design checkpoint. The repair-study runner and its manifests are now
+retired; use the [current experiments](../experiments/README.md) for executable
+commands. Original measurement artifacts retain their recorded provenance.
+
 This implements the expanded-space repair in analysis version 21. `pipeline_time`
 remains the default. Kernel implementations and native compiler libraries are
 unchanged. The original expanded pilot is preserved as development evidence.
 The new held-out shapes were frozen before changing scoring in
-[`repair_heldout_ampere.json`](../experiments/portable/manifests/repair_heldout_ampere.json).
+`repair_heldout_ampere.json` (retired manifest).
 
 ## Changes by review stage
 
@@ -109,7 +113,7 @@ oracle, and seven shuffled winner rounds:
 ```bash
 CUDA_HOME=/root/cuda-12.4 CXX=/usr/bin/g++-10 \
 LD_LIBRARY_PATH=/root/cuda-12.4/lib64 \
-python -m experiments.portable.repair_study \
+# Retired historical command: python -m experiments.common.repair_study \
   --output experiments/results/expanded-repair-study --workers 16
 ```
 
@@ -197,7 +201,7 @@ source identity. No artifact was relabeled to bypass that check.
 `gemm-full-pool-memory-sensitivity.json` records the additional development-only
 memory-profile comparison. Replaying every archived streaming score with the
 current scheduler gave exact equality before substituting the cached primitive
-rate. The existing `experiments.portable.run --memory-regime cached` option and
+rate. The existing `experiments.common.run --memory-regime cached` option and
 `load_device_profile(..., memory_regime="cached")` expose that service profile;
 `pipeline_time` remains the metric. Cache state is an invocation assumption:
 capacity alone does not establish reuse for arbitrary application calls. The

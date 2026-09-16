@@ -5,7 +5,7 @@ import csv
 import hashlib
 import time
 
-from experiments._common import observe_compilation
+from experiments.utils.cli import observe_compilation
 
 
 def prepare_selected(builder, configs, selected, target):
@@ -31,7 +31,7 @@ def prepare_selected(builder, configs, selected, target):
 
 def run_selected(case, configs, original_indices, target, inputs, expected, settings, output, report, *, report_name="xgboost"):
     from tilelang.autotuner import AutoTuner
-    from experiments.common.run import write_json
+    from experiments.utils.io import write_json
 
     selected = report["selection"]["selected_indices"]
     outcomes = {}

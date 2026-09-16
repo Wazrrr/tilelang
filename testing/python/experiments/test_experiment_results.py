@@ -2,7 +2,7 @@
 
 import pytest
 
-from experiments._tiletune import winner_summary
+from experiments.utils.tiletune import winner_summary
 from tilelang.tiletune.ranking import rank_records
 
 

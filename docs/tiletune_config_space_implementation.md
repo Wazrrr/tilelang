@@ -43,7 +43,7 @@ after compilation.
   explicit row-group ownership and vector widths. Both passes are measured.
 - Elementwise: independent row/column tiling and explicit vector/thread layouts.
 
-[`spaces.py`](../experiments/portable/spaces.py) records generated choices,
+[`spaces.py`](../experiments/common/spaces.py) records generated choices,
 rejection reasons, aliases and stable configuration IDs. Its Ampere warp-policy
 alias rules are checked against the compiler's policy implementation. Unknown
 register pressure and unsupported TileTune scores do not narrow the shared pool.
@@ -65,7 +65,7 @@ Online K remains separate from training sampling. `compare --methods` freezes
 the requested methods before collection, and the independent exhaustive oracle
 runs last. Diagnostics include K=1/5/10/20/50 curves from frozen rankings.
 
-`python -m experiments.portable.census` runs a checkpointed compilation and
+`python -m experiments.common.census` runs a checkpointed compilation and
 correctness census in isolated shards. It records generated device-source hashes,
 compile/measurement failures, and current-pool versus expanded-pool best timings.
 It preserves interrupted shards and checks plan/source/compiler identities on
@@ -320,31 +320,10 @@ These are A100 results for one sampling seed and one held-out shape per family.
 The other kernel families have targeted correctness/census coverage, not a full
 performance comparison. This is not an end-to-end reproduction of WaveTuner.
 
-## Running the new spaces
+## Running the current spaces
 
-```bash
-python -m experiments.portable.run --plan --devices ampere \
-  --workloads gemm_nn flashattention kda_chunk_o softmax \
-  --config-space expanded
-
-python -m experiments.portable.census \
-  --manifest experiments/portable/manifests/expanded_ampere.json \
-  --workloads gemm_nn --shard-size 64 --workers 32 --wait-idle \
-  --output experiments/results/expanded-census
-
-bash experiments/portable/run_accelerator.sh \
-  --manifest experiments/portable/manifests/expanded_ampere.json \
-  --workloads gemm_nn flashattention_causal kda_chunk_o softmax \
-  --methods tiletune xgboost --top-k 20 --xgb-sample-fraction 0.1 \
-  --train-scales 0.25 0.5 --validation-scales 0.75 --test-scales 1.25 \
-  --workers 32 --warmup 5 --rep 20 --case-timeout 7200 \
-  --validation-repeats 7 --seed 123 \
-  --wait-idle --output experiments/results/expanded-comparison
-```
-
-Use the repository's Python/CUDA environment. Append `--resume` to an identical
-census or comparison command to reuse completed work. `large` is available for
-further expansion, but correctness and performance have only been exercised on
-A100 here. Persistent GEMM, split-K/split-KV, additional architectures, and a
-multi-seed performance study remain subsequent stages; they are not represented
-as extra scalar options on these single-kernel implementations.
+The configurations and measurements above are historical. The old supplementary
+FP8/vector families, alternate presets, and expanded-Ampere manifest have been
+removed. Current commands and the single expanded pools are documented in the
+[experiment README](../experiments/README.md) and
+[shared runner reference](../experiments/common/README.md).

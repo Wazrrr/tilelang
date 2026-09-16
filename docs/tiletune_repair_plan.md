@@ -50,7 +50,7 @@ workload identities. The model does not consume TileTune predictions or compiler
 resource counters. Training plus validation collection and fitting cost about
 2,591 seconds, compared with 196 seconds of TileTune primitive profiling.
 
-Sources: [collection coordinator](../experiments/portable/compare.py),
+Sources: [collection coordinator](../experiments/common/comparison.py),
 [sample reader](../experiments/xgboost/data.py),
 [training and inference](../experiments/xgboost/model.py), and
 [saved model audit](../experiments/results/ampere-pipeline-v20/xgboost-fit-audit.json).

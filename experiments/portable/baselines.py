@@ -1,7 +1,0 @@
-"""Compatibility entry point for experiments.common.baselines."""
-
-import sys
-from importlib import import_module
-
-_impl = import_module("experiments.common.baselines")
-sys.modules[__name__] = _impl

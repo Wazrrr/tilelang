@@ -6,10 +6,10 @@ import pytest
 
 
 def test_census_resumes_interruption_preserves_indices_and_checks_provenance(tmp_path, monkeypatch):
-    from experiments import _common
-    from experiments.portable import census, compare
-    from experiments.portable.run import write_json
-    from experiments.portable.spec import Device, Workload, configuration_space
+    from experiments.utils import cli as _common
+    from experiments.common import census, comparison as compare
+    from experiments.utils.io import write_json
+    from experiments.common.spec import Device, Workload, configuration_space
     from tilelang.cache.kernel_cache import KernelCache
 
     source = {"kernel.py": "original"}
@@ -46,25 +46,26 @@ def test_census_resumes_interruption_preserves_indices_and_checks_provenance(tmp
 
     monkeypatch.setattr(census, "run_case", run_case)
     root = tmp_path / "census"
-    args = ["--workloads", "softmax", "--config-indices", "0", "6", "408", "--shard-size", "2", "--output", str(root)]
+    args = ["--workloads", "softmax_aligned", "--config-indices", "0", "6", "223", "--shard-size", "2", "--output", str(root)]
     with pytest.raises(RuntimeError, match="interrupted worker"):
         census.main(args)
     assert census.main(args + ["--resume"]) == 0
-    assert calls == [[0, 6], [408], [408]]
-    directory = root / "ampere" / "softmax"
+    assert calls == [[0, 6], [223], [223]]
+    directory = root / "ampere" / "softmax_aligned"
     preserved = list(directory.glob("shard-00001.interrupted-*"))
     assert len(preserved) == 1
     assert (preserved[0] / "worker.log").read_text() == "original worker log"
     combined = json.loads((directory / "outcomes.json").read_text())
-    assert [r["index"] for r in combined] == [0, 6, 408]
-    assert [r["original_index"] for r in combined] == [0, 6, 408]
+    assert [r["index"] for r in combined] == [0, 6, 223]
+    assert [r["original_index"] for r in combined] == [0, 6, 223]
     assert [r["shard_index"] for r in combined] == [0, 1, 0]
     assert json.loads((directory / "shard-00001" / "outcomes.json").read_text())[0]["index"] == 0
     summary = json.loads((root / "summary.json").read_text())[0]
     assert summary["completed_count"] == summary["correct_count"] == 3
     assert summary["distinct_correct_program_count"] == 2
     assert summary["tuning_seconds"] == 20
-    assert summary["current_best_ms"] == 0.01
+    assert summary["current_best_ms"] is None
+    assert summary["best_ms"] == 0.01
     stamps = {p: p.stat().st_mtime_ns for p in directory.glob("shard-*/*.json")}
     assert census.main(args + ["--resume"]) == 0
     assert len(calls) == 3

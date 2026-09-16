@@ -35,16 +35,25 @@ def main(argv=None):
         (4096, 4096, 256),
         (4096, 4096, 4096),
     ]
-    configs = [
-        dict(block_m=128, block_n=n, block_k=k, stages=s, threads=t) for n, k, t in [(64, 64, 128), (128, 32, 256)] for s in [0, 1, 2, 3]
+    from experiments.gemm.spaces import get_configs
+
+    pool = get_configs()
+    indices = [
+        i
+        for i, c in enumerate(pool)
+        if c["block_M"] == 128
+        and c["block_N"] in (64, 128)
+        and c["block_K"] in (32, 64)
+        and c["thread_num"] == 128
+        and not c["enable_rasteration"]
     ]
-    configs += [dict(block_m=128, block_n=256, block_k=16, stages=s, threads=128) for s in [0, 2]]
-    configs += [dict(block_m=256, block_n=256, block_k=16, stages=0, threads=128)]
+    configs = [pool[i] for i in indices]
     (out / "plan.json").write_text(
         json.dumps(
             dict(
                 shapes=shapes,
                 configs=configs,
+                config_indices=indices,
                 rounds=7,
                 note="Development diagnostic; all compile and measurement costs charged here. No counters enter selection.",
             ),
@@ -56,7 +65,7 @@ def main(argv=None):
     limits = query_device_limits(TARGETS["ampere"])
     with (out / "outcomes.jsonl").open("w") as log:
         for shape in shapes:
-            case = make_case(Workload("diagnostic", "gemm", dict(zip(("m", "n", "k"), shape))))
+            case = make_case(Workload("diagnostic", "gemm", dict(zip(("m", "n", "k"), shape), transpose_b=True)))
             inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
             expected = case.reference(*inputs)
             kernels = []
@@ -82,8 +91,8 @@ def main(argv=None):
                     )
                     actual = kernel(*inputs)
                     case.check(
-                        actual if isinstance(actual, (list, tuple)) else [actual],
-                        expected if isinstance(expected, (list, tuple)) else [expected],
+                        actual if isinstance(actual, list | tuple) else [actual],
+                        expected if isinstance(expected, list | tuple) else [expected],
                     )
                     row = dict(
                         shape=shape,

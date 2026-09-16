@@ -18,8 +18,10 @@ from tilelang.carver.arch import CDNA
 from tilelang.carver.roller.rasterization import NoRasterization
 import torch
 
-from autotune_experiment_utils import append_autotune_result, gemm_tflops, make_seeded_gemm_inputs
-from static_gemm_analyzer import analyze_config_space, write_static_report
+if __package__:
+    from .autotune_experiment_utils import append_autotune_result, gemm_tflops, make_seeded_gemm_inputs
+else:
+    from autotune_experiment_utils import append_autotune_result, gemm_tflops, make_seeded_gemm_inputs
 
 
 def ref_program(A, B):
@@ -306,6 +308,8 @@ def main(
     if use_autotune:
         configs = None
         if static_prune:
+            from static_gemm_analyzer import analyze_config_space, write_static_report
+
             if torch.version.hip is not None:
                 raise RuntimeError("Static GEMM pruning is currently implemented for CUDA/Hopper targets only")
             all_configs = get_configs(M, N, K, with_roller)

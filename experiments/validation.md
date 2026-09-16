@@ -1,11 +1,17 @@
-# Experiment organization validation
+# Historical organization validation: 2026-09-15
+
+This checkpoint describes the earlier organization and kernels. The compatibility
+entry points, local kernel variants and fixed-grid GEMM/attention runners have
+since been removed. These measurements do not validate the current expanded
+pools. See the [current experiment contracts](README.md) and preserve the linked
+historical artifacts with their original source identities.
 
 ## Scope
 
-The four primary families own their cases, configuration spaces, kernels,
+At this checkpoint, the four primary families owned their cases, configuration spaces, kernels,
 references, suite commands, and census commands. Shared execution is in
 `common/`; frozen inputs are in `manifests/`. The `portable/` entry points and
-the original GEMM and attention fixed-grid commands retain compatibility.
+the original GEMM and attention fixed-grid commands retained compatibility at that checkpoint.
 Final GEMM cases are 4096³ and 8192³.
 
 The scripts include the standalone `tiletune_core` dependency for study hashes,

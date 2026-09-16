@@ -58,6 +58,7 @@ def assess_seed(cases, comparisons):
 
 def aggregate_study(plan, root):
     root = Path(root)
+    baseline_refs = json.loads((root / "baselines.json").read_text()) if (root / "baselines.json").exists() else {}
     targets = {}
     case_count = len(plan["splits"]["test"])
     for device in plan["devices"]:
@@ -83,24 +84,30 @@ def aggregate_study(plan, root):
                     )
                 )
             models = []
-            for path in sorted(base.rglob("models/xgboost-*.json")):
+            model_paths = set(base.rglob("models/xgboost-*.json"))
+            for reference in baseline_refs.get(name, {}).values():
+                model_paths.update((Path(reference["path"]) / "collection" / name / "models").glob("xgboost-*.json"))
+            for path in sorted(model_paths):
                 model = json.loads(path.read_text())
                 training = model.get("training", {})
                 fields = ("fit_seconds", "training_collection_seconds", "validation_collection_seconds")
-                models.append(dict(path=str(path.relative_to(root)), costs_seconds={k: training.get(k) for k in fields}))
+                models.append(dict(path=str(path.resolve()), costs_seconds={k: training.get(k) for k in fields}))
             seeds[str(seed)]["preparation"] = preparation
             seeds[str(seed)]["training"] = models
             profile_seconds = (
                 sum(p["seconds"] for p in preparation) if preparation and all(p.get("seconds") is not None for p in preparation) else None
             )
             costs = {}
-            for method in ("tiletune", "random", "xgboost", "brute_force"):
+            for method in plan.get("methods", ("tiletune", "carver", "xgboost", "brute_force")):
                 online = [(r.get("methods", {}).get(method) or {}).get("tuning_seconds") for r in comparisons]
                 online_total = sum(online) if len(online) == case_count and all(v is not None for v in online) else None
                 model_costs = [v for m in models for v in m["costs_seconds"].values()]
                 training_total = sum(model_costs) if models and all(v is not None for v in model_costs) else None
                 prep = profile_seconds if method == "tiletune" else training_total if method == "xgboost" else 0
                 costs[method] = dict(
+                    measurement_origin="baseline bundle"
+                    if method in ("carver", "xgboost", "brute_force") and name in baseline_refs
+                    else "this run",
                     online_seconds=online_total,
                     preparation_seconds=prep,
                     first_use_seconds=online_total + prep if online_total is not None and prep is not None else None,

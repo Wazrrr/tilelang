@@ -6,10 +6,10 @@ import sys
 
 import pytest
 
-from experiments.portable.acceptance import assess_seed
-from experiments.portable.spec import Device, TARGETS, Workload
-from experiments.portable.subsets import pairwise_subset
-from experiments.portable.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
+from experiments.common.acceptance import assess_seed
+from experiments.common.spec import Device, TARGETS, Workload
+from experiments.utils.subsets import pairwise_subset
+from experiments.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
 
 
 def test_smoke_uses_same_cases_and_three_fixed_budgets():
@@ -29,7 +29,7 @@ def test_smoke_uses_same_cases_and_three_fixed_budgets():
 def test_pairwise_is_deterministic_and_preserves_indices():
     w = Workload("softmax", "softmax", dict(rows=7, columns=93))
     d = Device("ampere", TARGETS["ampere"])
-    configs = [dict(block_rows=r, threads=t) for r in [1, 2, 4] for t in [64, 128, 256]]
+    configs = [dict(BLOCK_M=r, BLOCK_N=8192, threads=t) for r in [1, 2, 4] for t in [64, 128, 256]]
     first = pairwise_subset(w, d, configs, 5)
     reverse = pairwise_subset(w, d, configs[::-1], 5)
     assert set(first["config_ids"]) == set(reverse["config_ids"])
@@ -38,11 +38,11 @@ def test_pairwise_is_deterministic_and_preserves_indices():
     assert first["actual_pool_size"] == 5
 
 
-def test_equivalent_defaults_never_fill_a_budget():
-    w = Workload("gemm", "gemm", dict(m=128, n=128, k=128))
+def test_duplicate_configurations_never_fill_a_budget():
+    w = Workload("softmax", "softmax", dict(rows=128, columns=128))
     d = Device("ampere", TARGETS["ampere"])
-    c = dict(block_m=64, block_n=64, block_k=32, threads=128, stages=0)
-    subset = pairwise_subset(w, d, [c, dict(c, warp_policy="square", swizzle_panel=0)], 16)
+    c = dict(BLOCK_M=1, BLOCK_N=8192, threads=128)
+    subset = pairwise_subset(w, d, [c, dict(c)], 16)
     assert subset["indices"] == [0]
     assert subset["actual_pool_size"] == 1
     assert subset["aliases"] == [dict(index=1, representative=0)]
@@ -51,7 +51,7 @@ def test_equivalent_defaults_never_fill_a_budget():
 def test_required_subset_members_use_the_budget_and_seed_coverage():
     w = Workload("softmax", "softmax", dict(rows=7, columns=93))
     d = Device("ampere", TARGETS["ampere"])
-    configs = [dict(block_rows=r, threads=t) for r in (1, 2, 4) for t in (64, 128, 256)]
+    configs = [dict(BLOCK_M=r, BLOCK_N=8192, threads=t) for r in (1, 2, 4) for t in (64, 128, 256)]
     subset = pairwise_subset(w, d, configs, 5, required_indices=[0, 8])
     assert {0, 8} <= set(subset["indices"])
     assert subset["actual_pool_size"] == 5
@@ -91,19 +91,19 @@ def test_missing_case_fails_even_if_other_seven_are_good():
 
 def test_planning_has_no_compiler_runtime_imports():
     root = str(Path(__file__).resolve().parents[3])
-    code = f"import sys; sys.path.insert(0, {root!r}); from experiments.portable.suite import core_cases; assert len(core_cases('final')) == 8; assert not any(k.split('.')[0] in ('tilelang', 'tvm', 'torch') for k in sys.modules)"
+    code = f"import sys; sys.path.insert(0, {root!r}); from experiments.suite import core_cases; assert len(core_cases('final')) == 8; assert not any(k.split('.')[0] in ('tilelang', 'tvm', 'torch') for k in sys.modules)"
     subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)
 
 
 def test_comparison_retains_per_split_config_overrides(tmp_path, capsys):
     from dataclasses import replace
     import json
-    from experiments.portable.compare import main
+    from experiments.common.comparison import main
 
     cases = [replace(core_cases("smoke")[0], name=name).to_dict() for name in ("training", "validation", "test")]
     for i, item in enumerate(cases):
         item["parameters"] = dict(m=128 + i * 128, n=128, k=128)
-    configs = [dict(block_m=32, block_n=32, block_k=32, stages=0, threads=128)]
+    configs = [dict(block_M=32, block_N=32, block_K=32, num_stages=0, thread_num=128, enable_rasteration=False)]
     device = Device("ampere", TARGETS["ampere"], configs={w["name"]: configs for w in cases}, subsets={w["name"]: [0] for w in cases})
     path = tmp_path / "splits.json"
     path.write_text(
@@ -118,7 +118,7 @@ def test_comparison_retains_per_split_config_overrides(tmp_path, capsys):
 def test_protocol_versions_preserve_archived_wire_identity():
     import hashlib
     import json
-    from experiments.portable.run import make_request, validate_request
+    from experiments.common.run import make_request, validate_request
 
     w = core_cases("smoke")[0]
     d = Device("ampere", TARGETS["ampere"])

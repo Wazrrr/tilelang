@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from experiments.gemm.carver import model_target, rank_configs
-from experiments.gemm.kernel import get_configs
+from experiments.gemm.spaces import get_configs
 
 
 def test_legacy_target_spelling_does_not_mutate_compile_target():

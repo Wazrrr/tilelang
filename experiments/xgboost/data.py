@@ -19,11 +19,8 @@ def canonical_workload(workload):
     defaults = {
         "gemm": dict(batch=1, transpose_a=False, transpose_b=False, epilogue="none"),
         "attention": dict(causal=False),
-        "rmsnorm": dict(epsilon=1e-6),
     }
     parameters = {**defaults.get(w.op, {}), **w.parameters}
-    if w.op == "rmsnorm":
-        parameters["epsilon"] = float(parameters["epsilon"])
     return dict(op=w.op, dtype=w.dtype, parameters=parameters)
 
 
@@ -44,27 +41,25 @@ def make_context(workload, implementation, target, device_name, backend, source_
     if not arch or not device_name:
         raise ValueError("XGBoost needs an explicit architecture and observed device name")
     arch = arch.rstrip("af") if kind == "cuda" else arch.split(":")[0] if kind == "hip" else arch
-    reorganized = "experiments/common/kernels.py" in source_hashes
-    suite_kernel = "experiments/common/kernels.py" if reorganized else "experiments/portable/kernels.py"
-    paths = [suite_kernel] if implementation.startswith("portable.") else [f"experiments/{implementation}/kernel.py"]
-    if implementation in ("portable.attention", "flash_attention"):
-        paths += ["examples/flash_attention/example_mha_fwd_bshd.py", "examples/flash_attention/example_mha_tiletune.py"]
-    if implementation.startswith("portable."):
-        paths += sorted(path for path in source_hashes if path.startswith("experiments/portable/kernels_") and path.endswith(".py"))
-    if implementation == "gemm_fp8":
-        paths += ["examples/gemm_fp8/example_tilelang_gemm_fp8.py"]
-    if reorganized:
-        from experiments.families import FAMILIES
+    from experiments.families import FAMILIES
 
-        family = FAMILIES[implementation.removeprefix("portable.")] if implementation.startswith("portable.") else implementation
-        paths += ["experiments/_kernel.py", "experiments/families.py", f"experiments/{family}/kernel.py"]
-        if family != "gemm_fp8":
-            paths += [f"experiments/{family}/reference.py"]
-        # Family builders now import implementation files. Fingerprint those
-        # sources and shared execution code, while retaining archived domains.
-        paths += sorted(
-            path for path in source_hashes if path.startswith((f"experiments/{family}/", "experiments/common/")) and path.endswith(".py")
-        )
+    # Keep the serialized implementation label stable across module cleanup.
+    family = FAMILIES[implementation.removeprefix("portable.")] if implementation.startswith("portable.") else implementation
+    paths = ["experiments/utils/kernel.py", "experiments/families.py", f"experiments/{family}/kernel.py"]
+    if implementation.startswith("portable."):
+        paths.append("experiments/common/kernels.py")
+    paths.append(f"experiments/{family}/reference.py")
+    examples = {
+        "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
+        "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
+        "kda": "examples/kda/chunk_o.py",
+        "softmax": "examples/online_softmax/online_softmax.py",
+    }
+    if family in examples:
+        paths.append(examples[family])
+    paths += sorted(
+        path for path in source_hashes if path.startswith((f"experiments/{family}/", "experiments/common/")) and path.endswith(".py")
+    )
     missing = set(paths) - source_hashes.keys()
     if missing:
         raise ValueError(f"missing kernel source fingerprints: {sorted(missing)}")
@@ -79,57 +74,20 @@ def make_context(workload, implementation, target, device_name, backend, source_
 
 
 def context_from_experiment(experiment):
-    if "workload" in experiment and "device" in experiment:
-        observation = experiment.get("device_observation")
-        if not observation:
-            raise ValueError("training requires actual device observations")
-        return make_context(
-            experiment["workload"],
-            "portable." + experiment["workload"]["op"],
-            observation["target"],
-            observation["name"],
-            "event",
-            experiment["source_sha256"],
-            environment=dict(
-                native_build=experiment.get("native_build"),
-                torch_version=observation.get("torch_version"),
-                runtime_version=observation.get("runtime_version"),
-            ),
-        )
-    args = experiment["arguments"]
-    if "sequence" in args:
-        implementation = "flash_attention"
-        workload = dict(
-            name="attention",
-            op="attention",
-            dtype="float16",
-            parameters={
-                **{key: args[key] for key in ("batch", "heads", "sequence", "dim")},
-                "causal": args["causal"],
-            },
-        )
-    else:
-        implementation = "gemm_fp8" if args["dtype"].startswith("float8") else "gemm"
-        workload = dict(
-            name="gemm",
-            op="gemm",
-            dtype=args["dtype"],
-            parameters={
-                **{key: args[key] for key in ("m", "n", "k")},
-                "transpose_b": True,
-            },
-        )
+    observation = experiment.get("device_observation")
+    if not observation:
+        raise ValueError("training requires actual device observations")
     return make_context(
-        workload,
-        implementation,
-        experiment["target"],
-        experiment["devices"][0]["name"],
-        args["backend"],
+        experiment["workload"],
+        "portable." + experiment["workload"]["op"],
+        observation["target"],
+        observation["name"],
+        "event",
         experiment["source_sha256"],
         environment=dict(
             native_build=experiment.get("native_build"),
-            torch_version=experiment.get("torch_version"),
-            runtime_version=experiment.get("runtime_version"),
+            torch_version=observation.get("torch_version"),
+            runtime_version=observation.get("runtime_version"),
         ),
     )
 
@@ -185,13 +143,13 @@ def read_runs(paths):
             raise ValueError(f"{path}: expected an exhaustive run, found {method!r}")
         if not experiment.get("native_build"):
             raise ValueError(f"{path}: missing compiler build fingerprint; recollect with the current runner")
-        summary_path = path.parent / ("result.json" if "settings" in experiment else "summary.json")
+        summary_path = path.parent / "result.json"
         if not summary_path.exists():
             raise ValueError(f"{path}: missing completed run marker")
         summary = json.loads(summary_path.read_text())
         if summary.get("status") not in ("completed", "ok"):
             raise ValueError(f"{summary_path}: run did not complete successfully")
-        if "settings" in experiment and summary.get("correctness") != "passed":
+        if summary.get("correctness") != "passed":
             raise ValueError(f"{summary_path}: missing passed correctness check")
         record_path = path.parent / "outcomes.json"
         if record_path.exists():

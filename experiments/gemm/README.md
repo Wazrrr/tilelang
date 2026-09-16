@@ -1,109 +1,114 @@
 # GEMM experiments
 
-Tiled matrix multiplication with FP32 accumulation. The advanced-autotune implementation also has a shared-memory epilogue.
+This experiment uses one kernel: [`make_autotune_kernel_builder`](../../examples/gemm/example_gemm_advanced_autotune.py)
+from the advanced GEMM example. `kernel.py` supplies inputs, a numerical reference
+and the runner interface. There are no local TileLang kernels or legacy runners.
 
-## Files
+A has shape (M,K), B has shape (N,K), and the kernel computes C=A@B.T using FP32
+accumulation and the example's shared-memory output. All named-suite workloads
+use FP16 and explicitly record `transpose_b=True`. BF16 is also supported.
+B preparation is outside kernel timing. Batched, NN/TN, fused-epilogue and FP8
+requests are unsupported by this experiment.
 
-```text
-gemm/
-├── README.md          Cases, knobs, commands, and results
-├── cases.py           Train/validation/development/final shapes
-├── spaces.py          Current/expanded/large configuration domains and rules
-├── kernel.py          Kernel builder and input-generation interface
-├── reference.py       Mathematical reference
-├── kernels/           Implemented schedules
-├── tiletune/run.py    Shared comparison protocol for this family
-└── census.py          Compilation/correctness audit
-```
+## One configuration set
 
-Implementations: kernels/advanced.py, kernels/tiled.py. `kernel.make_case(workload)` supplies the suite's
-builder, inputs, reference, output positions, and numerical tolerances.
-Configuration generation imports only the Python standard library.
+[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 2,304 configurations:
+exactly eight times the example's 288 configurations. Tile sizes are sampled more
+finely; the other parameters keep the example's ranges.
 
-## Cases
+| Parameter | Values |
+| --- | --- |
+| `block_M` | 32, 64, 96, 128, 192, 256 |
+| `block_N` | 32, 64, 96, 128, 192, 256 |
+| `block_K` | 16, 32, 48, 64 |
+| `num_stages` | 0, 1, 2, 3 |
+| `thread_num` | 128, 256 |
+| `enable_rasteration` | True, False |
 
-All named-suite cases use FP16. Smoke uses the first development case.
+The example fixes warp policy to Square and enabled rasterization to panel 10.
+The complete original grid and its measured Hopper winner (128x256x64, 3 stages,
+256 threads, rasterization enabled) are included. Every method uses the same
+configuration dictionaries and order. There is no 1,024-config cap, protected
+subset or `current`/`large`/`exhaustive` GEMM preset. Smoke/development budgets
+select recorded indices from this pool. Explicit CUDA/HIP configs must also be
+members of it.
 
-| Split | Case | Parameters |
-| --- | --- | --- |
-| Training | `gemm_train_a` | m=512, n=512, k=512 |
-| Training | `gemm_train_b` | m=1024, n=256, k=768 |
-| Validation | `gemm_validation` | m=384, n=768, k=512 |
-| Development | `gemm_square` | m=1024, n=1024, k=1024 |
-| Development | `gemm_square_large` | m=2048, n=2048, k=2048 |
-| Final | `gemm_square` | m=4096, n=4096, k=4096 |
-| Final | `gemm_square_large` | m=8192, n=8192, k=8192 |
+The pool is identical across target devices. All declared candidates are
+attempted; compilation and correctness failures are recorded. The 2,304 count
+does not assert that every candidate compiles or yields distinct device code.
 
-## Configuration space
+## Files and cases
 
-Edit `spaces.py` to change these schedule parameters: **block_m, block_n, block_k; stages; threads; warp_policy; swizzle_panel**.
-Shapes and dtype belong in `cases.py`; they do not multiply the tuning pool.
-Structural checks and proven aliases live with the family. Generic grid/hash
-bookkeeping is shared through `experiments/common/`.
+- `cases.py`: train/validation/development/final workload definitions.
+- `spaces.py`: the sole compiler-free pool generator and workload contract.
+- `kernel.py`, `reference.py`: example adapter and independent numerical check.
+- `tiletune/run.py`, `census.py`: common study and census entry points.
+- `system/run.py`: compiler/benchmark scheduling comparisons on the same pool.
+- `carver.py`, `service_audit.py`: comparison model and diagnostics using that pool.
+- `heuristics/GPU/`: results from completed sweeps and winner validation.
 
-Current declared pools for the first final case:
-
-| Preset | A100 | H200 |
-| --- | ---: | ---: |
-| current | 108 | 108 |
-| expanded | 2060 | 3000 |
-| large | 1024 | 1024 |
-| exhaustive | 6180 | 9000 |
-
-`large` retains the original 108 configurations, protected central and
-rectangular tile neighborhoods, and deterministic parameter coverage. Both
-archived A100 GEMM sweep winners remain in the pool. `exhaustive` reproduces the
-old uncapped `large` domain; see the [shared preset rules](../common/README.md#configuration-spaces).
-
-Counts precede compilation and correctness checks. Blackwell and MI355X grids
-are declared but need native device validation. Ascend needs a device manifest
-with native configuration grids and an external worker. Native target support
-is tracked in [the validation report](../validation.md).
+| Split | M,N,K |
+| --- | --- |
+| Training A | 512,512,512 |
+| Training B | 1024,256,768 |
+| Validation | 384,768,512 |
+| Development | 1024 cubed; 2048 cubed |
+| Final | 4096 cubed; 8192 cubed |
 
 ## Commands
 
 ```bash
-# Inspect the final shapes and complete large configuration pools, without a GPU.
-python -m experiments.gemm.tiletune.run --suite final --device ampere --plan
+# Inspect the entire final pool, without importing the compiler or using a GPU.
+python -m experiments.gemm.tiletune.run --suite final --device hopper --plan
 
-# Analyze, compile, and check up to 16 smoke configurations, without latency comparison.
-python -m experiments.gemm.tiletune.run --suite smoke --device ampere \
-  --output experiments/results/gemm/smoke-v1
+# Time complete final sweeps on all idle H200s, with contention monitoring.
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.common.brute_force \
+  --workloads gemm_square gemm_square_large --workers 8 \
+  --output experiments/results/h200-gemm-expanded
 
-# Compare TileTune, random, XGBoost, and exhaustive search on development cases.
-python -m experiments.gemm.tiletune.run --suite development --device ampere \
-  --output experiments/results/gemm/development-v1
+# Compile/check a smoke subset, retaining original pool indices.
+python -m experiments.gemm.tiletune.run --suite smoke --device hopper \
+  --output experiments/results/gemm/smoke
 
-# Audit expanded development pools in resumable shards.
-python -m experiments.gemm.census --device ampere --config-space expanded \
-  --wait-idle --output experiments/results/gemm/census-v1
-
-# Run final cases after the development gates pass.
-python -m experiments.gemm.tiletune.run --suite final --device ampere \
-  --development-report experiments/results/gemm/development-v1/acceptance.json \
-  --output experiments/results/gemm/final-v1
+# Compare TileTune, Carver, XGBoost and brute force on development shapes.
+python -m experiments.gemm.tiletune.run --suite development --device hopper \
+  --output experiments/results/gemm/development
 ```
 
-Use `--plan` on the census to inspect its workloads, counts, and original indices.
-Use `--resume` to continue completed census shards with the same inputs. The study
-runner verifies existing artifacts when the same output directory is supplied.
-Use a new directory after source or study-input changes.
+The monitored sweep disables compilation/autotune caches and checks each
+successful candidate against the numerical reference. CUDA-event timing uses
+10 ms warmup, 50 ms repetition and a 256 MiB cache flush outside the measured
+interval. The minimum correct measured latency selects the winner; seven fresh
+measurements validate it. Foreign GPU processes invalidate an affected shard,
+which is retried. Monitoring polls every second and cannot exclude shorter
+interference.
 
-The study uses K=20, TileTune `pipeline_time`, 10% XGBoost training/validation
-samples, and seven shuffled winner checks. Final uses three seeds. The shared
-[experiment overview](../README.md) documents the full protocol and output files.
-A family acceptance result covers this family's requested cases and targets;
-complete five-target acceptance is reported by the full matrix study.
+Space version 4 identifies this pool. Old measured records are archived under
+`experiments/results/gemm-pre-single-pool-20260916/heuristics/`; their timings
+belong to their original programs and pools. New results include source/build
+hashes, raw outcomes, device observations and elapsed time.
 
-## Existing fixed-grid and system experiments
+The completed [H200 sweep](heuristics/H200/README.md) attempted all 2,304 configs
+for both final shapes. The 4096³ winner matches the example; the 8192³ winner
+uses a 192×256×64 tile and improves by 3.36% against the previous example winner
+in the longer paired FP16 comparison. The full sweeps and initial validation
+took approximately 22.1 active minutes on 6–8 available GPUs.
 
-The existing `system/run.py` commands remain available. Existing tuning commands
-without named-suite options retain their original fixed-grid defaults. The old
-runner is in `tiletune/legacy.py`; use `--legacy --help` to see its arguments.
-See [legacy.md](legacy.md) for the complete system and fixed-grid commands.
+## System ablations and reusable baselines
 
-The advanced implementation uses `spaces.advanced_configurations()` (288 choices),
-with its original `block_M`/`thread_num` argument names. The suite tiled
-implementation uses `current`, `expanded`, and `large`, with `block_m`/`threads`.
-The grids are specific to their implementations. Carver remains available in
-the legacy comparison for supported GEMM configurations.
+```bash
+python -m experiments.gemm.system.run --variant all --plan
+python -m experiments.gemm.system.run --variant all \
+  --output experiments/results/gemm/system-v1
+python -m experiments.gemm.tiletune.run --suite full --device hopper \
+  --baseline-root experiments/results/baselines \
+  --output experiments/results/gemm/tiletune-revision-a
+```
+
+System runs support baseline, pipeline, grouped, multi_gpu and combined modes
+on both final FP16 cases. New TileTune output directories reuse verified baseline
+bundles while the kernels, pools and measurement environment remain compatible.
+Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
+explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)
+for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

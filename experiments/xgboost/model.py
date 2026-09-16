@@ -308,6 +308,8 @@ class Predictor:
 
 
 def evaluate(predictor, runs, top_k):
+    from experiments.utils.results import oracle_at_k
+
     results = []
     for run in runs:
         report = predictor.rank(run["context"], run["configs"], top_k)
@@ -320,7 +322,7 @@ def evaluate(predictor, runs, top_k):
                 provenance=run["provenance"],
                 selection=report["selection"],
                 selected_candidates_with_oracle_measurement=len(valid),
-                oracle_at_k=min(times.values()) / min(times[index] for index in valid) if valid else None,
+                oracle_at_k=oracle_at_k(times, selected),
             )
         )
     return dict(model_sha256=predictor.sha256, top_k=top_k, results=results)

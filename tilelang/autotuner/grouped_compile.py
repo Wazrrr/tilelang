@@ -58,20 +58,26 @@ def compile_grouped_unit_tvm_ffi(
     5. Construct per-config JITKernel objects that dispatch to named entries in the shared executable.
     """
 
-    if tiletune_session is not None and _prepared_programs is None:
+    if _prepared_programs is None:
         # Function attributes are available only after elaboration. Split groups
         # by effective settings before lowering, keeping the same PrimFunc.
         buckets = {}
         results = []
         for idx, config_arg in unit_items:
             try:
-                program = tiletune_session.elaborate(
-                    idx, config_arg, elaborate_func, target=compile_args.target, pass_configs=compile_args.pass_configs
-                )
+                if tiletune_session is not None:
+                    program = tiletune_session.elaborate(
+                        idx, config_arg, elaborate_func, target=compile_args.target, pass_configs=compile_args.pass_configs
+                    )
+                else:
+                    with compile_args.target:
+                        program = elaborate_func(**config_arg)
                 attrs = program.attrs or {}
                 effective_pc = dict(attrs.get("tilelang_pass_configs", {}))
                 effective_pc.update(compile_args.pass_configs or {})
-                flags = list(attrs.get("tilelang_compile_flags", [])) + tiletune_session.compile_flags
+                flags = list(attrs.get("tilelang_compile_flags", []))
+                if tiletune_session is not None:
+                    flags += tiletune_session.compile_flags
                 if flags:
                     key = PassConfigKey.TL_DEVICE_COMPILE_FLAGS
                     effective_pc[key] = list(effective_pc.get(key, [])) + flags
@@ -85,13 +91,19 @@ def compile_grouped_unit_tvm_ffi(
                 bucket = buckets.setdefault(key, (effective, [], {}))
                 bucket[1].append((idx, config_arg))
                 bucket[2][idx] = program
-                tiletune_session.records[idx]["effective_pass_configs"] = effective_pc
+                if tiletune_session is not None:
+                    tiletune_session.records[idx]["effective_pass_configs"] = effective_pc
             except Exception as error:
                 results.append((idx, config_arg, None, error))
         for effective, items, programs in buckets.values():
             results.extend(
                 compile_grouped_unit_tvm_ffi(
-                    items, effective, elaborate_func, tiletune_session=tiletune_session, _prepared_programs=programs
+                    items,
+                    effective,
+                    elaborate_func,
+                    filter_config=filter_config,
+                    tiletune_session=tiletune_session,
+                    _prepared_programs=programs,
                 )
             )
         return results

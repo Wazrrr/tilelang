@@ -11,12 +11,12 @@ The audit covers all 2,160 candidate-case pairs in the 34 hardware-supported hel
 Regenerate the candidate audit without a GPU or TileLang import:
 
 ```bash
-python experiments/portable/audit_model.py \
+python experiments/common/audit_model.py \
   experiments/results/ampere-full-comparison-idle \
   --output /tmp/tiletune-model-audit.json
 ```
 
-Use a new output filename. The [audit script](../experiments/portable/audit_model.py) checks that every candidate index and configuration matches the independent oracle. Diagnostic reproduction and replay scripts are retained beside the result files as `.py.txt` files.
+Use a new output filename. The [audit script](../experiments/common/audit_model.py) checks that every candidate index and configuration matches the independent oracle. Diagnostic reproduction and replay scripts are retained beside the result files as `.py.txt` files.
 
 **Measured coverage and selection loss.** Only 651/2,160 candidates receive eligible timing scores: 30.1% of the declared grid, or 32.6% of the correct, compilable candidates. There are 1,509 unknown scores and no `pressure_rejected` tiers in these timing reports. Only 3/34 exhaustive winners are eligible. Timing completes 26 cases; eight have no usable model.
 

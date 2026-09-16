@@ -5,7 +5,6 @@ targets are examples: the runtime must verify the actual device before execution
 """
 
 from dataclasses import asdict, dataclass
-from itertools import product
 import re
 
 from .spaces import PRESETS
@@ -24,15 +23,11 @@ TARGETS = {
 _PARAMETERS = {
     "gemm": ({"m", "n", "k"}, {"batch", "transpose_a", "transpose_b", "epilogue"}),
     "attention": ({"batch", "heads", "sequence", "dim"}, {"causal"}),
-    "kda_recurrent": ({"batch", "heads", "sequence", "dim", "value_dim"}, set()),
     "kda_chunk_o": ({"batch", "heads", "sequence", "dim", "value_dim", "chunk_size"}, set()),
     "softmax": ({"rows", "columns"}, set()),
-    "rmsnorm": ({"rows", "columns"}, {"epsilon"}),
-    "reduce_sum": ({"rows", "columns"}, set()),
-    "elementwise": ({"rows", "columns"}, set()),
 }
 
-_DTYPES = ("float16", "bfloat16", "float32", "float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+_DTYPES = ("float16", "bfloat16", "float32")
 
 
 @dataclass(frozen=True)
@@ -42,11 +37,13 @@ class Workload:
     parameters: dict
     dtype: str = "float16"
     configs: list[dict] | None = None
-    config_space: str = "current"
+    config_space: str | None = None
 
     def __post_init__(self):
+        if self.config_space is None:
+            object.__setattr__(self, "config_space", "expanded")
         if self.config_space not in PRESETS:
-            raise ValueError(f"config_space must be one of {', '.join(PRESETS)}")
+            raise ValueError("experiments have one configuration space: expanded")
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", self.name):
             raise ValueError("workload name must be a single safe path component")
         if self.op not in _PARAMETERS:
@@ -61,19 +58,12 @@ class Workload:
             elif key == "epilogue":
                 if value not in ("none", "bias", "bias_relu"):
                     raise ValueError("epilogue must be none, bias, or bias_relu")
-            elif key == "epsilon":
-                from math import isfinite
-
-                if isinstance(value, bool) or not isinstance(value, float | int) or not isfinite(value) or value <= 0:
-                    raise ValueError("epsilon must be finite and positive")
             elif type(value) is not int or value <= 0:
                 raise ValueError(f"{key} must be a positive integer")
         if self.dtype not in _DTYPES:
             raise ValueError(f"Unsupported workload dtype {self.dtype}")
         if self.op in ("attention", "kda_chunk_o") and self.dtype not in ("float16", "bfloat16"):
             raise ValueError(f"{self.op} supports float16 and bfloat16")
-        if self.op != "gemm" and self.dtype.startswith("float8"):
-            raise ValueError("FP8 is currently an explicit GEMM workload")
         if self.op == "kda_chunk_o" and self.parameters["sequence"] % self.parameters["chunk_size"]:
             raise ValueError("kda_chunk_o requires complete chunks")
         if self.configs is not None and (not self.configs or any(not isinstance(c, dict) or not c for c in self.configs)):
@@ -153,57 +143,29 @@ class Device:
         return values
 
 
-def _grid(**axes):
-    return [dict(zip(axes, values)) for values in product(*axes.values())]
-
-
 def configurations(workload, device):
     return configuration_space(workload, device)["configs"]
 
 
 def configuration_space(workload, device):
     """Return the deterministic pool and its timing-independent generation audit."""
-    from .spaces import expand_space
-
-    if device.configs and workload.name in device.configs:
-        return expand_space(workload, device, device.configs[workload.name], explicit=True)
-    if workload.configs is not None:
-        return expand_space(workload, device, workload.configs, explicit=True)
-    return expand_space(workload, device, _current_configurations(workload))
-
-
-def _current_configurations(workload):
+    from .spaces import audit_space
     from experiments.families import family_module
 
-    return family_module(workload.op, "spaces").current_configurations(workload)
+    pool = family_module(workload.op, "spaces").get_configs()
+    supplied = (device.configs or {}).get(workload.name, workload.configs)
+    if supplied is not None and device.target["kind"] in ("cuda", "hip") and any(c not in pool for c in supplied):
+        raise ValueError(f"{workload.op.upper()} explicit configurations must be a subset of the expanded example pool")
+    if supplied is not None:
+        return audit_space(workload, supplied, explicit=True, retained_current_count=len(supplied))
+    return audit_space(workload, pool)
 
 
 def default_workloads(smoke=False):
-    m = 128 if smoke else 2048
-    sequence = 128 if smoke else 2048
-    rows = 32 if smoke else 4096
-    cols = 128 if smoke else 4096
-    gemm = dict(m=m, n=m, k=m)
-    attention = dict(batch=1, heads=2 if smoke else 16, sequence=sequence, dim=64)
-    kda = dict(batch=1, heads=2 if smoke else 8, sequence=16 if smoke else 256, dim=32 if smoke else 64, value_dim=32 if smoke else 64)
-    return [
-        Workload("gemm_nn", "gemm", gemm),
-        Workload("gemm_nt", "gemm", dict(gemm, transpose_b=True)),
-        Workload("gemm_tn", "gemm", dict(gemm, transpose_a=True)),
-        Workload("gemm_batched", "gemm", dict(gemm, batch=4)),
-        Workload("gemm_bias_relu", "gemm", dict(gemm, epilogue="bias_relu")),
-        Workload("gemm_bf16", "gemm", gemm, "bfloat16"),
-        Workload("gemm_fp8", "gemm", gemm, "float8_e4m3fn"),
-        Workload("gemm_fp8_fnuz", "gemm", gemm, "float8_e4m3fnuz"),
-        Workload("gemm_tall", "gemm", dict(m=m * 4, n=max(32, m // 4), k=m)),
-        Workload("gemm_wide", "gemm", dict(m=max(32, m // 4), n=m * 4, k=m)),
-        Workload("flashattention", "attention", attention),
-        Workload("flashattention_causal", "attention", dict(attention, causal=True)),
-        Workload("flashattention_bf16", "attention", attention, "bfloat16"),
-        Workload("kda_recurrent", "kda_recurrent", kda),
-        Workload("kda_chunk_o", "kda_chunk_o", dict(kda, sequence=64 if smoke else 1024, chunk_size=32 if smoke else 64)),
-        *[Workload(op, op, dict(rows=rows, columns=cols)) for op in ("softmax", "rmsnorm", "reduce_sum", "elementwise")],
-    ]
+    """Use the family-owned final cases, or development shapes for smoke checks."""
+    from experiments.families import FAMILIES, family_module
+
+    return [w for op in FAMILIES for w in family_module(op, "cases").cases(holdout=not smoke)]
 
 
 def load_manifest(data):
@@ -223,6 +185,12 @@ def load_manifest(data):
 
 
 def support_reason(workload, device):
+    if workload.op == "gemm":
+        from experiments.gemm.spaces import support_reason as gemm_support_reason
+
+        reason = gemm_support_reason(workload)
+        if reason:
+            return reason
     kind = device.target["kind"]
     if kind not in ("cuda", "hip"):
         return (
@@ -230,12 +198,4 @@ def support_reason(workload, device):
             if device.worker
             else "requires an external TileLang-Ascend worker; this checkout has no Ascend compiler or core/storage model"
         )
-    if workload.dtype.startswith("float8"):
-        if kind == "hip":
-            return None if workload.dtype.endswith("fnuz") else "MI308 FP8 requires an explicit FNUZ workload dtype"
-        if workload.dtype.endswith("fnuz"):
-            return "FNUZ workloads require an AMD backend; CUDA FP8 uses the FN/E5M2 formats"
-        match = re.fullmatch(r"sm_(\d+)[af]?", device.target["arch"])
-        if not match or int(match[1]) < 89:
-            return "target has no supported FP8 matrix instructions"
     return None

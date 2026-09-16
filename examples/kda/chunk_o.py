@@ -2,12 +2,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 
-from FLA_KDA.fla_chunk_o import chunk_gla_fwd_o_gk
-from test_utils_kda import compare_tensors
-
 import torch
-
-torch.random.manual_seed(42)
 
 
 def prepare_input(
@@ -182,6 +177,14 @@ def run_test(
     threads,
     num_stages,
 ):
+    # The optional FLA comparison is not needed to import or compile the kernel.
+    if __package__:
+        from .FLA_KDA.fla_chunk_o import chunk_gla_fwd_o_gk
+        from .test_utils_kda import compare_tensors
+    else:
+        from FLA_KDA.fla_chunk_o import chunk_gla_fwd_o_gk
+        from test_utils_kda import compare_tensors
+
     input_dtype_torch = getattr(torch, input_dtype)
     output_dtype_torch = getattr(torch, output_dtype)
     accum_dtype_torch = getattr(torch, accum_dtype)
@@ -220,6 +223,7 @@ def run_test(
 
 
 def main():
+    torch.random.manual_seed(42)
     run_test(
         B=1,
         S=8192,

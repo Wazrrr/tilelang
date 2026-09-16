@@ -27,88 +27,52 @@ not import XGBoost. No scikit-learn dependency or TVM cost-model adapter is need
 
 ## Collect, train, evaluate
 
-Use separate workload shapes for training, validation, and final evaluation.
-For example, use GEMM M=256/512 for training, M=768 for validation, and M=1024 for
-testing, holding the other dimensions fixed. This is an example split, not a
-claim that those few shapes establish generalization.
-
-Collect each shape with the existing exhaustive runner:
+The shared comparison command collects disjoint training/validation samples,
+trains and freezes XGBoost, selects candidates, then measures the oracle:
 
 ```bash
-python -m experiments.gemm.tiletune.run \
-  --method brute_force --m 256 --n 256 --k 256 --dtype float16 \
-  --backend event --output experiments/results/xgb-data --run-name train256
+python -m experiments.common.comparison \
+  --device ampere \
+  --workloads gemm_square --methods tiletune carver xgboost \
+  --top-k 20 --budget-fraction 1 --xgb-sample-fraction 0.1 \
+  --wait-idle --output experiments/results/xgb-comparison
 ```
 
-Repeat with the other shapes and distinct run names. `--config-indices` can
-explicitly restrict collection to a supplied subgrid. The reader retains the
-supplied grid size; such a run is not a full-grid oracle. The training command
-below samples from those supplied pools; when using exhaustive logs, it retains
-their full recorded collection costs.
+Use a manifest for the actual device. `--plan` inspects the inputs without a GPU.
+Omit `xgboost` from `--methods` when it is not wanted. Named family/suite commands
+use their predefined shapes and fixed K=20 protocol. The retired family commands
+accepting `--m`, `--method all` and `--xgb-model` have been removed.
+
+For standalone training from completed collection directories:
 
 ```bash
 python -m experiments.xgboost train \
-  --train-runs experiments/results/xgb-data/train256 \
-               experiments/results/xgb-data/train512 \
-  --validation-runs experiments/results/xgb-data/validation768 \
-  --sample-fraction 0.1 \
-  --output experiments/models/gemm-h200.json
+  --train-runs /path/to/train-a /path/to/train-b \
+  --validation-runs /path/to/validation \
+  --sample-fraction 0.1 --output /path/to/model.json
 
-python -m experiments.gemm.tiletune.run \
-  --method xgboost --xgb-model experiments/models/gemm-h200.json \
-  --m 1024 --n 256 --k 256 --dtype float16 --backend event --top-k 20
+python -m experiments.common.run --manifest heldout.json \
+  --method xgboost --xgb-model /path/to/model.json --top-k 20
 ```
 
-`--method all --xgb-model MODEL` includes XGBoost in the existing comparison,
-alongside brute force, TileTune, and Carver where supported. Model selection
-precedes the exhaustive oracle run. Winner remeasurement and Oracle@K use the
-same comparison code as the existing methods. Without `--xgb-model`, `all`
-preserves the existing method set.
+Collection directories contain `experiment.json`, candidate outcomes and a
+completed result. The reader preserves the declared pool and original collection
+cost. Sampled collections are not sampled a second time. Explicit subsets retain
+their recorded size and do not establish a full-pool oracle. Models require
+matching implementation, device, source and compiler identities.
 
-FP8 GEMM and FlashAttention accept the same `--method xgboost --xgb-model` options
-in `experiments.gemm_fp8.tiletune.run` and
-`experiments.flash_attention.tiletune.run`. Supply an artifact trained for that
-kernel implementation and device. XGBoost requires a finite `--top-k`.
-
-The portable matrix supports the same baseline:
+For all four families, compare already saved selections with
+the [offline result script](../README.md#compare-saved-selections-against-the-oracle).
+It does not require the XGBoost package. To generate a new ranking from a trained
+model and evaluate it against held-out measurements:
 
 ```bash
-python -m experiments.portable.run --manifest heldout.json \
-  --method xgboost --xgb-model experiments/models/portable-h200.json --top-k 20
+python -m experiments.xgboost evaluate --model /path/to/model.json \
+  --runs /path/to/heldout --top-k 20 --output /path/to/evaluation.json
 ```
 
-For collection that measures only the sampled configurations, use the comparison
-coordinator:
-
-```bash
-python -m experiments.portable.compare --device ampere \
-  --xgb-sample-fraction 0.1 --output experiments/results/a100-sampled --wait-idle
-```
-
-The coordinator freezes each training/validation subset before launching its
-worker. Test grids and the online top-K budget are independent of this fraction.
-Collection metadata preserves the original pool and selected indices, so fitting
-does not sample an already collected subset a second time. Use a new output
-directory when changing the sampling fraction or seed; resume verifies both.
-
-Train its model using runs from `experiments.portable.run --method brute_force`
-or `--method exhaustive`.
-Pass individual case directories, or a parent containing only the intended
-exhaustive cases, to `--train-runs` and `--validation-runs`. The portable and
-dedicated runners use different kernel implementations; their model artifacts
-are not interchangeable merely because both workloads are GEMMs.
-
-For evaluation using already collected, held-out exhaustive measurements:
-
-```bash
-python -m experiments.xgboost evaluate \
-  --model experiments/models/gemm-h200.json \
-  --runs experiments/results/xgb-data/test1024 \
-  --top-k 20 --output experiments/results/xgb-evaluation.json
-```
-
-This command predicts and freezes K before looking up those candidates' oracle
-latencies. It runs no kernels and does not report an actual tuning speedup.
+This predicts and freezes K before reading candidate latencies. It runs no
+kernels and does not measure tuning speedup.
 
 ## Features and training rules
 
@@ -156,8 +120,8 @@ receives equal total weight regardless of candidate count.
 
 `--sample-fraction` (Python: `sample_fraction`) controls both the training and
 separate validation subsets. The budget is `ceil(fraction * pool_size)`, with at
-least one configuration: the default samples 11/108 GEMM, 6/54 attention, 3/24
-chunk-KDA and 1/6 row/recurrent configurations per workload. A seeded hash of the
+least one configuration: the default samples 231/2,304 GEMM, 32/320 attention, 72/720
+chunk-KDA and 23/224 softmax configurations per workload. A seeded hash of the
 canonical workload and each configuration determines selection, so changing
 candidate order, timings or failure outcomes cannot bias it. Repeated runs of
 one context share a single subset. Failed selections consume the sample budget
@@ -204,8 +168,9 @@ they exclude process startup and separately prepared primitive profiles. Do not
 describe a pretrained baseline as having zero training cost. Comparison winners
 are assessed with the same K and the same held-out oracle grid.
 
-Read `data.py` → `sampling.py` → `model.py` → `integration.py` / `execution.py`. The TileTune core
-cost equations and compiler passes are unchanged by this baseline.
+Read `data.py` → `sampling.py` → `model.py`, then `../common/comparison.py` and
+`../common/study.py` for collection and reuse. The TileTune core cost equations
+and compiler passes are unchanged by this baseline.
 
 Uniform sampling remains the default. Opt into implementation-stratified sampling
 with `--sampling-policy implementation_stratified_config_hash_v1`. Each workload

@@ -1,7 +1,7 @@
 # TileTune: tile analysis and ranking
 
 For the current multi-workload/multi-target design and runnable matrix, see
-[portable experiments](../experiments/portable/README.md). Analysis version 18
+[portable experiments](../experiments/common/README.md). Analysis version 18
 separates target identity/model coverage from kernel-family semantics, adds native
 HIP singleton compilation, and retains explicit uncertainty for unsupported
 hardware schedules. CUDA grouped compilation remains unchanged. Huawei Ascend

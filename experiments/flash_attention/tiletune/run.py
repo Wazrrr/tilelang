@@ -1,9 +1,11 @@
-"""Family-study entry point with the existing fixed-grid API preserved."""
+"""Run the FlashAttention study with the shared comparison protocol."""
 
-import sys
-from . import legacy as _impl
+from experiments.common.family_cli import comparison_main
+
+
+def main(argv=None):
+    return comparison_main("flash_attention", argv)
+
 
 if __name__ == "__main__":
-    raise SystemExit(_impl.main())
-else:
-    sys.modules[__name__] = _impl
+    raise SystemExit(main())

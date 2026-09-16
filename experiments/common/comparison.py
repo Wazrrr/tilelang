@@ -22,8 +22,10 @@ import subprocess
 import sys
 import time
 
-from .run import make_request, run_case, write_json
-from .spaces import PRESETS
+from .run import make_request, run_case
+
+from experiments.utils.io import write_json
+from .spec import PRESETS
 from .spec import Device, TARGETS, Workload, configurations, default_workloads, load_manifest, support_reason
 from experiments.xgboost.data import canonical_workload
 from experiments.xgboost.model import DEFAULT_LEARNING_RATE, DEFAULT_MAX_DEPTH, DEFAULT_ROUNDS, DEFAULT_SUBSAMPLE, EARLY_STOPPING_ROUNDS
@@ -36,7 +38,7 @@ def training_sample(workload, device, *, fraction, seed, config_indices=None, po
     if config_indices is None:
         indices = list(range(len(configs)))
     else:
-        from experiments._common import select_configs
+        from experiments.utils.cli import select_configs
 
         indices, configs = select_configs(configs, config_indices)
     plan = sampling_plan(canonical_workload(workload), configs, fraction=fraction, seed=seed, policy=policy)
@@ -107,7 +109,7 @@ def remeasure(request, methods, output, repeats):
     torch.backends.cuda.matmul.allow_tf32 = False
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(settings["seed"]))
     expected = case.reference(*inputs)
-    expected = expected if isinstance(expected, (list, tuple)) else [expected]
+    expected = expected if isinstance(expected, list | tuple) else [expected]
     kernels, samples = {}, {}
     for result in methods.values():
         if result.get("status") != "completed":
@@ -125,7 +127,7 @@ def remeasure(request, methods, output, repeats):
             pass_configs={**case.pass_configs, **config.get("pass_configs", {})},
         )
         actual = kernel(*inputs)
-        case.check(actual if isinstance(actual, (list, tuple)) else [actual], expected)
+        case.check(actual if isinstance(actual, list | tuple) else [actual], expected)
         kernels[key], samples[key] = kernel.get_profiler(), []
     rng = random.Random(settings["seed"])
     for _ in range(repeats):
@@ -170,9 +172,9 @@ def main(argv=None):
     )
     parser.add_argument("--exploration-fraction", type=float, default=0.2)
     parser.add_argument("--split-manifest", type=Path, help="Explicit, disjoint train/validation/test workloads; retains tail dimensions")
-    parser.add_argument("--train-scales", nargs="+", type=float, default=[0.25, 0.5])
-    parser.add_argument("--validation-scales", nargs="+", type=float, default=[0.75])
-    parser.add_argument("--test-scales", nargs="+", type=float, default=[1, 2])
+    parser.add_argument("--train-scales", nargs="+", type=float, help="Explicit scaled-shape study; default uses family splits")
+    parser.add_argument("--validation-scales", nargs="+", type=float)
+    parser.add_argument("--test-scales", nargs="+", type=float)
     parser.add_argument("--top-k", type=int, default=20, help="Maximum online budget, capped at ceil(grid_size * budget_fraction)")
     parser.add_argument("--budget-fraction", type=float, default=0.1)
     parser.add_argument(
@@ -192,6 +194,9 @@ def main(argv=None):
     parser.add_argument("--input-seed", type=int, default=123)
     parser.add_argument("--phase", choices=("all", "selection", "oracle"), default="all")
     parser.add_argument("--oracle-root", type=Path, help="Shared oracle directory, used only after all seed selections are frozen")
+    parser.add_argument("--measurement-identity", type=Path, help="Verified measurement identity supplied by the baseline coordinator")
+    parser.add_argument("--skip-profile", action="store_true", help="Baseline-only collection needs no TileTune primitive profile")
+    parser.add_argument("--skip-validation", action="store_true", help="Use the oracle table without additional winner reruns")
     parser.add_argument("--output", type=Path, default=Path("experiments/results/portable-comparison"))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--plan", action="store_true")
@@ -204,7 +209,9 @@ def main(argv=None):
         or not 0 < args.xgb_sample_fraction <= 1
         or args.seed < 0
         or any(getattr(args, k) <= 0 for k in ("top_k", "workers", "warmup", "rep", "timeout", "case_timeout", "validation_repeats"))
-        or any(not math.isfinite(s) or s <= 0 for s in args.train_scales + args.validation_scales + args.test_scales)
+        or any(
+            not math.isfinite(s) or s <= 0 for values in (args.train_scales, args.validation_scales, args.test_scales) for s in values or []
+        )
     ):
         parser.error("budgets and scales must be positive; fractions must be in (0, 1]; seed must be nonnegative")
     if args.manifest and args.split_manifest:
@@ -247,8 +254,19 @@ def main(argv=None):
             else d
             for d in devices
         ]
+    elif args.manifest or any(values is not None for values in (args.train_scales, args.validation_scales, args.test_scales)):
+        splits = split_workloads(
+            workloads,
+            dict(train=args.train_scales or [0.25, 0.5], validation=args.validation_scales or [0.75], test=args.test_scales or [1, 2]),
+        )
     else:
-        splits = split_workloads(workloads, dict(train=args.train_scales, validation=args.validation_scales, test=args.test_scales))
+        from experiments.families import family_module
+
+        splits = dict(train=[], validation=[], test=workloads)
+        for op in dict.fromkeys(w.op for w in workloads):
+            a, b, validation = family_module(op, "cases").training_cases()
+            splits["train"].extend((a, b))
+            splits["validation"].append(validation)
     # Retain target-specific overrides when split names are derived from the base.
     devices = [
         replace(
@@ -267,6 +285,10 @@ def main(argv=None):
     ]
     settings = {k: getattr(args, k) for k in ("top_k", "config_indices", "seed", "workers", "warmup", "rep", "timeout", "case_timeout")}
     settings.update(memory_regime="streaming", trace=False, seed=args.input_seed)
+    if args.measurement_identity:
+        settings["measurement_identity"] = json.loads(args.measurement_identity.read_text())
+    if args.skip_profile and any(m.startswith("tiletune") for m in args.methods):
+        parser.error("TileTune requires profile preparation")
     xgb_training = dict(
         rounds=DEFAULT_ROUNDS, max_depth=DEFAULT_MAX_DEPTH, learning_rate=DEFAULT_LEARNING_RATE, subsample=DEFAULT_SUBSAMPLE
     )
@@ -300,7 +322,7 @@ def main(argv=None):
     print(f"Results directory: {root}", flush=True)
     os.environ.update(TILELANG_DISABLE_CACHE="1", TILELANG_AUTO_TUNING_DISABLE_CACHE="1")
     wait_for_idle(root, wait=args.wait_idle, allow_contended=args.allow_contended)
-    from experiments._common import source_hashes
+    from experiments.utils.cli import source_hashes
     from tilelang.cache.kernel_cache import KernelCache
     from tilelang.contrib.cc import get_cplus_compiler
 
@@ -352,7 +374,7 @@ def main(argv=None):
     for device in devices:
         base = root / device.name
         base.mkdir(exist_ok=True)
-        if device.target["kind"] == "cuda" and not device.profiles and not device.performance_model:
+        if not args.skip_profile and device.target["kind"] == "cuda" and not device.profiles and not device.performance_model:
             from tilelang.tiletune import current_target, profile_device
             from .run import targets_match
 
@@ -496,7 +518,7 @@ def main(argv=None):
                 )
             oracle_path = oracle_output / "outcomes.json"
             oracle = json.loads(oracle_path.read_text()) if args.phase != "selection" and oracle_path.exists() else []
-            from .diagnostics import assess
+            from experiments.utils.diagnostics import assess
 
             diagnostics = {label: assess(report, oracle, seed=args.seed) for label, report in reports.items() if label != "brute_force"}
             write_json(output / "methods.json", methods)
@@ -504,6 +526,7 @@ def main(argv=None):
             validation = output / "validation.json"
             if (
                 args.phase != "selection"
+                and not args.skip_validation
                 and request_path.exists()
                 and not validation.exists()
                 and any(r.get("status") == "completed" for r in methods.values())
@@ -525,6 +548,9 @@ def main(argv=None):
                 workload=w.to_dict(),
                 device=device.name,
                 methods=methods,
+                oracle=dict(path=os.path.relpath(oracle_path, output), sha256=hashlib.sha256(oracle_path.read_bytes()).hexdigest())
+                if oracle_path.is_file()
+                else None,
                 diagnostics=diagnostics,
                 validation=json.loads(validation.read_text()) if validation.exists() else None,
             )

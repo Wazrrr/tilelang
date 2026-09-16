@@ -1,6 +1,6 @@
 """Checkpointed correctness/compilation census of a declared common pool.
 
-python -m experiments.common.census --device ampere --config-space expanded --workloads gemm_nn --output results/census
+python -m experiments.common.census --device ampere --config-space expanded --workloads gemm_square --output results/census
 Each shard has an isolated accelerator process. This is development/oracle
 collection, not uncharged preparation for an online tuner.
 """
@@ -12,8 +12,10 @@ from pathlib import Path
 import time
 
 from .execution import compilation_census
-from .run import make_request, run_case, write_json
-from .spaces import PRESETS, space_summary
+from .run import make_request, run_case
+from experiments.utils.io import write_json
+from .spec import PRESETS
+from .spaces import space_summary
 from .spec import Device, TARGETS, configuration_space, default_workloads, load_manifest
 
 
@@ -92,7 +94,7 @@ def main(argv=None, *, family=None):
     if (root / "plan.json").exists() and json.loads((root / "plan.json").read_text()) != plan:
         raise ValueError("census plan changed; use a new output directory")
     write_json(root / "plan.json", plan)
-    from experiments._common import source_hashes
+    from experiments.utils.cli import source_hashes
     from tilelang.cache.kernel_cache import KernelCache
     from .comparison import wait_for_idle
     from .spec import Workload

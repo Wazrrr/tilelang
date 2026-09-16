@@ -16,7 +16,7 @@ The final experiment uses the complete portable grids and the same declared comp
 CUDA_HOME=/root/cuda-12.4 \
 CXX=/usr/bin/g++-10 \
 PYTHON=/root/tilelang/.venv/bin/python \
-bash experiments/portable/run_accelerator.sh \
+bash experiments/common/run_accelerator.sh \
   --device ampere --workers 8 --warmup 10 --rep 50 \
   --validation-repeats 7 --wait-idle \
   --test-scales 1.25 1.5 \

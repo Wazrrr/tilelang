@@ -1,98 +1,73 @@
 # Shared experiment runner reference
 
-## Configuration spaces
+Named family suites now use `study.py`: it collects one immutable baseline bundle
+per family/device, then runs only TileTune for each repeat/revision. See the
+[baseline reuse and system commands](../README.md#reuse-baselines-across-tiletune-revisions).
+Reusable helpers live in [`../utils/`](../utils/README.md). The `comparison.py`
+commands below describe the lower-level collector; invoke named suites for
+automatic reuse across revisions.
 
-Use `--config-space large` with `run`, `compare`, or `census` for a pool of
-at most 1,024 configurations. `--config-space exhaustive` restores the former
-uncapped `large` domain; `expanded` retains its historical domain.
-Workload manifests accept the same preset names.
-The default `current` preset preserves the existing grids and indices, including
-the user's tiled KDA implementations. Explicit workload/device config lists
-retain precedence, including lists longer than 1,024 entries. Every generated
-preset retains the `current` candidates at their original indices. `large` is
-a compact subset of `exhaustive`, rather than a superset of `expanded`.
-Mathematical shapes, dtype, causal mode and chunk size are
-workload properties, not configuration-count multipliers.
-
-For default FP16 workloads on A100, the declared pools are:
-
-| Family | Current | Expanded | Large | Exhaustive |
-| --- | ---: | ---: | ---: | ---: |
-| GEMM and variants | 108 | 2,060 | 1,024 | 6,180 |
-| Attention and causal attention | 54 | 1,044 | 1,024 | 5,004 |
-| Recurrent KDA | 114 | 1,326 | 1,024 | 1,656 |
-| Chunk-output KDA | 420 | 3,336 | 1,024 | 7,384 |
-| Softmax / RMSNorm / row sum | 6 each | 409 each | 691 each | 691 each |
-| Elementwise | 6 | 279 | 399 | 399 |
-
-These counts are before compilation, correctness validation and generated
-code equivalence checks. They are not claims of that many valid unique programs.
-
-### Keeping useful schedules
-
-Before reducing `large`, retain the complete `current` grid and the static
-`protected_configurations` declared by each family:
-
-- GEMM retains 64/128 tiles with K=32/64, all stages, warp policies and swizzles,
-  plus 128×256 and 256×128 tiles with K=16 and square warp policy.
-- Attention retains 32/64/128 tiles with common QK/PV layout combinations,
-  automatic or 8-wide copies, and stages 0/2/3/4.
-- Chunk-output KDA retains K=16 schedules across row/value/causal tiles and
-  both pipeline stage counts, alongside its complete original grid.
-
-The remaining slots use greedy pairwise parameter coverage, then canonical
-configuration hashes to break ties. Enumeration reads no measurement files or
-model scores and uses the same policy for training, validation, and test cases.
-The protected neighborhoods include both archived A100 GEMM sweep winners and
-the previously measured TileTune winners for GEMM, attention, and chunk KDA.
-This preserves those known candidates; it does not establish that every unseen
-shape's best configuration survives the cap.
-
-Space version 2 records the selection policy, protected indices, feature
-coverage, and source `exhaustive` indices in `config-space.json`.
-`budget_omitted_count` counts unique schedules omitted by the cap separately
-from structural rejections and aliases. Alias records keep their exhaustive
-index and use a null compact index when their representative was omitted.
-Outside the retained `current` prefix, compact indices can change; config hashes
-remain stable. Existing larger-pool measurements and heuristic files remain
-historical records of their original pool. Use a new output directory and a
-matching reference when running the new preset.
+To collect only the eight final brute-force baselines on all idle H200 GPUs:
 
 ```bash
-# Inspect the old complete domain without executing it.
-python -m experiments.common.run --plan --devices ampere \
-  --workloads gemm_nn flashattention --config-space exhaustive
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.common.brute_force \
+  --output experiments/results/h200-expanded-bruteforce
 ```
 
-Each family's `spaces.py` declares its conditional parameter domains. GEMM parameters include
-`warp_policy` and `swizzle_panel`. Attention accepts independent `qk_policy`,
-`pv_policy` and `copy_width` in `implementation="tiled"`; shared intermediate
-values and an explicit softmax layout make the different warp partitions
-compatible, and their conversion cost is part of timing. The pipelined tiled
-causal path uses a fixed full-KV loop with causal masking to avoid incorrect
-prefetch/drain indices for short dynamic prefixes. Its additional masked work is measured;
-the zero-stage path stops at the causal prefix, and
-the original direct attention implementation remains in the current grid.
-Row reductions accept `implementation="streamed"`, `block_cols`, `vector` and
-`row_threads`; the full-row statistics are computed before producing normalized
-outputs. `row_threads` is the number of row groups sharing the CTA; each group
-uses `threads / row_threads` threads across columns. Elementwise uses
-`implementation="tiled"` with the same layout knobs.
-KDA extends the existing tile, pipeline, unroll and thread parameters. Pipelined
-chunk output uses a fixed full-chunk bound with masking for the same indexing
-reason; its serial intra-chunk loop retains the shorter causal prefix.
+This uses the final manifest's family pools, dispatches 64-configuration shards
+to matching idle GPUs, and polls compute processes every second. A foreign
+process invalidates the affected shard; its timings are discarded and the shard
+is retried after an idle GPU becomes available. Process polling cannot rule out
+interference shorter than the polling interval. Use `--gpus` to restrict devices
+and `--resume` with the same output directory to reuse accepted checkpoints.
+Interrupted or GPU-faulted shards are retried in fresh processes; failed
+configurations remain in the recorded pool.
 
-Generation rejects demonstrated structural constraints and records explicit
-default aliases and equivalent Ampere MMA warp policies. Uncertain register-pressure estimates do not filter the common
-pool. `config-space.json` records stable config hashes, every generated alias
-and rejection, and the preset version. Carver reports unsupported when the pool
-contains scheduling parameters absent from its adapter.
+The runner writes candidate outcomes, requests, logs, source/build provenance,
+GPU observations, and raw oracle tables under the output directory. After each
+complete pool, its minimum correct measured latency selects the winner (original
+index breaks ties). Seven fresh measurements validate the winner. The matching
+record is saved to `experiments/FAMILY/heuristics/H200/WORKLOAD.json` using the
+existing A100 heuristic schema, with additional contention and validation paths.
+
+## Configuration spaces
+
+Space version 5 gives each final family exactly one `expanded` pool. Each pool
+uses the example's native parameters and includes its original configs/defaults.
+The same complete domain is used for both cases and all native targets.
+
+| Family | Configs per case | Example coverage |
+| --- | ---: | --- |
+| [GEMM](../gemm/README.md) | 2,304 | All 288 autotune configs; 8× expansion |
+| [FlashAttention](../flash_attention/README.md) | 320 | Single autotune config and explicit 128/128 launch |
+| [KDA chunk output](../kda/README.md) | 720 | All 90 autotune configs; 8× expansion |
+| [Online softmax](../softmax/README.md) | 224 | Default launch; example has no autotune grid |
+
+Shapes, dtype, causal mode and chunk size are workload properties. They do not
+multiply the config count. Full sweeps have no cap, protected subset or
+structural prefilter. Every candidate is attempted and actual compilation or
+correctness failures are recorded. These counts do not claim that all candidates
+compile, pass checks or generate distinct programs. Native target support still
+requires device validation.
+
+Explicit CUDA/HIP config lists must select members of the family's pool.
+Smoke/development and sampled training budgets retain original pool indices.
+`config-space.json` records config hashes and the space version. Config indices
+have changed from older presets: keep historical timings with their original
+source hashes and pools, and start new runs in new output directories.
+
+GEMM fixes the example's Square/panel-10 defaults. Attention keeps its example's
+QK/PV policies, fragment recurrence and causal loop bound. KDA keeps `block_S`
+equal to the chunk size. Softmax retains the example's two passes and tail mask.
+There are no alternative experiment kernels or supplementary vector/FP8
+families. The shared configuration code accepts only the `expanded` pool.
 
 Inspect a space without loading TileLang or querying hardware:
 
 ```bash
 python -m experiments.common.run --plan --devices ampere \
-  --workloads gemm_nn flashattention kda_chunk_o softmax elementwise \
+  --workloads gemm_square attention_noncausal kda_chunk_regular softmax_aligned \
   --config-space expanded
 ```
 
@@ -100,15 +75,16 @@ Run a checkpointed compilation/correctness census:
 
 ```bash
 python -m experiments.common.census \
-  --manifest experiments/manifests/expanded_ampere.json \
-  --workloads gemm_nn --shard-size 64 --workers 8 --wait-idle \
+  --device ampere \
+  --workloads gemm_square --shard-size 64 --workers 8 --wait-idle \
   --output experiments/results/expanded-census
 ```
 
 Repeat the exact command with `--resume` to reuse completed shards. Interrupted
 shards are preserved and retried in a fresh process. The census reports compile
 failures, correctness, distinct generated device-source hashes and best timings
-in the retained current pool versus the expanded pool. Source identity is a
+over the declared pool. `current_best_ms` is null for the four example pools,
+which no longer have a retained current prefix. Source identity is a
 conservative diagnostic; it does not prove binary equivalence. Census compilation
 is development/oracle work, not free input to either online tuner.
 
@@ -116,8 +92,8 @@ Run the sampled baseline comparison on the full expanded pools:
 
 ```bash
 bash experiments/common/run_accelerator.sh \
-  --manifest experiments/manifests/expanded_ampere.json \
-  --workloads gemm_nn flashattention_causal kda_chunk_o softmax \
+  --device ampere \
+  --workloads gemm_square attention_causal kda_chunk_regular softmax_aligned \
   --methods tiletune xgboost --top-k 20 --xgb-sample-fraction 0.1 \
   --wait-idle --output experiments/results/expanded-comparison
 ```
@@ -136,10 +112,8 @@ Parameter ranges and constraints live in each family’s `spaces.py`.
 See [validation](../validation.md) for the checks performed on the organized scripts.
 
 This suite separates the mathematical workload, candidate grid, hardware model,
-and execution environment. It adds GEMM variants, FlashAttention, KDA and
-representative reduction/elementwise workloads to one experiment matrix. The
-existing `experiments/{gemm,gemm_fp8,flash_attention}/` comparisons remain useful
-for their fixed-grid Carver comparisons and system-optimization studies.
+and execution environment. GEMM, FlashAttention, KDA and softmax share this
+protocol and the same example builders in system and tuner-quality studies.
 
 ```mermaid
 flowchart TD
@@ -167,7 +141,7 @@ bash experiments/common/run_accelerator.sh --build \
   --device ampere --output experiments/results/a100-comparison --wait-idle
 ```
 
-`run_accelerator.sh` accepts the arguments of `compare.py`, including `--manifest`
+`run_accelerator.sh` accepts the arguments of `comparison.py`, including `--manifest`
 for another CUDA/HIP accelerator, `--workloads`, `--workers`, and `--plan`.
 `CMAKE_COMMAND`, `BUILD_JOBS`, and `PYTHON` can select build/environment tools.
 Skip `--build` after rebuilding once. `--resume` verifies the frozen plan,
@@ -175,9 +149,11 @@ requests, source hashes and native build before reusing completed cases; use a
 new output directory after code changes. The earlier single-method runner below
 remains available.
 
-The comparison uses the declared grids and scales mathematical shapes before
-measurement: training at 0.25× and 0.5×, validation at 0.75×, and held-out tests
-at 1× and 2×. GEMM scales M/N/K; row kernels scale rows/columns; attention/KDA
+By default, the comparison uses the same eight final cases and the family-owned
+two-training/one-validation shape splits as the named suites. A custom
+`--manifest` or explicit `--train-scales` / `--validation-scales` / `--test-scales`
+selects a scaled-shape study. Missing scale lists then default to training at
+0.25× and 0.5×, validation at 0.75×, and held-out tests at 1× and 2×. GEMM scales M/N/K; row kernels scale rows/columns; attention/KDA
 scale sequence length while retaining head dimensions. Dimensions round down
 to multiples of 32 or the KDA chunk size. Shape aliases and rounding collisions
 across any split are rejected. Custom manifests should avoid duplicate semantic
@@ -216,8 +192,8 @@ candidate independently of TileTune analysis. The older `exhaustive` method
 still means exhaustive **report-only TileTune** analysis/measurement. The new
 Carver adapter accepts plain, nonbatched FP16/BF16 GEMMs, including transpose
 variants, and maps the exact supplied grid to the existing policy. It reports
-unsupported for fused/batched GEMMs and other operations. CUDA FP8 and AMD FNUZ
-remain explicit hardware-dependent cases; Ampere FP8 is unsupported.
+unsupported for fused/batched GEMMs and other operations. The experiment
+workload schema rejects FP8 dtypes; their supplementary runners are retired.
 
 Each test case records method outcomes, an independent oracle table, ranking
 diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics
@@ -251,8 +227,7 @@ Run a small correctness/runner check on a Hopper machine:
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m experiments.common.run \
     --devices hopper --smoke --method exhaustive --config-indices 0 \
-    --workloads gemm_nn gemm_batched gemm_bias_relu flashattention \
-                flashattention_bf16 kda_recurrent kda_chunk_o softmax rmsnorm
+    --workloads gemm_square attention_noncausal kda_chunk_regular softmax_aligned
 ```
 
 Run top-K selection over each workload's full default grid:
@@ -261,7 +236,7 @@ Run top-K selection over each workload's full default grid:
 python -m experiments.common.run --devices hopper --method top_k --top-k 20
 ```
 
-`--smoke` reduces problem sizes, preserving the grid. `--config-indices` explicitly
+`--smoke` selects the eight family-owned development cases, preserving the grid. `--config-indices` explicitly
 selects a subset and retains original indices. Remove that argument for full-grid
 experiments. The default method is `analyze`; it performs no compilation,
 benchmarking, or device-limit query. Supply device limits in a manifest to obtain
@@ -275,22 +250,18 @@ Compilation/benchmark timing excludes process startup and reference generation;
 
 ## Workloads
 
-The standalone shared runner's default workload collection contains:
+The standalone shared runner uses the same eight FP16 final cases as the family
+suites. BF16 and supported boundary shapes can be supplied explicitly for
+correctness checks; they do not add default experiment cases:
 
 | Workload | Covered behavior |
 | --- | --- |
-| `gemm_nn`, `gemm_nt`, `gemm_tn` | Input transpose combinations |
-| `gemm_batched` | Strided batched matrix multiplication |
-| `gemm_bias_relu` | Fused bias and activation epilogue |
-| `gemm_bf16` | BF16 operands with FP32 accumulation |
-| `gemm_fp8`, `gemm_fp8_fnuz` | Explicit CUDA and AMD FP8 formats; FP16 output |
-| `gemm_tall`, `gemm_wide` | Unequal tile counts and matrix aspect ratios |
-| `flashattention`, `flashattention_causal`, `flashattention_bf16` | Stable online softmax and two connected matrix operations |
-| `kda_recurrent` | Complete recurrent forward baseline with a live state and per-key gates |
-| `kda_chunk_o` | Gated-query/state GEMM plus causal intra-chunk output GEMM |
-| `softmax`, `rmsnorm`, `reduce_sum`, `elementwise` | Reduction, normalization, broadcast, and single-pass tile graphs |
+| `gemm_square`, `gemm_square_large` | 4096³ and 8192³, pretransposed B, FP32 accumulation |
+| `attention_noncausal`, `attention_causal` | BSHD online attention with the example causal bounds |
+| `kda_chunk_regular`, `kda_chunk_tails` | Chunk output with equal and unequal head dimensions |
+| `softmax_aligned`, `softmax_irregular` | Two-pass online softmax with masked column tails |
 
-Each family's `kernel.py`, `kernels/`, and `reference.py` own its builder,
+Each family's `kernel.py` and `reference.py` supply its builder,
 input generator, reference, output indices, and correctness contract.
 `common/kernels.py` dispatches to those family interfaces.
 Inputs use a fixed local generator. References compute in
@@ -298,97 +269,17 @@ FP32 before the specified output cast. Checks include both elementwise tolerance
 and a relative output-norm bound: all-zero output cannot pass solely because a
 long-sequence softmax or attention result has small magnitude.
 
-The recurrent KDA baseline starts from zero state. For each token:
+The chunk-output workload calls `examples/kda/chunk_o.py` directly. Inputs and
+outputs use BSHD; hidden states use (B,chunks,H,DK,DV). It computes
+`cast(cast(q * scale) * exp2(g)) @ hidden + tril(a) @ v`, preserving both
+input-dtype rounding points in the example. This is the chunk-output stage,
+not the complete KDA forward/backward computation. Its config keys are
+`block_DK`, `block_DV`, `num_stages` and `threads`; `block_S` equals chunk size.
+The recurrent baseline and old tiled implementation are retired from the suite.
 
-```text
-H_decay = exp(g_t)[:, None] * H_previous
-delta   = beta_t * (v_t - k_t @ H_decay)
-H_t     = H_decay + k_t[:, None] * delta[None, :]
-o_t     = (q_t / sqrt(key_dim)) @ H_t
-```
-
-It returns the output sequence and final FP32 state. Its tensor layout is BHSD.
-The chunk-output workload uses cumulative base-two gates and computes
-`cast(q * scale * exp2(g)) @ hidden + tril(a) @ v` per chunk, matching the
-materialized intermediate dtype. This is one stage of chunked KDA, not an
-optimized end-to-end chunked implementation or a backward pass. The existing
-`examples/kda/` contains additional forward/backward kernels for future adapters.
-
-### Expanded KDA configuration spaces
-
-Both KDA builders also accept `implementation="tiled"`. This selects a separate
-implementation with the same inputs, outputs, gate conventions, intermediate
-casts and correctness tolerances. Config dictionaries without `implementation`
-continue to use the baseline. The default grids retain the original candidates
-at their original indices and append the tiled candidates: recurrent KDA grows
-from 6 to 114 configurations, and chunk output grows from 24 to 420.
-
-| Workload | Tiled implementation parameters | Default grid values |
-| --- | --- | --- |
-| Recurrent | `block_v`: value columns per CTA | 16, 32, 64 |
-| Recurrent | `block_t`: tokens staged together in shared memory | 4, 16, 32 |
-| Recurrent | `stages`: input-copy pipeline depth | 0, 2, 3 |
-| Recurrent | `unroll`: consecutive token updates unrolled in each group | 1, 4 |
-| Chunk output | `block_m`: output rows per CTA, independent of chunk size | 16, 32, 64 |
-| Chunk output | `block_k`: gated-query/state reduction tile | 32, 64 |
-| Chunk output | `block_v`: output value columns per CTA | 32, 64 |
-| Chunk output | `block_s`: causal attention/value reduction tile | 16, 32, 64 |
-| Chunk output | `stages`: gated-query/state pipeline depth | 0, 2, 3 |
-| Chunk output | `intra_stages`: causal attention/value pipeline depth | 0, 2 |
-| Both | `threads`: threads per CTA | 128, 256 |
-
-The recurrence remains sequential across tokens and returns the final FP32 state
-after the last real token. `unroll` must divide `block_t`. Chunk output skips
-reduction tiles beyond each CTA's causal range; its four tile sizes must be
-positive multiples of 16. Both implementations mask partial tiles, including
-partial row tiles within a chunk. `chunk_size` remains a mathematical workload
-parameter. The grid excludes 16-by-32 output tiles with 256 threads because
-they cannot accommodate eight MMA warps. Pipeline depths must be nonnegative; target compiler and resource
-limits still determine which schedules can execute on a given device.
-
-Custom manifests can supply any valid combination, for example:
-
-```python
-recurrent_config = dict(
-    implementation="tiled",
-    block_v=32,
-    threads=128,
-    block_t=16,
-    stages=2,
-    unroll=4,
-)
-chunk_config = dict(
-    implementation="tiled",
-    block_m=32,
-    block_k=64,
-    block_v=32,
-    block_s=16,
-    stages=2,
-    intra_stages=2,
-    threads=128,
-)
-```
-
-For a small comparison of baseline and tiled chunk-output candidates:
-
-```bash
-python -m experiments.common.run --devices ampere --smoke \
-  --workloads kda_chunk_o --method brute_force --config-indices 0 24 25 26 \
-  --output experiments/results/kda-tiled-smoke
-```
-
-Omit `--config-indices` to use the expanded grid. Existing saved manifests with
-explicit config lists keep their original spaces. TileTune can elaborate the new
-kernels, but its current timing model reports unknown costs for their nested
-token loops and multiple or variable-length GEMM pipelines. Brute-force tuning
-and XGBoost data collection can measure these candidates; analytical top-K
-selection needs additional schedule-model coverage before it can rank them.
-
-The numerical regression tests
-in `testing/python/experiments/test_kda_tiled.py` compare both implementations
-and the independent PyTorch references, including final state, causal masking,
-gate edge cases and partial tiles. They check numerical agreement rather than
-bitwise identity across different floating-point reduction schedules.
+The numerical tests in `test_example_kernels.py`, `test_expanded_kernels.py`
+and `test_kda_example.py` check program identity, final shapes, causal masking,
+normalization tails and independent PyTorch references.
 
 ## Hardware coverage and limits
 
@@ -424,8 +315,8 @@ exhaustive-best performance overall. The linked report also records latency
 miscalibration, register-gate coverage losses, chunk-KDA ranking failures, and
 the cases where analysis costs more than exhaustive tuning.
 
-MI308 FP8 uses explicit FNUZ dtypes rather than silently changing CUDA FN/E5M2
-inputs. HIP compiler remarks retain VGPR, AGPR and SGPR counts separately.
+Those historical runs used explicit FNUZ dtypes for MI308 FP8. FP8 experiments
+are now retired. HIP compiler remarks retain VGPR, AGPR and SGPR counts separately.
 Symbolic or absent counters stay unknown; register spill counts are not converted
 to byte counts. On CDNA3, the generic register count is available only when both
 architectural VGPR and AGPR observations are numeric. Occupancy remains a logical
@@ -574,7 +465,7 @@ first. Supply a matching timing profile, or select `--metric traffic_waves`
 explicitly for traffic-based ranking. Old profiles without the required
 asynchronous-copy fields cannot score positive-stage Ampere pipelines.
 
-For a completed `compare.py` run, [audit_model.py](audit_model.py) audits all saved
+For a completed comparison or suite run, [audit_model.py](audit_model.py) audits all saved
 TileTune test reports against the independent brute-force outcomes without GPU
 execution. It records exclusion reasons, coverage versus ranking loss, scalar
 work domains, and available compiler-register comparisons. Reasons overlap and
@@ -585,27 +476,30 @@ python -m experiments.common.audit_model experiments/results/your-run \
   --output /tmp/model-audit.json
 ```
 
+Each new case's `comparison.json` records its oracle path and hash, so audits
+support nested seed/target directories and a shared oracle. For an archived case
+without this reference, supply `--report PATH/tiletune.json --oracle PATH/outcomes.json`
+along with the root directory. Audit and top-K comparison share the same result
+reader and Oracle@K calculation in `utils/results.py`.
+
 Use a new output filename. See the [A100 model audit](../../docs/tiletune_model_audit.md)
 for the observed defects and architecture coverage requirements.
 
-The [expanded-space repair study](repair_study.py)
-uses exact disjoint shape splits, three seeds, uniform and implementation-stratified
-10% XGBoost samples, pure TileTune, optional exploration, and random selection.
-`python -m experiments.common.repair_study --output RESULTS --plan` displays the
-protocol. The runner freezes all seeds before collecting its shared test oracle.
-Optional exploration requires a TileTune runtime that supports exploration; the
-standard named suites work with the existing runtime API.
+The suite coordinator keeps baseline bundles separate from new TileTune runs.
+It replaces the retired repair-study runner and its stale manifests.
+Custom ablations can use `comparison.py --split-manifest` with explicit current
+workloads and `--methods`; the named suites retain their fixed study protocol.
 
 ## Compact five-target suites
 
 `python -m experiments.suite --suite smoke --plan` plans four families
 with deterministic subsets. Development uses eight cases and up to 256
-configurations; final uses the complete capped `large` pools (up to 1,024 each)
-and three seeds. See
+configurations; final uses the complete `expanded` pools (GEMM 2,304,
+FlashAttention 320, KDA 720 and softmax 224 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 
-GEMM uses regular square matrices with M=N=K:
+GEMM uses regular square matrices with M=N=K and pretransposed B=(N,K):
 
 | Case | Development | Final |
 | --- | ---: | ---: |

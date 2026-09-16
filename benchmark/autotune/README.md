@@ -1,7 +1,7 @@
 # Reproducing TileTune experiments
 
 For the current workload × accelerator matrix and baseline comparisons, start
-with [portable experiments](../../experiments/portable/README.md) and the
+with the [experiment suite](../../experiments/README.md) and the
 [XGBoost guide](../../experiments/xgboost/README.md).
 
 This directory retains the CUDA generalization suite:

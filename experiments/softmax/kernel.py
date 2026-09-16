@@ -1,23 +1,27 @@
-"""Softmax inputs and dispatch between full-row and streamed implementations."""
+"""Use the online-softmax example directly, including its log2/exp2 recurrence."""
 
-from experiments._kernel import KernelCase, _random
+from threading import Lock
+import tilelang.language as T
+from experiments.utils.kernel import KernelCase, _random
 from .reference import reference
+
+_SOFTMAX_LOCK = Lock()
+
+
+def _softmax_program(rows, columns, dtype, block_rows, block_cols, threads):
+    from examples.online_softmax.online_softmax import softmax_kernel
+
+    with _SOFTMAX_LOCK:
+        return softmax_kernel.get_tir(
+            T.Tensor((rows, columns), dtype), BLOCK_M=block_rows, BLOCK_N=block_cols, dtype=dtype, threads=threads
+        )
 
 
 def make_case(w):
     rows, columns, dtype = w.parameters["rows"], w.parameters["columns"], w.dtype
 
-    def build(block_rows, threads, implementation="baseline", block_cols=None, vector=1, row_threads=1):
-        if implementation == "streamed":
-            from .kernels.streamed import softmax_program
+    def build(BLOCK_M, BLOCK_N, threads):
+        return _softmax_program(rows, columns, dtype, BLOCK_M, BLOCK_N, threads)
 
-            return softmax_program(rows, columns, dtype, block_rows, block_cols, threads, vector, row_threads)
-        if implementation != "baseline":
-            raise ValueError("softmax implementation must be baseline or streamed")
-        if block_cols is not None or vector != 1 or row_threads != 1:
-            raise ValueError("column/layout parameters require a non-baseline implementation")
-        from .kernels.baseline import softmax_program
-
-        return softmax_program(rows, columns, dtype, block_rows, threads)
-
-    return KernelCase(build, lambda device, generator: [_random((rows, columns), dtype, device, generator)], reference, [1], atol=1e-5)
+    # Eager T.empty already records the output index in the example's PrimFunc.
+    return KernelCase(build, lambda device, generator: [_random((rows, columns), dtype, device, generator)], reference, None, atol=1e-5)

@@ -1,5 +1,9 @@
 # TileTune alignment with a portable kernel autotuning system
 
+Historical design checkpoint. The repair-study runner and its manifests are now
+retired; use the [current experiments](../experiments/README.md) for executable
+commands. Original measurement artifacts retain their recorded provenance.
+
 Reviewed 2026-09-15: local working tree based on `bea5d199`, analysis version
 21, including the existing uncommitted repairs. This is an architectural and
 evidence review. Historical benchmark results describe their recorded source
@@ -54,7 +58,7 @@ the current model.
   identities, attempted budgets, and independent exhaustive references. See
   [profiling](../tilelang/tiletune/profiling/device_profile.py),
   [runtime](../tilelang/tiletune/runtime.py), and
-  [study coordinator](../experiments/portable/repair_study.py).
+  [study coordinator](../experiments/suite.py).
 
 These boundaries should survive cleanup.
 
@@ -73,7 +77,7 @@ quality are separate capabilities. The current state is:
 | HIP/CDNA | Native execution plumbing, target identity, explicit external profiles, resource counters | Complete instruction/collective/residency modeling and hardware evaluation |
 | Ascend | External-worker protocol and explicit model boundary | Worker/backend integration plus Cube/Vector and storage/scheduling model |
 
-This follows the [documented hardware matrix](../experiments/portable/README.md)
+This follows the [documented hardware matrix](../experiments/common/README.md)
 and the source: automatic [primitive profiling](../tilelang/tiletune/profiling/device_profile.py)
 currently requires CUDA; automatic reduction-layout prediction in
 [compute.py](../tilelang/tiletune/compute.py) uses MMA/WGMMA helpers; HIP

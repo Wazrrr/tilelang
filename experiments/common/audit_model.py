@@ -1,4 +1,4 @@
-"""Audit saved portable comparisons without compiling, timing, or changing rankings.
+"""Audit saved comparisons without compiling, timing, or changing rankings.
 
 Counts are candidate-case pairs. Reasons overlap; they must not be summed as
 disjoint causes. Compiler comparisons cover only recorded compiled candidates.
@@ -13,6 +13,8 @@ from pathlib import Path
 import re
 import statistics
 
+from experiments.utils.results import config_key, load_oracle, oracle_at_k, provenance, records_by_index, check_metadata
+
 
 def read(path):
     return json.loads(path.read_text())
@@ -26,23 +28,25 @@ def median(values):
     return statistics.median(values) if values else None
 
 
-def audit_case(path, root):
+def audit_case(path, root, oracle_path=None):
     report = read(path)
     directory = path.parent.parent
     comparison = read(directory / "comparison.json")
-    outcomes = read(directory / "brute_force/outcomes.json")
+    if oracle_path is None:
+        reference = comparison.get("oracle")
+        if not reference:
+            raise ValueError(f"{directory}: no oracle reference; supply --report and --oracle for archived results")
+        oracle_path = (directory / reference["path"]).resolve()
+        if provenance(oracle_path)["sha256"] != reference["sha256"]:
+            raise ValueError(f"{directory}: oracle reference SHA256 mismatch")
+    measured = load_oracle(oracle_path)
+    check_metadata(measured["path"], path)
     records = report["configs"]
-    oracle = {item["index"]: item for item in outcomes}
-    if len(oracle) != len(outcomes) or {c["index"] for c in records} != set(oracle):
-        raise ValueError(f"incomplete or duplicate oracle/config indices: {directory}")
-    for record in records:
-        if record["config"] != oracle[record["index"]]["config"]:
-            raise ValueError(f"configuration mismatch: {directory}/{record['index']}")
-    valid = {
-        i: row["latency_ms"]
-        for i, row in oracle.items()
-        if row["status"] == "benchmarked" and math.isfinite(row.get("latency_ms", math.nan)) and row["latency_ms"] > 0
-    }
+    records_by_index(records)
+    if {config_key(c["config"]) for c in records} != set(measured["records"]):
+        raise ValueError(f"oracle/config pools differ: {directory}")
+    oracle = {c["index"]: measured["records"][config_key(c["config"])] for c in records}
+    valid = {i: r["latency_ms"] for i, r in oracle.items() if r["status"] == "benchmarked"}
     selected = report["selection"]["selected_indices"]
     eligible = [c["index"] for c in records if c["ranking"]["tier"] == "eligible"]
     best = min(valid, key=valid.get) if valid else None
@@ -134,7 +138,8 @@ def audit_case(path, root):
         best_selected=best_selected,
         coverage_ceiling=best_ms / eligible_ms if eligible_ms else None,
         ranking_within_eligible=eligible_ms / selected_ms if eligible_ms and selected_ms else None,
-        oracle_at_k=best_ms / selected_ms if selected_ms else None,
+        oracle_at_k=oracle_at_k(valid, selected),
+        oracle_sources=measured["sources"],
         demand_excluded_but_valid=[c["index"] for c in candidates if c["demand_status"] == "exceeds_allowance" and c["index"] in valid],
         compiler_comparisons=compiler,
         parallel_work=parallel_work,
@@ -142,11 +147,15 @@ def audit_case(path, root):
     )
 
 
-def audit(root):
-    paths = sorted(root.glob("*/test/*/tiletune/tiletune.json"))
+def audit(root, *, report_path=None, oracle_path=None):
+    paths = (
+        [report_path]
+        if report_path
+        else sorted(p for p in root.rglob("tiletune/tiletune.json") if (p.parent.parent / "comparison.json").is_file())
+    )
     if not paths:
         raise ValueError(f"no saved TileTune test reports under {root}")
-    cases = [audit_case(path, root) for path in paths]
+    cases = [audit_case(path, root, oracle_path) for path in paths]
     reasons = Counter()
     tiers = Counter()
     for case in cases:
@@ -160,7 +169,7 @@ def audit(root):
         if any(row["compiler_resources"].get(key, 0) for key in ("spill_stores_bytes", "spill_loads_bytes", "local_bytes"))
     ]
     return dict(
-        version=1,
+        version=2,
         root=str(root.resolve()),
         semantics={
             "counts": "candidate-case pairs; normalized reasons deduplicated per candidate; reasons overlap",
@@ -193,10 +202,18 @@ def audit(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", type=Path, help="completed portable comparison output directory")
+    parser.add_argument("root", type=Path, help="completed study/comparison output directory")
     parser.add_argument("--output", type=Path, required=True, help="new audit JSON; input reports are read only")
+    parser.add_argument("--report", type=Path, help="one saved TileTune report, for an archived run without an oracle reference")
+    parser.add_argument("--oracle", type=Path, help="explicit oracle for --report")
     args = parser.parse_args()
-    result = audit(args.root)
+    if bool(args.report) != bool(args.oracle):
+        parser.error("--report and --oracle must be supplied together")
+    result = audit(
+        args.root.resolve(),
+        report_path=args.report.resolve() if args.report else None,
+        oracle_path=args.oracle.resolve() if args.oracle else None,
+    )
     if args.output.exists():
         raise FileExistsError(f"audit output already exists: {args.output}")
     args.output.parent.mkdir(parents=True, exist_ok=True)

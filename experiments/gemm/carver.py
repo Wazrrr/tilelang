@@ -3,7 +3,9 @@
 
 def model_target(target):
     """The old model accepts sm_90; kernels still compile for the actual sm_90a."""
-    from tvm.target import Target
+    from tilelang import tvm
+
+    Target = tvm.target.Target
 
     target = dict(Target(target).export())
     if target.get("arch") == "sm_90a":
@@ -12,7 +14,9 @@ def model_target(target):
 
 
 def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True):
-    from tvm.target import Target
+    from tilelang import tvm
+
+    Target = tvm.target.Target
     from tilelang.carver.arch import CUDA
     from tilelang.carver.matmul_analysis import get_tensorized_func_and_tags
     from tilelang.carver.roller.policy import TensorCorePolicy
@@ -86,12 +90,16 @@ def carver_support_reason(workload, device):
         return "the existing Carver comparison adapter requires CUDA"
     if workload.op != "gemm" or workload.dtype not in ("float16", "bfloat16"):
         return "the existing Carver comparison adapter supports FP16/BF16 GEMM only"
-    if workload.parameters.get("batch", 1) != 1 or workload.parameters.get("epilogue", "none") != "none":
-        return "the existing Carver comparison adapter has no batched or fused-epilogue model"
+    from experiments.gemm.spaces import support_reason
+
+    reason = support_reason(workload)
+    if reason:
+        return reason
     from experiments.common.spec import configurations
 
-    if any(set(c) - {"block_m", "block_n", "block_k", "stages", "threads"} for c in configurations(workload, device)):
-        return "the existing Carver adapter does not model the expanded scheduling parameters"
+    keys = {"block_M", "block_N", "block_K", "num_stages", "thread_num", "enable_rasteration"}
+    if any(set(c) != keys for c in configurations(workload, device)):
+        return "Carver requires the example's configuration schema"
     return None
 
 
@@ -99,11 +107,9 @@ def carver_rank(workload, device, configs, top_k):
     reason = carver_support_reason(workload, device)
     if reason:
         raise ValueError(reason)
-    aliases = dict(block_m="block_M", block_n="block_N", block_k="block_K", stages="num_stages", threads="thread_num")
-    grid = [{aliases[key]: value for key, value in config.items()} for config in configs]
     p = workload.parameters
     report = rank_configs(
-        grid,
+        configs,
         m=p["m"],
         n=p["n"],
         k=p["k"],

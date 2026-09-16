@@ -5,7 +5,8 @@ from tilelang.profiler import do_bench
 
 
 @tilelang.jit
-def softmax_kernel(X, BLOCK_M=1, BLOCK_N=8192, dtype: T.dtype = T.float16):
+def softmax_kernel(X, BLOCK_M=1, BLOCK_N=8192, dtype: T.dtype = T.float16, threads=128):
+    M, N = T.const("M, N")
     X: T.Tensor([M, N], dtype)
     Y = T.empty([M, N], dtype)
 
@@ -13,7 +14,7 @@ def softmax_kernel(X, BLOCK_M=1, BLOCK_N=8192, dtype: T.dtype = T.float16):
 
     scale = 1.44269504  # log2(e)
 
-    with T.Kernel(T.ceildiv(M, BLOCK_M), threads=128) as (i_m):
+    with T.Kernel(T.ceildiv(M, BLOCK_M), threads=threads) as (i_m):
         x = T.alloc_fragment([BLOCK_M, BLOCK_N], dtype)
         y = T.alloc_fragment([BLOCK_M, BLOCK_N], dtype)
         lse = T.alloc_fragment([BLOCK_M], accum_dtype)
@@ -24,6 +25,9 @@ def softmax_kernel(X, BLOCK_M=1, BLOCK_N=8192, dtype: T.dtype = T.float16):
 
         for i_n in T.Pipelined(T.ceildiv(N, BLOCK_N)):
             T.copy(X[i_m * BLOCK_M, i_n * BLOCK_N], x)
+            if N % BLOCK_N != 0:
+                for i, j in T.Parallel(BLOCK_M, BLOCK_N):
+                    x[i, j] = T.if_then_else(i_n * BLOCK_N + j < N, x[i, j], -T.infinity(dtype))
             T.reduce_max(x, max_x, dim=1, clear=True)
 
             for i, j in T.Parallel(BLOCK_M, BLOCK_N):
@@ -45,17 +49,22 @@ def softmax_kernel(X, BLOCK_M=1, BLOCK_N=8192, dtype: T.dtype = T.float16):
     return Y
 
 
-M = 8192
-N = 8192
-dtype = torch.float16
-X = torch.randn(M, N, dtype=dtype, device="cuda")
-Y = softmax_kernel(X)
-Y_ref = X.softmax(dim=1)
+def main():
+    M = 8192
+    N = 8192
+    dtype = torch.float16
+    X = torch.randn(M, N, dtype=dtype, device="cuda")
+    Y = softmax_kernel(X)
+    Y_ref = X.softmax(dim=1)
 
-torch.testing.assert_close(Y, Y_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(Y, Y_ref, rtol=1e-2, atol=1e-2)
 
-t1 = do_bench(lambda: X.softmax(dim=1), warmup=25, rep=100)
-t2 = do_bench(lambda: softmax_kernel(X), warmup=25, rep=100)
-print(f"torch latency: {t1:.3f} ms")
-print(f"TileLang latency: {t2:.3f} ms")
-print(f"Speedup: {t1 / t2:.3f}x")
+    t1 = do_bench(lambda: X.softmax(dim=1), warmup=25, rep=100)
+    t2 = do_bench(lambda: softmax_kernel(X), warmup=25, rep=100)
+    print(f"torch latency: {t1:.3f} ms")
+    print(f"TileLang latency: {t2:.3f} ms")
+    print(f"Speedup: {t1 / t2:.3f}x")
+
+
+if __name__ == "__main__":
+    main()

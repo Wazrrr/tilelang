@@ -1,0 +1,230 @@
+# Guide for adding or extending kernel experiments
+
+Follow the organization in [gemm/](gemm/README.md) and
+[flash_attention/](flash_attention/README.md). Read their `cases.py`, `spaces.py`,
+`kernel.py`, `reference.py`, and command entry points before adding a family.
+The [experiment README](README.md) describes the current execution protocol;
+[utils/README.md](utils/README.md) describes shared helpers.
+
+The current final matrix has four families and eight FP16 cases. Preserve existing
+cases, pools, and recorded results unless the task explicitly changes them.
+The FP8/vector experiment families and their separate manifests/CLI adapters are
+retired; add future families through this guide rather than restoring them.
+Shared-runner defaults come from the same family-owned case definitions.
+Historical alignment reports describe earlier checkpoints; use current source
+and family READMEs for the active contracts.
+
+## Family layout
+
+```text
+experiments/<family>/
+├── README.md                 Example source, shapes, pool, support, commands
+├── cases.py                  Development/final workloads and model splits
+├── spaces.py                 One expanded configuration pool
+├── kernel.py                 Adapter to the authoritative example builder
+├── reference.py              Independent mathematical reference
+├── census.py                 Thin shared-census entry point
+├── system/run.py             Thin shared-system entry point
+├── tiletune/run.py            Thin shared-comparison entry point
+└── heuristics/<GPU model>/    Audited best-config JSONs and oracle references
+```
+
+Keep experiment orchestration in `common/`, accessory functions in `utils/`, and
+learned-model code in `xgboost/`. Reuse `comparison_main` and `census_main` from
+`common/family_cli.py`, and `main(family=...)` from `common/system.py`.
+Do not copy runners, GPU monitoring, cache handling, or result comparison into
+family folders. Do not reintroduce `portable.py`, `legacy.py`, `kernels/tiled.py`,
+alternative local kernels, or compatibility wrappers for removed paths.
+
+## Reuse the example kernel
+
+1. Identify the authoritative high-performance implementation under `examples/`
+   and document the exact file and builder. Call that builder directly; do not
+   write an approximate replacement in `experiments/`.
+2. Implement `make_case(workload)` returning `utils.kernel.KernelCase` with
+   `build`, seeded `inputs`, `reference`, `out_idx`, and relevant `pass_configs`.
+   `build(**config)` must return the example's program through its public builder,
+   `get_tir`, or `jit_impl.get_tir`, as appropriate.
+3. Preserve layouts, dtype, accumulation, masks, causal bounds, shared-memory
+   output paths, launch attributes, and compiler options. Honor output attributes
+   already embedded by eager builders; do not supply a conflicting `out_idx`.
+4. If the example needs an import guard, exposed launch parameter, or correctness
+   fix, make the minimal change in the example itself so both entry points use it.
+   Lock mutable eager-builder elaboration where needed, as attention does, without
+   serializing the entire compile/benchmark pipeline.
+5. Check outputs against the independent reference using `KernelCase.check`.
+   Keep both elementwise and relative-norm checks. Do not relax tolerances to hide
+   failures or compare a candidate against itself.
+
+For orientation, GEMM uses `example_gemm_advanced_autotune.py` with A=(M,K),
+B=(N,K), `transpose_B=True`, and the shared-memory epilogue. Attention uses
+`example_mha_fwd_bshd.py`. KDA uses `examples/kda/chunk_o.py`; softmax uses
+`examples/online_softmax/online_softmax.py`. These details are part of the kernel
+contract, not tuning-method choices.
+
+## Define cases and the single expanded pool first
+
+- `cases(holdout=False)` supplies development workloads; `cases(holdout=True)`
+  supplies final workloads with stable logical names. Existing core families have
+  two cases in each split. Record shape, layout, and semantic options in
+  `Workload.parameters`, and dtype in `Workload.dtype`; do not encode alternative
+  implementations in the config grid.
+- `training_cases()` supplies two training workloads and one validation workload
+  for XGBoost. Their mathematical shapes must be disjoint from each other and the
+  test workloads. Renaming the same workload does not make a separate split.
+- `spaces.get_configs()` returns one deterministic, complete `expanded` pool
+  using the example's native parameter names. Preserve every original example
+  config, explicit default, and known best config.
+- Aim for roughly eight times the example's autotuning grid by slicing existing
+  ranges more finely or exposing meaningful example parameters. Every parameter
+  must affect the example program. When the example has no meaningful autotuning
+  grid, document the absolute expansion instead of claiming an artificial 8x.
+- Keep one target-independent declared domain and stable ordering/config IDs.
+  Do not maintain parallel small/large/exhaustive pools, cap final pools, silently
+  map ignored knobs, or prune candidates with speculative legality filters.
+  Compilation, correctness, and runtime failures remain recorded outcomes.
+  Enforce mathematical support boundaries separately from candidate failures.
+- Follow the existing `canonical_config` and `legality_reason` interfaces.
+  Smoke/development and explicit config requests select original pool indices;
+  they do not define a new pool. All tuning methods use the same ordered pool.
+
+Current counts per case are GEMM 2,304 (288 × 8), attention 320, KDA 720 (90 × 8),
+and softmax 224. Counts describe declared candidates, not guaranteed compilable
+or distinct generated kernels. An intentional pool change needs new identities
+and results; review `common/spaces.py::SPACE_VERSION` and frozen manifests.
+
+## Register the family and its source identity
+
+Check all integration points; adding a folder alone is insufficient:
+
+| Location | Required integration |
+| --- | --- |
+| `families.py::FAMILIES` | Map operation name to family folder; keep imports lazy. |
+| `common/spec.py` | Parameter schema, dtype/semantic validation, support checks, and family-owned default workloads. |
+| `suite.py::CORE_OPS` and `common/system.py::OPS` | Register named-suite and system commands. Core membership changes the default matrix. |
+| `utils/cli.py::SOURCE_ROOTS` | Include family and authoritative example sources in run provenance; exclude generated results. |
+| `utils/baseline_store.py::EXAMPLES` / `measurement_sources` | Hash the actual example and all relevant dependencies for baseline invalidation. |
+| `xgboost/data.py::make_context` | Include the authoritative example in learned-model source identity too. |
+| `manifests/`, `common/acceptance.py`, relevant tests | Keep frozen workloads and acceptance scope consistent with the intended matrix. |
+
+`common/acceptance.py` currently recognizes eight cases across four operations
+as the complete family matrix. If the task expands that matrix, update this
+assumption, manifests, tests, and documentation together. Do not silently relabel
+an expanded or partial study as the old complete final study.
+
+Planning (`--plan`) must remain standard-library-only: no Torch, TileLang or
+XGBoost import, hardware query, compilation, or result-directory creation.
+Update the family README and relevant alignment documentation when contracts
+change; retain the meaning of historical measurements.
+
+## System and TileTune protocols
+
+System tests use identical examples, cases, pools, inputs, and correctness checks
+for `baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined`. The individual
+variants enable only their named optimization; combined enables all three.
+Use the shared runner's fresh processes and cold caches. Multi-GPU variants need
+at least two idle devices of the same model. With only one available, report
+those variants as unverified rather than claiming a complete ablation.
+
+TileTune studies compare brute force, Carver, XGBoost, and TileTune. Collect the
+three baselines once per family/device/experiment identity with `common/study.py`
+and `utils/baseline_store.py`. Reuse the same `--baseline-root` across TileTune
+revisions and use a new run output directory for each revision. Verify completion
+manifests and artifact hashes; incomplete collections cannot become baselines.
+
+Kernel, pool, shape, dtype, compiler/JIT/profiler, toolchain/runtime/driver, GPU,
+measurement, or baseline-setting changes invalidate the relevant baseline
+identity. Changes confined to TileTune ranking, repeat seeds, or evaluation K
+reuse it. Preserve saved baseline costs instead of charging collection again.
+Follow the existing fixed baseline seed and XGBoost training/validation protocol;
+do not train on final oracle labels or resample baselines for each TileTune repeat.
+
+The reusable collection workflow currently runs on local CUDA. Carver currently
+supports CUDA FP16/BF16 GEMM only. Record `unsupported` with a reason for other
+families; do not substitute a heuristic and label it Carver. Planning another
+backend does not establish that it runs. The offline result comparator itself
+is independent of backend.
+
+## GPU monitoring and recorded results
+
+Use idle GPUs of the intended model. System and sharded brute-force runners can
+use all idle visible devices; the local study collector runs monitored workers
+on a selected device. Do not promise automatic multi-GPU collection where the
+runner does not implement it. Use the existing monitoring utilities throughout
+measurement, not just a one-time idle check.
+
+Workers record GPU/process observations every second. A foreign compute process
+rejects the invocation; retain its logs separately and retry on idle hardware.
+The sharded oracle runner retries contaminated shards automatically. Stop only
+the experiment's own workers, never unrelated GPU jobs. Describe accepted runs
+as observed uncontended: polling cannot exclude subsecond interference.
+
+Save all per-config outcomes, indices/IDs, timings, correctness failures, source
+and measurement identities, wall time, device metadata, and monitor evidence.
+Use `common/brute_force.py` to export the existing GPU-specific heuristic schema
+under `<family>/heuristics/<GPU model>/<workload>.json`, including the full oracle
+path/hash and repeated winner measurements. Inspect the current GEMM H200 files
+for the schema. Preserve historical artifacts; changed experiments need distinct
+result locations. A winner-only JSON cannot replace a full oracle table.
+
+Use `compare_results.py` (or `compare_results.sh`) to compare saved rankings or
+selections by exact config identity at requested K values:
+
+```text
+Oracle@K = best valid latency in the full oracle
+           / best valid oracle latency among the first K candidates
+```
+
+Higher is better; 1.0 matches the oracle. Failed candidates consume slots without
+refilling K; no valid candidate is N/A; fewer than K candidates is a shortfall.
+Keep ranking curves separate from actual saved online selections and tuning cost.
+Read timings from the matching oracle; do not mix incompatible measurement
+identities or rerun GPUs for an offline comparison.
+
+## Validation and commands
+
+Run from the repository root. Replace `gemm`, workload names, device, paths, and
+config indices with those for the new family after registration.
+
+```bash
+python -m experiments.gemm.system.run --plan
+python -m experiments.gemm.tiletune.run --suite full --device hopper --plan
+
+# Let the monitored runner select GPUs; the wrapper must not restrict it to one.
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.gemm.system.run --variant all \
+  --config-indices 1534 1535 --output experiments/results/gemm/system-check-v1
+
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.gemm.tiletune.run --suite full --device hopper \
+  --baseline-root experiments/results/baselines \
+  --output experiments/results/gemm/tiletune-revision-a
+
+python -m experiments.compare_results --oracle PATH_TO_ORACLE_JSON \
+  --tiletune PATH_TO_TILETUNE_JSON --carver PATH_TO_CARVER_JSON \
+  --xgboost PATH_TO_XGBOOST_JSON --top-k 1 5 10 20 50
+```
+
+`full` executes complete final pools without asserting final acceptance. `final`
+requires the passing development report and K=20. Begin with representative
+config indices before launching a complete sweep; never report a subset check
+as an exhaustive result. Use the repository GPU-run/build skill instructions
+when executing tests or rebuilding native changes.
+
+Before reporting a new family ready:
+
+1. Verify example/adapter structural equality, independent numerical correctness,
+   and relevant boundary shapes. Use `testing/python/experiments/test_example_kernels.py`
+   as the pattern; include output handling under grouped compilation.
+2. Verify deterministic pool order/IDs, example-config coverage, explicit subsets,
+   disjoint model splits, and frozen-manifest consistency. Follow
+   `test_example_pools.py`, `test_family_layout.py`, and `test_reusable_workflow.py`.
+3. Exercise planning without GPU/compiler dependencies and run affected offline
+   tests. Then validate representative configs through the actual monitored
+   runners, all available system variants, and baseline collection/reuse.
+4. For requested full studies, complete the sweep, repeated winner checks, and
+   saved-result comparison. Compare example performance under identical timing,
+   layout, dtype, and hardware conditions; record the FLOP convention for TFLOPS.
+5. Report commands, artifact paths, pool/outcome counts, timing, monitor findings,
+   and unsupported or untested scope. Distinguish completed measurements from
+   planned runs. Do not overwrite prior results to make a check pass.

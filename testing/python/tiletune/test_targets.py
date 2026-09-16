@@ -166,12 +166,10 @@ def test_blackwell_mma_probe_cross_compiles():
 
 
 def test_recurrent_kda_traffic_and_timing_boundary():
-    from experiments.portable.spec import Device, TARGETS, configurations, default_workloads
-    from experiments.portable.kernels import make_case
+    from regression_kernels import recurrent_program
+    from experiments.common.spec import TARGETS
 
-    workload = next(w for w in default_workloads(True) if w.name == "kda_recurrent")
-    case = make_case(workload)
-    func = case.build(**configurations(workload, Device("hopper", TARGETS["hopper"]))[0])
+    func = recurrent_program(1, 2, 16, 32, 32, "float16", 16, 128)
     report = analyze_prim_func(func, {"ranking_metric": "traffic_waves"}, target=TARGETS["hopper"], device_limits=ILLUSTRATIVE_LIMITS)
     memory = report["modules"]["memory_traffic"]
     assert memory["traffic_bytes_per_block"] == 7232
@@ -214,11 +212,11 @@ def test_hip_compile_reuses_frozen_ir_and_preserves_flag_ownership(monkeypatch):
     from tilelang.autotuner.param import CompileArgs
     from tilelang.tiletune.runtime import TileTuneSession
     from tilelang.contrib.hip_resource_info import KernelResourceUsage
-    from experiments.portable.spec import Workload
-    from experiments.portable.kernels import make_case
+    from experiments.common.spec import Workload
+    from experiments.common.kernels import make_case
 
     target = {"kind": "hip", "mcpu": "gfx942", "thread_warp_size": 64}
-    configs = [{"block_rows": 1, "threads": 128}, {"block_rows": 2, "threads": 128}]
+    configs = [{"BLOCK_M": 1, "BLOCK_N": 128, "threads": 128}, {"BLOCK_M": 2, "BLOCK_N": 128, "threads": 128}]
     case = make_case(Workload("softmax", "softmax", dict(rows=32, columns=128)))
     built = []
 

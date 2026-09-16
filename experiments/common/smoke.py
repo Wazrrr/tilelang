@@ -6,7 +6,7 @@ import re
 import time
 
 from tiletune_core.budget import AttemptLedger
-from .run import write_json
+from experiments.utils.io import write_json
 
 
 def instruction_evidence(source, target, operation, config):
@@ -35,7 +35,7 @@ def run_smoke(case, configs, original_indices, target, inputs, expected, setting
     import tilelang
 
     ledger = AttemptLedger(len(configs), list(range(len(configs))))
-    expected = expected if isinstance(expected, (tuple, list)) else [expected]
+    expected = expected if isinstance(expected, tuple | list) else [expected]
     started = time.perf_counter()
     records = report["configs"]
     times = dict(compilation=0.0, correctness=0.0, instruction_inspection=0.0)
@@ -59,7 +59,7 @@ def run_smoke(case, configs, original_indices, target, inputs, expected, setting
             record["status"] = "compiled"
             t = time.perf_counter()
             result = kernel(*inputs)
-            case.check(result if isinstance(result, (tuple, list)) else [result], expected)
+            case.check(result if isinstance(result, tuple | list) else [result], expected)
             times["correctness"] += time.perf_counter() - t
             record["status"] = "correct"
             t = time.perf_counter()

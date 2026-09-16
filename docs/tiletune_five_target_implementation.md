@@ -7,20 +7,19 @@ The user-facing entry points now live in the kernel family folders:
 [FlashAttention](../experiments/flash_attention/README.md),
 [KDA](../experiments/kda/README.md), and
 [softmax](../experiments/softmax/README.md).
-Each owns its cases, configuration presets and constraints, implementations,
-references, comparison entry point, and census entry point. The existing GEMM
-and attention fixed-grid runners retain their behavior through compatibility
-entry points, with their code in `tiletune/legacy.py`.
+Each owns its cases, expanded configuration pool and constraints, example-kernel
+adapter, numerical reference, comparison entry point, and census entry point.
+The former GEMM and attention fixed-grid runners have been removed.
 
 Shared execution lives in `experiments/common/`. The matrix coordinator is
 `experiments/suite.py`; canonical manifests live in `experiments/manifests/`.
-The old `experiments.portable` modules forward to these implementations, and
-old manifest paths link to the canonical files. Family acceptance reports
+The old `experiments.portable` aliases and manifest links have been removed.
+Family acceptance reports
 identify their scope and cannot certify the complete five-target matrix.
 New XGBoost contexts fingerprint the family implementation and shared sources;
-archived context fingerprints retain their original interpretation.
+archived result files retain their recorded fingerprints.
 
-Refactor validation preserved all 420 checked configuration-space digests,
+Historical validation of the September 15 layout refactor preserved all 420 checked configuration-space digests,
 including ordered configurations, aliases, and rejection audits. Forty-one
 generated TIR programs matched structurally and 17 numerical references matched
 exactly against the pre-refactor sources. A focused A100 smoke check passed
@@ -33,9 +32,9 @@ remains incomplete.
 
 ## Delivered
 
-- Family-owned implementations, references, spaces, and case definitions under
-  `experiments/gemm`, `flash_attention`, `kda`, and `vector`. The previous portable
-  kernel and space entry points remain compatibility facades.
+- Family-owned adapters, references, spaces, and case definitions under
+  `experiments/gemm`, `flash_attention`, `kda`, and `softmax`.
+  Supplementary FP8/vector experiment families have since been removed.
 - The independently installable `tiletune_core` package. Numerical CUDA service,
   register-policy, residency, pipeline, compressed-region, ranking, and selection
   equations now live outside the compiler package. TIR extraction remains in
@@ -53,18 +52,18 @@ remains incomplete.
   deterministic pairwise configuration coverage, canonical alias elimination,
   preserved original indices, and actual pool-size reporting.
 - Explicit two-training/one-validation-shape XGBoost inputs per family, the
-  agreed hyperparameters, three final seeds, all-seed selection before final
-  oracles, shared primitive profiles/oracles, and seven shuffled winner checks.
+  agreed hyperparameters, three TileTune repeats, immutable baseline bundles
+  with a fixed XGBoost seed, shared primitive profiles, and seven TileTune winner checks.
 - Per-case correctness-score coverage, per-seed acceptance, preparation/online
   costs, missing-target reporting, process leases, and resumable worker artifacts.
   Winner remeasurement can use the external worker protocol.
 - A frozen eight-case FP16 holdout shape manifest at
-  `experiments/portable/manifests/five_target_final.json`. It is separate from
-  the existing repair manifests. Family definitions must match the manifest.
+  `experiments/manifests/five_target_final.json`. Family definitions must match
+  the manifest; the obsolete repair manifests have been removed.
 
 ## Verification on this host
 
-The available device is **NVIDIA A100 80GB PCIe**. Verification used CUDA 12.4,
+The September 15 verification host provided **NVIDIA A100 80GB PCIe**. Verification used CUDA 12.4,
 G++ 10, and the existing Python environment (PyTorch 2.7.0+cu126). CUDA driver
 575.57.08 was reported by the host. A CUDA 12.4 compiler cannot compile
 `sm_100a`; cross-compilation for that architecture remains unverified here.
@@ -133,21 +132,21 @@ The pin is a source identity, not a validated CANN environment.
 
 ```bash
 # No compiler/runtime imports or device queries:
-python -m experiments.portable.suite --suite smoke --plan
-python -m experiments.portable.suite --suite development --plan
-python -m experiments.portable.suite --suite final --freeze --output /path/final
+python -m experiments.suite --suite smoke --plan
+python -m experiments.suite --suite development --plan
+python -m experiments.suite --suite final --freeze --output /path/final
 
 # A100 correctness/instruction smoke:
 CUDA_HOME=/root/cuda-12.4 CXX=/usr/bin/g++-10 \
-  PATH=/root/cuda-12.4/bin:$PATH .venv/bin/python -m experiments.portable.suite \
+  PATH=/root/cuda-12.4/bin:$PATH .venv/bin/python -m experiments.suite \
   --suite smoke --devices ampere --output /path/new-smoke
 
 # Compact comparison, once the device is idle:
-python -m experiments.portable.suite --suite development --devices ampere \
+python -m experiments.suite --suite development --devices ampere \
   --output /path/development
 
 # Final execution requires passing development gates for requested targets:
-python -m experiments.portable.suite --suite final \
+python -m experiments.suite --suite final \
   --device-manifest /path/devices.json --development-report /path/acceptance.json \
   --output /path/final
 ```

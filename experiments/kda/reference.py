@@ -1,37 +1,20 @@
-"""Independent recurrent and chunk-output KDA references."""
-
-import torch
-
-
-def recurrent_reference(w):
-    batch, heads, sequence, dk, dv = (w.parameters[k] for k in ("batch", "heads", "sequence", "dim", "value_dim"))
-    scale = dk**-0.5
-
-    def reference(q, k, v, g, beta):
-        state = torch.zeros((batch, heads, dk, dv), device=q.device, dtype=torch.float32)
-        out = []
-        for t in range(sequence):
-            state = state * g[:, :, t].exp().unsqueeze(-1)
-            kt = k[:, :, t].float()
-            residual = (v[:, :, t].float() - torch.einsum("bhd,bhdv->bhv", kt, state)) * beta[:, :, t, None]
-            state = state + kt.unsqueeze(-1) * residual.unsqueeze(-2)
-            out.append(torch.einsum("bhd,bhdv->bhv", q[:, :, t].float() * scale, state))
-        return torch.stack(out, dim=2).to(q.dtype), state
-
-    return reference
+"""Independent chunk-output KDA reference, including intermediate casts."""
 
 
 def chunk_reference(w):
     batch, heads, sequence, dk, dv, chunk = (w.parameters[k] for k in ("batch", "heads", "sequence", "dim", "value_dim", "chunk_size"))
     chunks = sequence // chunk
-    vshape = (batch, heads, sequence, dv)
     scale = dk**-0.5
 
     def reference(q, v, g, a, h):
-        # Match the materialized gated-query dtype before the matrix operation.
-        gq = (q.float() * scale * g.exp2()).to(q.dtype).float().reshape(batch, heads, chunks, chunk, dk)
-        local = a.float().reshape(batch, heads, chunks, chunk, chunk).tril()
-        result = gq @ h.float() + local @ v.float().reshape(batch, heads, chunks, chunk, dv)
-        return result.reshape(vshape).to(q.dtype)
+        # The example stores scaled Q in input dtype, then materializes gated Q
+        # in that dtype before GEMM. Preserve both rounding points.
+        scaled_q = (q.float() * scale).to(q.dtype)
+        gq = (scaled_q.float() * g.exp2()).to(q.dtype).float()
+        gq = gq.permute(0, 2, 1, 3).reshape(batch, heads, chunks, chunk, dk)
+        local = a.float().permute(0, 2, 1, 3).reshape(batch, heads, chunks, chunk, chunk).tril()
+        values = v.float().permute(0, 2, 1, 3).reshape(batch, heads, chunks, chunk, dv)
+        result = gq @ h.float().permute(0, 2, 1, 3, 4) + local @ values
+        return result.reshape(batch, heads, sequence, dv).permute(0, 2, 1, 3).contiguous().to(q.dtype)
 
     return reference

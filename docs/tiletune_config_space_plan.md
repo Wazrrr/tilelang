@@ -41,7 +41,7 @@ definitions, and do not count as extra configurations for the same workload.
 
 ## 1. Represent and audit configuration spaces
 
-Extend `experiments/portable/spec.py` with named, deterministic presets:
+Extend `experiments/common/spec.py` with named, deterministic presets:
 
 - `current`: the exact current grids, including the new KDA candidates.
 - `expanded`: wider existing axes plus implemented scheduling parameters.

@@ -1,7 +1,7 @@
 """Optimized cardinalities must equal the bounded ownership reference."""
 
 import pytest
-from experiments.portable.kernels_expanded import row_program
+from regression_kernels import softmax_program
 from tilelang.tiletune.ampere import prepare_analysis, _PREPARATION_CACHE
 from tilelang.tiletune.compute import scalar_fragment_work
 from tilelang.tiletune.src.collector import _Collector
@@ -10,7 +10,7 @@ from test_portability import AMPERE
 
 @pytest.mark.parametrize("rows,cols,threads,vector,row_threads", [(4, 128, 128, 1, 4), (8, 512, 256, 4, 4), (4, 1024, 128, 2, 1)])
 def test_exact_projection_counts_match_reference(rows, cols, threads, vector, row_threads):
-    func = row_program(32, 2048, "float16", "softmax", 1e-6, rows, cols, threads, vector, row_threads)
+    func = softmax_program(32, 2048, "float16", rows, cols, threads, vector, row_threads)
     col = _Collector(func)
     prepare_analysis(func, col, AMPERE, {})
     for op in col.operations:
@@ -21,7 +21,7 @@ def test_exact_projection_counts_match_reference(rows, cols, threads, vector, ro
 
 def test_cache_keeps_reports_independent_and_invalidates_pass_settings():
     _PREPARATION_CACHE.clear()
-    func = row_program(32, 256, "float16", "softmax", 1e-6, 4, 128, 128, 1, 4)
+    func = softmax_program(32, 256, "float16", 4, 128, 128, 1, 4)
     before = func.script()
     first, second = _Collector(func), _Collector(func)
     prepare_analysis(func, first, AMPERE, {})
@@ -39,7 +39,7 @@ def test_explicit_fast_path_matches_full_native_inference(monkeypatch):
     from tilelang.tiletune import ownership
     from test_ampere import analyze
 
-    func = row_program(31, 259, "float16", "softmax", 1e-6, 4, 128, 128, 1, 4)
+    func = softmax_program(31, 259, "float16", 4, 128, 128, 1, 4)
     _PREPARATION_CACHE.clear()
     fast = analyze(func)
     _PREPARATION_CACHE.clear()
@@ -54,7 +54,7 @@ def test_explicit_fast_path_matches_full_native_inference(monkeypatch):
 
 @pytest.mark.parametrize("stages,block_n", [(0, 32), (2, 64), (3, 128)])
 def test_mixed_mma_explicit_ownership_matches_native(monkeypatch, stages, block_n):
-    from experiments.portable.kernels_expanded import attention_program
+    from regression_kernels import attention_program
     from tilelang.tiletune import ownership
     from test_ampere import analyze
 
@@ -75,7 +75,7 @@ def test_mixed_mma_explicit_ownership_matches_native(monkeypatch, stages, block_
 
 @pytest.mark.parametrize("stages", [1, 2, 3])
 def test_shared_buffer_versions_match_native_pipeline(stages):
-    from experiments.portable.kernels_expanded import attention_program
+    from regression_kernels import attention_program
     from tilelang import tvm, transform
     from tvm import tirx as tir
     from tvm.target import Target
@@ -123,8 +123,8 @@ def test_cache_context_keys_preserve_value_types_and_mapping_order():
 def test_cached_explicit_layouts_use_fresh_buffer_identities(monkeypatch):
     from tilelang.tiletune import ampere
 
-    first = row_program(31, 259, "float16", "softmax", 1e-6, 4, 128, 128, 1, 4)
-    second = row_program(31, 259, "float16", "softmax", 1e-6, 4, 128, 128, 1, 4)
+    first = softmax_program(31, 259, "float16", 4, 128, 128, 1, 4)
+    second = softmax_program(31, 259, "float16", 4, 128, 128, 1, 4)
     before, after = _Collector(first), _Collector(second)
     _PREPARATION_CACHE.clear()
     prepare_analysis(first, before, AMPERE, {})
@@ -146,25 +146,13 @@ def test_cached_explicit_layouts_use_fresh_buffer_identities(monkeypatch):
 
 @pytest.mark.parametrize("stages,intra_stages", [(0, 0), (2, 3)])
 def test_sequential_kda_cache_rebinds_fresh_equivalent_ir(monkeypatch, stages, intra_stages):
-    from experiments.portable.kernels import make_case
-    from experiments.portable.spec import Workload
+    from regression_kernels import chunk_program
     from tilelang.tiletune import ampere
     from test_ampere import analyze
 
-    workload = Workload("ownership", "kda_chunk_o", dict(batch=1, heads=2, sequence=256, dim=96, value_dim=64, chunk_size=128))
-    case = make_case(workload)
-    config = dict(
-        implementation="tiled",
-        block_m=32,
-        block_k=32,
-        block_v=32,
-        block_s=32,
-        stages=stages,
-        intra_stages=intra_stages,
-        threads=128,
-    )
-    func = case.build(**config)
-    equivalent = case.build(**config)
+    args = (1, 2, 256, 96, 64, 128, "float16", 32, 32, stages, 128, 32, 32, intra_stages)
+    func = chunk_program(*args)
+    equivalent = chunk_program(*args)
     assert not func.same_as(equivalent)
     before = func.script()
     _PREPARATION_CACHE.clear()
