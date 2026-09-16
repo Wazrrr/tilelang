@@ -1,5 +1,12 @@
 # Example-kernel alignment (2026-09-16)
 
+The opt-in [grouped GEMM family](grouped_gemm/README.md) was added after this
+checkpoint. It directly elaborates `example_grouped_gemm_fwd.py::grouped_gemm`,
+including its metadata buffers, FP32 accumulation, masked output, and eager
+output attribute. Its 192-config pool fixes `block_M=64` so the same padded group
+offsets remain valid for every candidate. It has a separate holdout manifest and
+does not change the historical matrix or measurements below.
+
 This records the initial alignment checkpoint. All four families now have one
 complete expanded pool and no local/legacy experiment kernels: GEMM 2,304,
 FlashAttention 320, KDA 720 and softmax 224 configs per case. See the

@@ -10,7 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from experiments.families import FAMILIES, family_module
+from experiments.families import DEFAULT_OPS, FAMILIES, family_module
 from tiletune_core.contracts import digest
 from experiments.common.run import make_request, run_case
 from experiments.utils.io import write_json
@@ -18,7 +18,7 @@ from experiments.common.spec import Device, TARGETS, configuration_space
 from experiments.utils.subsets import pairwise_subset
 from experiments.common.spaces import PRESETS
 
-CORE_OPS = ("gemm", "attention", "kda_chunk_o", "softmax")
+CORE_OPS = DEFAULT_OPS
 CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
 CORE_TARGETS = ("ampere", "hopper", "blackwell", "mi355x", "ascend910b")
 BUDGETS = {
@@ -36,12 +36,14 @@ def core_cases(suite, families=None):
     if suite not in BUDGETS:
         raise ValueError(f"unknown suite {suite}")
     families = CORE_FAMILIES if families is None else tuple(families)
-    if not families or len(set(families)) != len(families) or set(families) - set(CORE_FAMILIES):
-        raise ValueError(f"families must be unique names from {CORE_FAMILIES}")
-    ops = [op for op in CORE_OPS if FAMILIES[op] in families]
+    if not families or len(set(families)) != len(families) or set(families) - set(FAMILIES.values()):
+        raise ValueError(f"families must be unique names from {tuple(FAMILIES.values())}")
+    ops = [op for op in FAMILIES if FAMILIES[op] in families]
     cases = [w for op in ops for w in family_module(op, "cases").cases(holdout=suite in ("full", "final"))]
     if suite in ("full", "final"):
         frozen = json.loads(Path(__file__).with_name("manifests").joinpath("five_target_final.json").read_text())["workloads"]
+        if "grouped_gemm" in ops:
+            frozen += json.loads(Path(__file__).with_name("manifests").joinpath("grouped_gemm_final.json").read_text())["workloads"]
         frozen = [w for w in frozen if w["op"] in ops]
         if [w.to_dict() for w in cases] != frozen:
             raise ValueError("final family definitions differ from the frozen holdout manifest")
@@ -50,14 +52,14 @@ def core_cases(suite, families=None):
 
 def study_plan(suite, devices=None, *, families=None, config_space=None):
     tests = core_cases(suite, families)
-    families = [FAMILIES[op] for op in CORE_OPS if any(w.op == op for w in tests)]
+    families = [FAMILIES[op] for op in FAMILIES if any(w.op == op for w in tests)]
     if suite in ("final", "full") and config_space is not None and any(w.config_space != config_space for w in tests):
         raise ValueError("final/full suites require each family's frozen configuration space")
     budget = dict(BUDGETS[suite], cases=len(tests))
     devices = devices or [Device(name, TARGETS[name], expected_device_pattern=DEVICE_PATTERNS[name]) for name in CORE_TARGETS]
     splits = dict(train=[], validation=[], test=tests)
     if budget["compare"]:
-        for op in CORE_OPS:
+        for op in FAMILIES:
             if FAMILIES[op] not in families:
                 continue
             a, b, validation = family_module(op, "cases").training_cases()
@@ -185,7 +187,7 @@ def main(argv=None, *, family=None):
     if family:
         parser.set_defaults(families=[family])
     else:
-        parser.add_argument("--families", nargs="+", choices=CORE_FAMILIES, default=list(CORE_FAMILIES))
+        parser.add_argument("--families", nargs="+", choices=tuple(FAMILIES.values()), default=list(CORE_FAMILIES))
     parser.add_argument(
         "--config-space",
         choices=PRESETS,

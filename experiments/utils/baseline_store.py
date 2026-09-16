@@ -17,6 +17,7 @@ from experiments.xgboost.data import digest
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = {
     "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
+    "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
     "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
     "kda": "examples/kda/chunk_o.py",
     "softmax": "examples/online_softmax/online_softmax.py",

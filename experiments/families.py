@@ -7,7 +7,11 @@ FAMILIES = {
     "attention": "flash_attention",
     "kda_chunk_o": "kda",
     "softmax": "softmax",
+    "grouped_gemm": "grouped_gemm",
 }
+
+# Preserve the frozen four-family study; additional families are opt-in.
+DEFAULT_OPS = ("gemm", "attention", "kda_chunk_o", "softmax")
 
 
 def family_module(op, component):

@@ -12,12 +12,18 @@ start in the family folder:
 | FlashAttention | Noncausal and causal | [flash_attention/](flash_attention/README.md) |
 | KDA | Chunk output with equal and unequal head dimensions | [kda/](kda/README.md) |
 | Softmax | Aligned and irregular rows | [softmax/](softmax/README.md) |
+| Grouped GEMM (opt-in) | Aligned and ragged groups, NN and NT layouts | [grouped_gemm/](grouped_gemm/README.md) |
+
+Grouped GEMM follows the same family structure with a 192-config pool. Select it
+through its family commands or `--families grouped_gemm`; the default four-family,
+eight-case matrix remains unchanged. Its holdouts have a separate frozen manifest.
 
 ## Layout
 
 ```text
 experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
+├── grouped_gemm/            Opt-in concatenated grouped forward GEMM study
 ├── flash_attention/         Same family conventions
 ├── kda/                     Direct chunk-output example study
 ├── softmax/                 Direct online-softmax example study
