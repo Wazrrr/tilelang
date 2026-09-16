@@ -7,7 +7,10 @@ FAMILIES = {
     "attention": "flash_attention",
     "kda_chunk_o": "kda",
     "gemm_fp8": "gemm_fp8",
+    "grouped_gemm": "grouped_gemm",
 }
+
+DEFAULT_OPS = tuple(FAMILIES)
 
 
 def family_module(op, component):

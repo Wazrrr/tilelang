@@ -195,7 +195,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="hopper")
-    parser.add_argument("--workloads", nargs="+", help="Final workload names to measure; default: all eight cases")
+    parser.add_argument("--manifest", type=Path, default=ROOT / "experiments/manifests/five_target_final.json")
+    parser.add_argument("--workloads", nargs="+", help="Final workload names to measure; default: all cases in the manifest")
     parser.add_argument("--gpus", nargs="+", type=int)
     parser.add_argument("--shard-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
@@ -210,7 +211,7 @@ def main():
         return export_baseline_study(args.baseline_study.resolve(), args.output.resolve(), args.device, args.workloads)
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=args.resume)
-    devices, workloads = load_manifest(json.loads((ROOT / "experiments/manifests/five_target_final.json").read_text()))
+    devices, workloads = load_manifest(json.loads(args.manifest.read_text()))
     if args.workloads:
         unknown = set(args.workloads) - {w.name for w in workloads}
         if unknown:

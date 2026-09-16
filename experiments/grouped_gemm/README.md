@@ -1,0 +1,127 @@
+# Grouped GEMM experiments
+
+This family follows [gemm/](../gemm/README.md) and calls
+[`grouped_gemm.get_tir`](../../examples/grouped_gemm/example_grouped_gemm_fwd.py)
+directly. It uses the concatenated forward example, with FP32 accumulation and
+the example's masked fragment-to-global output. The adapter contains no local
+TileLang kernel. Pointer-table and backward examples are outside this family.
+
+For group sizes `batch_sizes=[M0, M1, ...]`, A has shape `(sum(Mi), K)`.
+B has shape `(G, K, N)` with `transpose_b=False`, or `(G, N, K)` with
+`transpose_b=True`. C concatenates the independent products along its row axis.
+All named workloads use FP16; BF16 is supported too. Group sizes must be positive,
+and N and K are shared by every group. The independent reference computes each
+product in FP32 and casts to the input dtype. Both elementwise and relative-norm
+checks use 0.01 tolerance. FLOPs are `2 * sum(Mi) * N * K`.
+
+The family is opt-in: use its commands or `experiments.suite --families grouped_gemm`.
+Its frozen holdouts live in [grouped_gemm_final.json](../manifests/grouped_gemm_final.json).
+The default four-family/eight-case matrix and historical results are unchanged.
+
+## One configuration set
+
+[`spaces.py`](spaces.py) declares 192 configurations in one deterministic
+`expanded` pool:
+
+| Parameter | Values |
+| --- | --- |
+| `block_M` | 64 |
+| `block_N` | 32, 64, 96, 128, 192, 256 |
+| `block_K` | 16, 32, 48, 64 |
+| `num_stages` | 0, 1, 2, 3 |
+| `threads` | 128, 256 |
+
+The example has no autotuning grid, so this is an absolute 192-candidate
+expansion. It includes the example's 64×64×64, 2-stage, 128-thread test launch
+(index 60) and 64×128×64, 2-stage, 256-thread CLI launch (index 125).
+
+`block_M` is fixed because the example receives padded group offsets as an input.
+Those offsets depend on the M tile. The shared runners reuse identical tensors
+across candidates, including grouped compilation and multiple GPUs. Fixing the M
+tile preserves correct offsets without changing the example or its timing path.
+Input generation prepares the group sizes, offsets, and padded offsets outside
+kernel timing. Every declared tuning parameter reaches the example builder.
+
+All methods use the same ordered pool. Smoke/development runs select original
+indices; explicit configs must belong to this pool. There is no speculative
+legality filter. Compilation and correctness failures remain recorded outcomes;
+the pool size does not promise that every candidate compiles.
+
+## Files and cases
+
+- `cases.py`: development, final, and independent model-training workloads.
+- `spaces.py`: compiler-free configuration pool and support contract.
+- `kernel.py`, `reference.py`: example adapter and independent FP32 reference.
+- `census.py`, `system/run.py`, `tiletune/run.py`: shared-runner entry points.
+- `heuristics/<GPU>/`: audited results from completed sweeps, when available.
+
+| Split/case | Group sizes | N | K | Transpose B |
+| --- | --- | --- | --- | --- |
+| Training A | 32, 96 | 256 | 256 | False |
+| Training B | 47, 81, 129 | 384 | 256 | True |
+| Validation | 65, 127 | 256 | 384 | False |
+| Development aligned | 64, 128, 256 | 512 | 512 | False |
+| Development ragged | 63, 77, 111, 280 | 768 | 512 | True |
+| Final aligned | 64, 128, 256 | 8192 | 8192 | False |
+| Final ragged | 63, 77, 111, 280 | 4096 | 8192 | True |
+
+## Commands
+
+Run from the repository root. Planning uses only the Python standard library.
+
+```bash
+python -m experiments.grouped_gemm.system.run --plan
+python -m experiments.grouped_gemm.census --suite final --plan
+python -m experiments.grouped_gemm.tiletune.run --suite full --device hopper --plan
+
+# Check the two example launches through all system variants.
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.grouped_gemm.system.run --variant all \
+  --config-indices 60 125 --output experiments/results/grouped_gemm/system-v1
+
+# Compare complete pools and reuse saved baselines across TileTune revisions.
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.grouped_gemm.tiletune.run --suite full --device hopper \
+  --baseline-root experiments/results/baselines \
+  --output experiments/results/grouped_gemm/tiletune-revision-a
+
+# Exhaustive oracle collection and audited heuristic export.
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.common.brute_force \
+  --manifest experiments/manifests/grouped_gemm_final.json --device hopper \
+  --output experiments/results/grouped_gemm/oracle-v1
+```
+
+System modes are `baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined`.
+Here the `grouped` mode groups kernel compilations; every mode executes grouped
+matrix multiplication. Multi-GPU modes require two idle devices of the same model.
+The shared runners monitor contention and record per-config failures and timings.
+
+Carver has no grouped GEMM adapter and records `unsupported`. Brute force,
+XGBoost, and TileTune use the shared comparison workflow. `full` runs the complete
+pool without claiming final acceptance; `final` requires passing development
+gates. The shared workflow collects missing baselines and reuses verified bundles
+from the same `--baseline-root` across TileTune revisions. Reusable baseline
+collection runs on local CUDA. HIP and external Ascend
+execution require separate device validation and, for Ascend, native schedules.
+No complete sweep or tuned winner is bundled with this family.
+
+## Validation
+
+The 20 CPU tests in `testing/python/experiments/test_grouped_gemm.py` cover
+planning without runtime imports, pool identities, frozen/disjoint workloads,
+source fingerprints, seeded metadata, independent references, and FP16/BF16
+structural equality with the example. The affected shared-framework regression
+suite passed 167 tests. Both final workloads generated Hopper CUDA source for
+indices 60 and 125. Grouped GEMM GPU correctness, grouped compilation execution,
+system ablations, and baseline collection remain unverified: all local H200s
+had foreign compute processes attached during validation.
+
+```bash
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m pytest testing/python/experiments/test_grouped_gemm.py -k 'not on_gpu' -q
+
+# Run on an idle GPU to include FP16/BF16 boundary and grouped-compilation checks.
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
+  python -m pytest testing/python/experiments/test_grouped_gemm.py -q
+```

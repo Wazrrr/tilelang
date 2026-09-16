@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "name": "ampere",
+      "target": {
+        "kind": "cuda",
+        "arch": "sm_80"
+      },
+      "device_limits": null,
+      "performance_model": null,
+      "profiles": null,
+      "configs": null,
+      "worker": null,
+      "worker_cwd": null,
+      "expected_device_pattern": "A100"
+    },
+    {
+      "name": "hopper",
+      "target": {
+        "kind": "cuda",
+        "arch": "sm_90a"
+      },
+      "device_limits": null,
+      "performance_model": null,
+      "profiles": null,
+      "configs": null,
+      "worker": null,
+      "worker_cwd": null,
+      "expected_device_pattern": "H200"
+    },
+    {
+      "name": "blackwell",
+      "target": {
+        "kind": "cuda",
+        "arch": "sm_100a"
+      },
+      "device_limits": null,
+      "performance_model": null,
+      "profiles": null,
+      "configs": null,
+      "worker": null,
+      "worker_cwd": null,
+      "expected_device_pattern": "B200|GB200"
+    },
+    {
+      "name": "mi355x",
+      "target": {
+        "kind": "hip",
+        "mcpu": "gfx950",
+        "thread_warp_size": 64
+      },
+      "device_limits": null,
+      "performance_model": null,
+      "profiles": null,
+      "configs": null,
+      "worker": null,
+      "worker_cwd": null,
+      "expected_device_pattern": "MI355X"
+    },
+    {
+      "name": "ascend910b",
+      "target": {
+        "kind": "ascendc",
+        "arch": "Ascend910B"
+      },
+      "device_limits": null,
+      "performance_model": null,
+      "profiles": null,
+      "configs": null,
+      "worker": null,
+      "worker_cwd": null,
+      "expected_device_pattern": "910B|A2"
+    }
+  ],
+  "workloads": [
+    {
+      "name": "grouped_gemm_aligned",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          64,
+          128,
+          256
+        ],
+        "n": 8192,
+        "k": 8192,
+        "transpose_b": false
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "grouped_gemm_ragged",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          63,
+          77,
+          111,
+          280
+        ],
+        "n": 4096,
+        "k": 8192,
+        "transpose_b": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    }
+  ]
+}

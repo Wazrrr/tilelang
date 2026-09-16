@@ -9,7 +9,7 @@ import time
 
 from experiments.utils.io import write_json
 from experiments.common.spec import Workload, Device, TARGETS, configuration_space
-from experiments.families import family_module
+from experiments.families import FAMILIES, family_module
 
 VARIANTS = {
     "baseline": (False, False, False),
@@ -18,7 +18,7 @@ VARIANTS = {
     "multi_gpu": (False, False, True),
     "combined": (True, True, True),
 }
-OPS = dict(gemm="gemm", flash_attention="attention", kda="kda_chunk_o", gemm_fp8="gemm_fp8")
+OPS = {family: op for op, family in FAMILIES.items()}
 
 
 def system_plan(family, *, workloads=None, variants=None, indices=None):
