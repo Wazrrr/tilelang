@@ -113,7 +113,27 @@ def test_dtype_layout_and_carver_support():
         replace(w, parameters=dict(w.parameters, transpose_b=1))
     implicit = replace(w, parameters={k: v for k, v in w.parameters.items() if k != "transpose_b"})
     assert canonical_workload(implicit) == canonical_workload(w)
-    assert "no block-scaled 2-CTA grouped-MXFP8 model" in carver_support_reason(w, Device("hopper", TARGETS["hopper"]))
+    assert "requires a Blackwell CUDA target" in carver_support_reason(w, Device("hopper", TARGETS["hopper"]))
+    assert carver_support_reason(w, Device("blackwell", TARGETS["blackwell"])) is None
+
+
+@pytest.mark.parametrize(
+    ("case_index", "expected_persistent"),
+    [(0, False), (1, False), (2, False), (3, True), (4, True)],
+)
+def test_simple_carver_model_ranks_native_grouped_schedules(case_index, expected_persistent):
+    from types import SimpleNamespace
+
+    from experiments.grouped_gemm.carver import _model_config
+
+    arch = SimpleNamespace(compute_max_core=148, transaction_size=[32, 128], max_smem_usage=256 * 1024)
+    workload = cases(holdout=True)[case_index]
+    records = [_model_config(workload, config, arch) for config in get_configs()]
+    assert all(record["valid"] for record in records)
+    assert records[0]["traffic_bytes"] == records[1]["traffic_bytes"]
+    best = min(zip(records, get_configs()), key=lambda pair: pair[0]["score"])
+    assert best[1]["persistent"] is expected_persistent
+    assert records[0]["scale_loads"] == workload.parameters["k"] // 512
 
 
 def test_example_and_adapter_sources_invalidate_baselines_and_models():

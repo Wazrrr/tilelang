@@ -19,6 +19,7 @@ from .template import (  # noqa: F401
     ElementwiseTemplate,
     GeneralReductionTemplate,
     FlashAttentionTemplate,
+    GroupedMXFP8MatmulTemplate,
     GroupedMatmulTemplate,
     KDAChunkTemplate,
 )

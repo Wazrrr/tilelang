@@ -27,3 +27,38 @@ class GroupedMatmulTemplate(MatmulTemplate):
 
     def params_as_dict(self):
         return {**super().params_as_dict(), "batch_sizes": self.batch_sizes, "block_m": self.block_m}
+
+
+@dataclass
+class GroupedMXFP8MatmulTemplate(GroupedMatmulTemplate):
+    """Padded grouped MXFP8 GEMM with block scales and BF16 output.
+
+    The equivalent dense graph represents the arithmetic domain seen by
+    Carver. The experiment adapter separately models scale traffic and the
+    native SM100 kernel's two-CTA cluster dispatch.
+    """
+
+    in_dtype: str = field(default="float8_e4m3", init=False)
+    out_dtype: str = field(default="bfloat16", init=False)
+    accum_dtype: str = field(default="float32", init=False)
+    with_bias: bool = field(default=False, init=False)
+    kernel_dtype: str = "float8_e4m3fn"
+    scale_granularity_k: int = 128
+    cluster_size: int = 2
+
+    def initialize_function(self) -> None:
+        if self.kernel_dtype != "float8_e4m3fn":
+            raise ValueError("grouped MXFP8 GEMM requires float8_e4m3fn inputs")
+        if self.scale_granularity_k <= 0 or self.K % self.scale_granularity_k:
+            raise ValueError("K must be divisible by the MXFP8 scale granularity")
+        if self.cluster_size != 2:
+            raise ValueError("the native grouped MXFP8 kernel requires two-CTA clusters")
+        super().initialize_function()
+
+    def params_as_dict(self):
+        return {
+            **super().params_as_dict(),
+            "kernel_dtype": self.kernel_dtype,
+            "scale_granularity_k": self.scale_granularity_k,
+            "cluster_size": self.cluster_size,
+        }

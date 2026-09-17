@@ -40,7 +40,7 @@ def _offline_hopper():
                 {"batch_sizes": [31, 65], "n": 256, "k": 128, "transpose_b": True},
                 dtype="float8_e4m3fn",
             ),
-            "GroupedMatmulTemplate",
+            "GroupedMXFP8MatmulTemplate",
         ),
         (
             _workload(
@@ -116,3 +116,9 @@ def test_grouped_template_preserves_padded_cta_domain():
     template = workload_template(workload, [{"block_M": 128}], arch=_offline_hopper())
     assert template.M == 2 * 128
     assert template.block_m == 128
+    assert template.kernel_dtype == "float8_e4m3fn"
+    assert template.in_dtype == "float8_e4m3"
+    assert template.out_dtype == "bfloat16"
+    assert template.accum_dtype == "float32"
+    assert template.scale_granularity_k == 128
+    assert template.cluster_size == 2
