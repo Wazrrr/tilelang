@@ -71,13 +71,10 @@ def _prepare_analysis(func, col, target, pass_configs):
                     col.ampere_plan = next(iter(col.ampere_plans.values()))
             except Exception as error:
                 col.ampere_plan.update(status="unknown", unknown=[f"Ampere compiler pipeline plan: {error}"])
-        # MMA layout helpers already cover dense producers. Generic reductions
-        # need the compiler's graph-wide layout constraints, including broadcasts
-        # and loop-carried state. These serial/single-pass graphs are inexpensive
-        # to infer and require no software-pipeline rewrite.
-        if any(op.kind == "reduce" for op in col.operations) and (
-            not any(hasattr(op.metadata, "cRegion") for op in col.operations) or col.layouts
-        ):
+        # A producer's MMA layout alone does not determine the ownership of
+        # subsequent broadcasts and reductions (notably online attention).
+        # Resolve the complete graph before counting scalar or collective work.
+        if any(op.kind == "reduce" for op in col.operations):
             try:
                 from .ownership import verified_explicit_layouts
 

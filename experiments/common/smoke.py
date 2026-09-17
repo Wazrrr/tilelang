@@ -11,20 +11,22 @@ from experiments.utils.io import write_json
 
 def instruction_evidence(source, target, operation, config):
     """Inspect generated instruction text; a target name alone is not evidence."""
-    matrix = operation in ("gemm", "attention", "kda_chunk_o")
+    matrix = operation in ("gemm", "gemm_fp8", "attention", "kda_chunk_o")
     arch = target.get("arch", "").rstrip("af")
     required = []
     if target["kind"] == "cuda":
         if matrix:
             required = (
                 ["mma.sync"]
-                if arch == "sm_80"
+                if arch in ("sm_80", "sm_86", "sm_89")
                 else ["wgmma.mma_async"]
                 if arch == "sm_90"
                 else ["tcgen05.mma", "tcgen05.ld", "tcgen05.commit"]
             )
+        if operation == "gemm_fp8":
+            required += ["e5m2" if "e5m2" in source else "e4m3"]
         if config.get("stages", config.get("num_stages", 0)):
-            required += ["cp.async"] if arch == "sm_80" else ["cp.async.bulk.tensor", "mbarrier"]
+            required += ["cp.async"] if arch in ("sm_80", "sm_86", "sm_89") else ["cp.async.bulk.tensor", "mbarrier"]
     elif target["kind"] == "hip" and matrix:
         required = ["mfma"]
     found = {pattern: bool(re.search(re.escape(pattern), source, re.IGNORECASE)) for pattern in required}

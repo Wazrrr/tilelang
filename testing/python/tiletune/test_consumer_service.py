@@ -97,6 +97,63 @@ def test_producers_do_not_count_as_scalar_consumers():
     assert func.script() == before
 
 
+def test_half_max_uses_its_own_rate_and_workspace_element_size():
+    from tiletune_core.compute import estimate_phase_cycles
+
+    phase = dict(
+        consumer_threads=128,
+        work=dict(gemm_flops=0, shared_bytes=0, elementwise_ops=0, exp_ops=0, reduction_ops=100),
+        reduction=dict(
+            precision="predicted",
+            dtype="float16",
+            operator="max",
+            local_pairs=64,
+            shuffle_pairs=32,
+            shared_pairs=16,
+            barrier_rounds=2,
+        ),
+    )
+    rates = dict(
+        shared_bytes_per_cycle=32,
+        barrier_cycles=3,
+        reduction_local_max_per_cycle=1000,
+        reduction_shuffle_max_per_cycle=1000,
+    )
+    assert estimate_phase_cycles(phase, rates, 1) is None
+    rates.update(reduction_local_max_float16_per_cycle=16, reduction_shuffle_max_float16_per_cycle=8)
+    # Local + shuffle + shared combine + two-byte shared roundtrip + barriers.
+    assert estimate_phase_cycles(phase, rates, 1) == 4 + 4 + 1 + 2 + 6
+
+
+@pytest.mark.parametrize("kind", [0, 1])
+def test_gpu_half_max_primitive(kind):
+    import torch
+    import tilelang
+    from tilelang.tiletune.profiling.device_probes import half_max_primitive
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    threads = 128
+    kernel = tilelang.compile(half_max_primitive(kind, 3, 1, threads), out_idx=[0], execution_backend="tvm_ffi")
+    initial = (0.01 * (torch.arange(threads, device="cuda")[:, None] + torch.arange(8, device="cuda")[None, :] + 1)).half()
+    expected = initial.clamp_min(0.5) if kind == 0 else torch.maximum(initial, initial[torch.arange(threads, device="cuda") ^ 1])
+    torch.testing.assert_close(kernel()[0], expected.float().sum(1))
+
+
+def test_gpu_log2_primitive():
+    import torch
+    import tilelang
+    from tilelang.tiletune.profiling.device_probes import primitive
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    kernel = tilelang.compile(primitive(6, 3, 1), out_idx=[0], execution_backend="tvm_ffi")
+    expected = 0.01 * (torch.arange(128, device="cuda")[:, None] + torch.arange(8, device="cuda")[None, :] + 1)
+    for _ in range(3):
+        expected = torch.log2(expected * 0.01 + 2)
+    torch.testing.assert_close(kernel()[0], expected.sum(1), rtol=1e-4, atol=1e-6)
+
+
 @pytest.mark.parametrize("threads", [32, 64, 256, 512])
 def test_gpu_consumer_probe_thread_domains(threads):
     import torch

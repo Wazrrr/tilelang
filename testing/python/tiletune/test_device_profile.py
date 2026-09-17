@@ -14,6 +14,7 @@ from test_pipeline import matrix_pipeline
 def profile(dtype="float16"):
     return dict(
         PROFILE,
+        **({f"convert_float32_to_{dtype}_per_cycle": 64} if dtype.startswith("float8") else {}),
         reference_clock_mhz=1800,
         profile_target="sm_90a",
         profile_id="synthetic-test-profile",
@@ -167,6 +168,31 @@ def test_fp8_example_uses_actual_ir_and_fp32_accumulation():
     assert memory["per_iteration_input_bytes"] == (128 * 64 + 128 * 64)
     assert memory["output_bytes_per_block"] == 128 * 128
     assert result["pressure"]["modeled_lower_bound"] == 128
+
+
+@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"])
+@pytest.mark.parametrize("case_index", [0, 1])
+def test_fp8_final_workloads_model_native_output_conversion(dtype, case_index):
+    from dataclasses import replace
+    from experiments.gemm_fp8.cases import cases
+    from experiments.gemm_fp8.kernel import make_case
+
+    workload = replace(cases(holdout=True)[case_index], dtype=dtype)
+    func = make_case(workload).build(block_M=128, block_N=128, block_K=64, num_stages=2, threads=128, enable_rasteration=False)
+    original = func.script()
+    rates = profile(dtype)
+    result = analyze(func, rates)
+    assert func.script() == original
+    assert result["tile_cost"]["score"] > 0
+    memory = result["modules"]["memory_traffic"]
+    assert memory["per_iteration_input_bytes"] == 2 * 128 * 64
+    assert memory["output_bytes_per_block"] == 128 * 128
+    phases = result["modules"]["pipeline_overlap"]["phases"]
+    field = f"convert_float32_to_{dtype}"
+    assert sum(p["work"].get(field, 0) for p in phases) == 128 * 128
+    rates.pop(field + "_per_cycle")
+    assert analyze(func, rates)["tile_cost"]["score"] is None
+    assert analyze(func, profile("float16"))["tile_cost"]["score"] is None
 
 
 @pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"])

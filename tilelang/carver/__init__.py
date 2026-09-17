@@ -13,3 +13,4 @@ from .common_schedules import get_block, get_output_blocks, try_inline, try_inli
 from .roller import *
 from .arch import CUDA, CDNA, RDNA  # noqa: F401
 from .template import MatmulTemplate, GEMVTemplate, ElementwiseTemplate, GeneralReductionTemplate, FlashAttentionTemplate  # noqa: F401
+from .template import KDAChunkOutputTemplate  # noqa: F401

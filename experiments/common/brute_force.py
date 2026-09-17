@@ -20,7 +20,7 @@ import time
 from experiments.utils.monitor import snapshot, foreign_processes, stop_worker
 from .run import make_request, validate_result
 from experiments.utils.io import write_json
-from .spec import configuration_space, load_manifest
+from .spec import configuration_space, load_manifest, support_reason
 from experiments.families import FAMILIES
 from experiments.xgboost.data import canonical_workload
 
@@ -42,10 +42,18 @@ def choose_winner(records):
     return min(successful, key=lambda r: (r["latency_ms"], r["index"]))
 
 
-def export_case(root, workload, device, space, records, remeasurement, validation_dir):
+def export_case(root, workload, device, space, records, remeasurement, validation_dir, *, oracle_path=None):
     records = sorted(records.values(), key=lambda r: r["index"])
+    if [r["index"] for r in records] != list(range(len(space["configs"]))) or [r["config"] for r in records] != space["configs"]:
+        raise ValueError("heuristic export requires the complete ordered configuration pool")
+    from experiments.utils.results import TERMINAL
+
+    if any(r["status"] not in TERMINAL for r in records):
+        raise ValueError("heuristic export requires terminal outcomes for every configuration")
     winner = choose_winner(records)
-    experiment = json.loads((Path(winner["attempt_path"]) / "experiment.json").read_text())
+    attempt = Path(oracle_path).parent if oracle_path is not None else Path(winner["attempt_path"])
+    experiment = json.loads((attempt / "experiment.json").read_text())
+    measurement = json.loads((attempt / "result.json").read_text())["measurement"]
     observation = experiment["device_observation"]
     identity = dict(
         workload=canonical_workload(workload),
@@ -54,14 +62,17 @@ def export_case(root, workload, device, space, records, remeasurement, validatio
         kernel_sources=experiment["source_sha256"],
         native_build=experiment["native_build"],
         runtime={key: observation[key] for key in ("torch_version", "runtime_version", "device_compiler_version", "host_compiler_version")},
-        measurement=dict(backend="event", memory_regime="streaming", cache_flush_bytes=268435456, input_seed=123, warmup=10, rep=50),
+        measurement={**measurement, "input_seed": experiment["settings"]["seed"]},
     )
-    for path in ("tilelang/profiler/__init__.py", "tilelang/profiler/bench.py"):
-        identity["kernel_sources"][path] = hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
-    reference = root / workload.name / "oracle.json"
-    write_json(
-        reference, dict(version=1, identity=identity, config_space=workload.config_space, candidate_count=len(records), records=records)
-    )
+    if experiment.get("measurement_identity"):
+        identity["measurement_identity"] = experiment["measurement_identity"]
+    reference = Path(oracle_path) if oracle_path is not None else root / workload.name / "oracle.json"
+    if oracle_path is None:
+        for path in ("tilelang/profiler/__init__.py", "tilelang/profiler/bench.py"):
+            identity["kernel_sources"][path] = hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+        write_json(
+            reference, dict(version=1, identity=identity, config_space=workload.config_space, candidate_count=len(records), records=records)
+        )
     validation = remeasurement["validation"]["brute_force"]
     destination = (
         ROOT
@@ -96,16 +107,87 @@ def export_case(root, workload, device, space, records, remeasurement, validatio
         selection_rule="minimum correct latency in the complete measured configuration pool; ties use original index",
         contention=dict(
             poll_interval_seconds=1,
-            policy="discard and retry any shard with an observed foreign compute process",
-            observations_path=str(root / "gpu_observations.jsonl"),
+            policy="reject any invocation with an observed foreign compute process",
+            observations_path=str((attempt if oracle_path is not None else root) / "gpu_observations.jsonl"),
             accepted_attempts_observed_uncontended=True,
             limitation="process polling cannot exclude interference shorter than the polling interval",
         ),
         validation_path=str(validation_dir),
-        sweep_winner_gpu=winner["gpu"],
+        sweep_winner_gpu=winner.get("gpu") or json.loads((attempt / "monitor.json").read_text())["gpus"][0],
     )
     write_json(destination, result)
     return str(destination)
+
+
+def export_baseline_study(study, output, device_name, workload_names=None):
+    """Validate saved full baselines and remeasure winners without another sweep."""
+    from .spec import Device, Workload
+    from experiments.suite import _existing_or_run
+    from experiments.utils.baseline_store import measurement_sources, runtime_identity, verify_bundle
+    from experiments.utils.results import load_oracle
+
+    lock = json.loads((study / "study-lock.json").read_text())
+    plan, settings = lock["plan"], lock["settings"]
+    if plan["suite"] not in ("full", "final"):
+        raise ValueError("heuristic export requires a full or final study")
+    device = Device(**next(d for d in plan["devices"] if d["name"] == device_name))
+    workloads = [Workload(**w) for w in plan["splits"]["test"]]
+    if workload_names:
+        if set(workload_names) - {w.name for w in workloads}:
+            raise ValueError("unknown study workload")
+        workloads = [w for w in workloads if w.name in workload_names]
+    references = json.loads((study / "baselines.json").read_text())[device_name]
+    runtime = runtime_identity(device)
+    bundles = {}
+    # Verify everything before starting validation or publishing a heuristic.
+    for op in dict.fromkeys(w.op for w in workloads):
+        if references[op].get("status") == "unsupported":
+            continue
+        bundle = Path(references[op]["path"])
+        if hashlib.sha256((bundle / "complete.json").read_bytes()).hexdigest() != references[op]["manifest_sha256"]:
+            raise ValueError("baseline completion manifest changed")
+        identity = json.loads((bundle / "identity.json").read_text())
+        verify_bundle(bundle, identity)
+        measurement = identity["measurement"]
+        if measurement["runtime"] != runtime or measurement["sources"] != measurement_sources([FAMILIES[op]]):
+            raise ValueError("baseline measurement environment changed; collect a new baseline before exporting")
+        bundles[op] = bundle, measurement
+    output.mkdir(parents=True, exist_ok=False)
+    exported = {}
+    unavailable = {}
+    for w in workloads:
+        if w.op not in bundles:
+            unavailable[w.name] = references[w.op]
+            continue
+        bundle, measurement = bundles[w.op]
+        oracle_path = bundle / "collection" / device_name / "test" / w.name / "brute_force/outcomes.json"
+        monitor = json.loads((oracle_path.parent / "monitor.json").read_text())
+        if monitor["status"] != "uncontended":
+            raise ValueError("baseline oracle was not observed uncontended")
+        oracle = load_oracle(oracle_path)
+        records = {r["index"]: r for r in oracle["records"].values()}
+        options = dict(
+            settings,
+            method="remeasure",
+            metric="pipeline_time",
+            top_k=1,
+            seed=measurement["input_seed"],
+            memory_regime="streaming",
+            trace=False,
+            measurement_identity=measurement,
+            methods={"brute_force": dict(status="completed", winner=oracle["winner"])},
+            validation_repeats=7,
+        )
+        directory = output / w.name / "winner-remeasurement"
+        result = _existing_or_run(make_request(w, device, options), directory)
+        if result["status"] != "remeasured":
+            raise RuntimeError(f"Winner validation failed: {directory}: {result}")
+        exported[w.name] = export_case(
+            output, w, device, configuration_space(w, device), records, result, directory, oracle_path=oracle_path
+        )
+        write_json(output / "summary.json", dict(heuristic_files=exported, unavailable=unavailable, baseline_study=str(study)))
+    write_json(output / "summary.json", dict(heuristic_files=exported, unavailable=unavailable, baseline_study=str(study)))
+    return 0
 
 
 def main():
@@ -118,9 +200,14 @@ def main():
     parser.add_argument("--shard-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--baseline-study", type=Path, help="Export a completed full study's saved oracles; only remeasure winners")
     args = parser.parse_args()
     if args.shard_size < 1 or args.workers < 1:
         parser.error("shard size and workers must be positive")
+    if args.baseline_study:
+        if args.resume or args.gpus:
+            parser.error("baseline export uses the study device and a new output directory")
+        return export_baseline_study(args.baseline_study.resolve(), args.output.resolve(), args.device, args.workloads)
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=args.resume)
     devices, workloads = load_manifest(json.loads((ROOT / "experiments/manifests/five_target_final.json").read_text()))
@@ -132,6 +219,9 @@ def main():
     device = next(d for d in devices if d.name == args.device)
     if device.target["kind"] != "cuda":
         parser.error("this monitored runner requires CUDA")
+    requested = workloads
+    unavailable = {w.name: dict(status="unsupported", reason=reason) for w in requested if (reason := support_reason(w, device))}
+    workloads = [w for w in requested if w.name not in unavailable]
     initial = snapshot()
     gpus = [
         g
@@ -156,7 +246,8 @@ def main():
     )
     plan = dict(
         version=1,
-        workloads=[w.to_dict() for w in workloads],
+        workloads=[w.to_dict() for w in requested],
+        unavailable=unavailable,
         device=device.to_dict(),
         settings=settings,
         shard_size=args.shard_size,
@@ -166,6 +257,9 @@ def main():
     if plan_path.exists() and json.loads(plan_path.read_text()) != plan:
         raise ValueError("Plan changed; use a new output directory")
     write_json(plan_path, plan)
+    for name, result in unavailable.items():
+        (root / name).mkdir(exist_ok=True)
+        write_json(root / name / "result.json", result)
     from experiments.utils.cli import source_hashes
     from tilelang.cache.kernel_cache import KernelCache
 
@@ -185,7 +279,7 @@ def main():
                     raise ValueError("duplicate accepted configuration")
                 records[w.name][row["index"]] = row
     # Round-robin workloads, then dynamically share their remaining shards.
-    for offset in range(0, max(len(s["configs"]) for s in spaces.values()), args.shard_size):
+    for offset in range(0, max((len(s["configs"]) for s in spaces.values()), default=0), args.shard_size):
         for w in workloads:
             indices = [i for i in range(offset, min(offset + args.shard_size, len(spaces[w.name]["configs"]))) if i not in records[w.name]]
             if indices:
@@ -387,6 +481,7 @@ def main():
             completed_at=timestamp(),
             invocation_wall_seconds=time.monotonic() - started,
             heuristic_files=exported,
+            unavailable=unavailable,
             outcomes={w.name: dict(Counter(r["status"] for r in records[w.name].values())) for w in workloads},
         ),
     )

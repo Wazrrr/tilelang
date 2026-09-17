@@ -97,8 +97,9 @@ def test_carver_unsupported_semantics_are_explicit_and_exhaustive_has_no_gate():
     device = Device("ampere", TARGETS["ampere"])
     workloads = {w.name: w for w in default_workloads()}
     assert carver_support_reason(workloads["gemm_square"], device) is None
-    for name in ("attention_noncausal", "softmax_aligned"):
-        assert carver_support_reason(workloads[name], device)
+    for name in ("attention_noncausal", "kda_chunk_regular"):
+        assert carver_support_reason(workloads[name], device) is None
+    assert "FP8" in carver_support_reason(workloads["gemm_fp8_square"], device)
     for parameters in (dict(batch=2), dict(epilogue="bias_relu"), dict(transpose_b=False)):
         w = workloads["gemm_square"]
         assert carver_support_reason(replace(w, parameters=w.parameters | parameters), device)

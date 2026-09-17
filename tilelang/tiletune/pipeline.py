@@ -69,6 +69,14 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
     participants = {p["operation"]: p["compute_participants"] for p in phases}
     layout_cache = {}
     for op, phase in zip(col.operations, phases):
+        for work, amount in phase["work"].items():
+            if (
+                work.startswith("convert_float32_to_float8")
+                and amount
+                and performance_model
+                and not performance_model.get(work + "_per_cycle")
+            ):
+                add_unknown("missing_profile", f"operation {op.index} requires profile rate {work}_per_cycle", op.index)
         if op.index in getattr(col, "scalar_work_unknown", {}):
             add_unknown("unresolved_ownership", f"operation {op.index} scalar ownership: {col.scalar_work_unknown[op.index]}", op.index)
         if op.kind == "elementwise" and getattr(col, "inferred_layouts", {}).get(op.metadata.buffer.data) is not None:
@@ -88,10 +96,12 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
                 "unsupported_collective", f"operation {op.index} reduction: {reduction.get('reason', 'unresolved mapping')}", op.index
             )
         elif reduction and performance_model:
-            if reduction["dtype"] != performance_model.get("reduction_dtype", "float32"):
+            from tiletune_core.profile_schema import reduction_rate_field
+
+            if reduction_rate_field(reduction, performance_model, "local") is None:
                 add_unknown("profile_mismatch", f"operation {op.index} reduction dtype does not match the profile", op.index)
             for primitive in ("local", "shuffle"):
-                rate = f"reduction_{primitive}_{reduction['operator']}_per_cycle"
+                rate = reduction_rate_field(reduction, performance_model, primitive)
                 if reduction[f"{primitive}_pairs"] and not performance_model.get(rate):
                     add_unknown("missing_profile", f"operation {op.index} requires profile rate {rate}", op.index)
     distribution = collect_cta_work(col, loop)

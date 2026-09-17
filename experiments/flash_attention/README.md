@@ -38,7 +38,7 @@ Its explicit 128/128/1/128 launch is also included. The pool expands these
 native tile, stage and thread parameters; it preserves the example's causal
 loop, fragment recurrence, FullRow GEMMs and shared output.
 
-Space version 5 has no alternative `current`, `large` or `exhaustive` presets
+Space version 6 has no alternative `current`, `large` or `exhaustive` presets
 for this family. There is no cap, protected subset, target-dependent domain or
 structural prefilter. Every declared candidate is attempted in a full sweep;
 compilation and correctness failures remain recorded. Counts describe candidate
@@ -90,6 +90,5 @@ python -m experiments.flash_attention.tiletune.run --suite full --device hopper 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
 on both final FP16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
-Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
-explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)
+Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `FlashAttentionTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

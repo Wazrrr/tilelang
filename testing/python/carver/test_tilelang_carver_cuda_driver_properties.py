@@ -10,6 +10,27 @@ from tilelang.carver.arch.driver.cuda_driver import (
     get_registers_per_block,
 )
 import torch
+import pytest
+
+
+@pytest.mark.parametrize("cuda,soname", [("12.6", "12"), ("13.0", "13"), ("11.8", "11.0")])
+def test_runtime_loader_accepts_versioned_pytorch_library(monkeypatch, cuda, soname):
+    from tilelang.carver.arch.driver import cuda_driver
+
+    monkeypatch.setattr(cuda_driver.sys, "platform", "linux")
+    monkeypatch.setattr(torch.version, "cuda", cuda)
+    calls = []
+    runtime = object()
+
+    def load(name):
+        calls.append(name)
+        if name == f"libcudart.so.{soname}":
+            return runtime
+        raise OSError("unversioned development symlink is absent")
+
+    monkeypatch.setattr(cuda_driver.ctypes.cdll, "LoadLibrary", load)
+    assert cuda_driver._load_cudart() is runtime
+    assert calls == ["libcudart.so", f"libcudart.so.{soname}"]
 
 
 class _cudaDeviceAttrNames:

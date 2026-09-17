@@ -46,6 +46,6 @@ def collect_buffer_facts(col):
             dtype,
             elements,
             elements * dtype.bits * dtype.lanes if elements is not None else None,
-            col.layouts.get(buffer.data),
+            col.layouts.get(buffer.data, getattr(col, "inferred_layouts", {}).get(buffer.data)),
         )
     return facts

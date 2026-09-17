@@ -8,7 +8,7 @@ from pathlib import Path
 from .run import make_request
 
 from experiments.utils.io import write_json
-from .spec import Device, Workload
+from .spec import Device, Workload, support_reason
 from experiments.utils.baseline_store import collect_bundle, identities, runtime_identity
 from experiments.utils.results import read
 from experiments.families import FAMILIES
@@ -32,6 +32,11 @@ def execute(plan, output, settings, *, baseline_root, baseline_seed=123):
         references[device.name] = {}
         for op in dict.fromkeys(w["op"] for w in plan["splits"]["test"]):
             family_plan = dict(plan, splits={split: [w for w in values if w["op"] == op] for split, values in plan["splits"].items()})
+            reasons = [support_reason(Workload(**w), device) for w in family_plan["splits"]["test"]]
+            if all(reasons):
+                references[device.name][op] = dict(status="unsupported", reason="; ".join(dict.fromkeys(reasons)))
+                write_json(output / "baselines.json", references)
+                continue
             names = {w["name"] for values in family_plan["splits"].values() for w in values}
             family_device = replace(
                 baseline_device,
@@ -49,22 +54,38 @@ def execute(plan, output, settings, *, baseline_root, baseline_seed=123):
                 seed=baseline_seed,
                 manifest_sha256=hashlib.sha256((bundle / "complete.json").read_bytes()).hexdigest(),
             )
+            write_json(output / "baselines.json", references)
         write_json(output / "baselines.json", references)
-        if not device.profiles and not device.performance_model:
+        supported = [Workload(**w) for w in plan["splits"]["test"] if not support_reason(Workload(**w), device)]
+        if supported and not device.profiles and not device.performance_model:
             preparation = output / "preparation" / device.name
-            request = make_request(
-                Workload(**plan["splits"]["test"][0]), device, dict(settings, method="profile", memory_regime="streaming")
-            )
-            result = _existing_or_run(request, preparation)
-            if result["status"] != "profiled":
-                raise RuntimeError(f"TileTune profile preparation failed: {result}")
-            device = replace(device, profiles=result["profiles"])
+            representatives = {w.dtype: w for w in supported}
+            profiles = {}
+            for dtype, workload in representatives.items():
+                request = make_request(workload, device, dict(settings, method="profile", memory_regime="streaming"))
+                result = _existing_or_run(request, preparation / dtype if len(representatives) > 1 else preparation)
+                if result["status"] != "profiled":
+                    raise RuntimeError(f"TileTune profile preparation failed: {result}")
+                profiles.update(result["profiles"])
+            device = replace(device, profiles=profiles)
         for seed in plan["budget"]["seeds"]:
             root = output / str(seed) / device.name
             root.mkdir(parents=True, exist_ok=True)
             comparisons = []
             for item in plan["splits"]["test"]:
                 w = Workload(**item)
+                reason = support_reason(w, device)
+                if reason:
+                    methods = {name: dict(status="unsupported", reason=reason) for name in plan["methods"]}
+                    row = dict(workload=w.to_dict(), device=device.name, methods=methods, diagnostics={}, validation=None)
+                    case = root / device.name / "test" / w.name
+                    for method, result in methods.items():
+                        (case / method).mkdir(parents=True, exist_ok=True)
+                        write_json(case / method / "result.json", result)
+                    write_json(case / "comparison.json", row)
+                    comparisons.append(row)
+                    write_json(root / "comparison.json", dict(version=2, results=comparisons))
+                    continue
                 bundle, measurement = bundles[w.op], measurements[w.op]
                 case = root / device.name / "test" / w.name
                 case.mkdir(parents=True, exist_ok=True)

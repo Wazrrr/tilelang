@@ -1,0 +1,19 @@
+can you organize the experiments to a formal format like the gemm in experiment/, i think we can put the extended config space in the kernel-spescific folder, make everything more clear, give me a plan to do. what will the kernel folder looks like.
+
+Demands:
+- Clean code: simply code to make it necessary to support the functionality.
+- Large opset: GEMM, Attention, KDA, softmax.
+- wide GPU support: Ampere, Hopper, Blackwell, MI355X, Ascend 910.
+- Large config space: Make sure each testcase has hundreds to thousands configs and they are basically valid and can be scored in tiletune.
+- XGboost setting should be as same as the "WaveTune" paper.
+- Mind the overhead of tiletune, cannot make it too high compared with compile and benchmark time.
+- Dont let model overfit one specific kernel implementation, but model their family's behaviour. for different GPU, can use different model. (since some use mma and the other use wgmma, etc.)
+- Dont use cache in autotune since the cpu analysis varies while kernel implementation changes. the profile make sense because it's related to the hardware and kernel family, not implementation.
+- Cost Model use pipeline_score as default.
+- Cost model dont need to precisely predict the latency, but it should predict the rank properly, including the best winner in front and the corresponding good configs. make the trend correct.
+- Keep the experiment GPU uncontended, use all idle GPUs to do experiments if the experiments can be executed in parallel.
+
+
+for current model, does it model comprehensively with the profiling data? is there any structural defects? we need to have a principle for the cost model, simple or comprehensive. so i think our cost model should run the comprehensive way, which means if we have the precise profiling data, we can basically model this kernel nearly perfect, for this target, do we get here?
+
+currently i wanna everything helps the final experiments. we need to make sure this autotune system works for different gpus Ameper, Hopper, Blackwell, MI355X, Ascend 910, for selected four kernels types. so while we are developing, you need to consider whether the code can be used by other backend so that you can share the code with other backend. follow the plan and the test shrink you said, give me a plan to implement.

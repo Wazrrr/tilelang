@@ -18,7 +18,7 @@ VARIANTS = {
     "multi_gpu": (False, False, True),
     "combined": (True, True, True),
 }
-OPS = dict(gemm="gemm", flash_attention="attention", kda="kda_chunk_o", softmax="softmax")
+OPS = dict(gemm="gemm", flash_attention="attention", kda="kda_chunk_o", gemm_fp8="gemm_fp8")
 
 
 def system_plan(family, *, workloads=None, variants=None, indices=None):

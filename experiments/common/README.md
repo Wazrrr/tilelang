@@ -33,7 +33,7 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 5 gives each final family exactly one `expanded` pool. Each pool
+Space version 6 gives each final family exactly one `expanded` pool. Each pool
 uses the example's native parameters and includes its original configs/defaults.
 The same complete domain is used for both cases and all native targets.
 
@@ -42,7 +42,7 @@ The same complete domain is used for both cases and all native targets.
 | [GEMM](../gemm/README.md) | 2,304 | All 288 autotune configs; 8× expansion |
 | [FlashAttention](../flash_attention/README.md) | 320 | Single autotune config and explicit 128/128 launch |
 | [KDA chunk output](../kda/README.md) | 720 | All 90 autotune configs; 8× expansion |
-| [Online softmax](../softmax/README.md) | 224 | Default launch; example has no autotune grid |
+| [FP8 GEMM](../gemm_fp8/README.md) | 2,304 | All 288 example configurations retained |
 
 Shapes, dtype, causal mode and chunk size are workload properties. They do not
 multiply the config count. Full sweeps have no cap, protected subset or
@@ -59,15 +59,15 @@ source hashes and pools, and start new runs in new output directories.
 
 GEMM fixes the example's Square/panel-10 defaults. Attention keeps its example's
 QK/PV policies, fragment recurrence and causal loop bound. KDA keeps `block_S`
-equal to the chunk size. Softmax retains the example's two passes and tail mask.
-There are no alternative experiment kernels or supplementary vector/FP8
-families. The shared configuration code accepts only the `expanded` pool.
+equal to the chunk size. FP8 GEMM retains native FP8 inputs/output and FP32
+accumulation. There are no alternative experiment kernels or supplementary
+vector families. The shared configuration code accepts only the `expanded` pool.
 
 Inspect a space without loading TileLang or querying hardware:
 
 ```bash
 python -m experiments.common.run --plan --devices ampere \
-  --workloads gemm_square attention_noncausal kda_chunk_regular softmax_aligned \
+  --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square \
   --config-space expanded
 ```
 
@@ -93,7 +93,7 @@ Run the sampled baseline comparison on the full expanded pools:
 ```bash
 bash experiments/common/run_accelerator.sh \
   --device ampere \
-  --workloads gemm_square attention_causal kda_chunk_regular softmax_aligned \
+  --workloads gemm_square attention_causal kda_chunk_regular gemm_fp8_square \
   --methods tiletune xgboost --top-k 20 --xgb-sample-fraction 0.1 \
   --wait-idle --output experiments/results/expanded-comparison
 ```
@@ -112,7 +112,7 @@ Parameter ranges and constraints live in each family’s `spaces.py`.
 See [validation](../validation.md) for the checks performed on the organized scripts.
 
 This suite separates the mathematical workload, candidate grid, hardware model,
-and execution environment. GEMM, FlashAttention, KDA and softmax share this
+and execution environment. GEMM, FlashAttention, KDA and FP8 GEMM share this
 protocol and the same example builders in system and tuner-quality studies.
 
 ```mermaid
@@ -190,10 +190,14 @@ published results are historical and do not measure this sampled protocol.
 `--method brute_force` on the single-method runner measures every supplied
 candidate independently of TileTune analysis. The older `exhaustive` method
 still means exhaustive **report-only TileTune** analysis/measurement. The new
-Carver adapter accepts plain, nonbatched FP16/BF16 GEMMs, including transpose
-variants, and maps the exact supplied grid to the existing policy. It reports
-unsupported for fused/batched GEMMs and other operations. The experiment
-workload schema rejects FP8 dtypes; their supplementary runners are retired.
+Carver adapter reuses `MatmulTemplate` for nonbatched FP16/BF16 and native FP8
+GEMMs. Attention uses `FlashAttentionTemplate`, including stable normalization,
+the probability cast and causal masking. KDA uses `KDAChunkOutputTemplate`,
+including gated queries, both rounding points and the causal matrix product.
+Each adapter maps the supplied grid to Carver's traffic-times-waves policy.
+The attention and KDA graph adapters record their coarse scheduling assumptions;
+TileTune separately models the native kernel's loops, ownership and pipeline.
+Unsupported dtypes, schedules and hardware remain explicit outcomes.
 
 Each test case records method outcomes, an independent oracle table, ranking
 diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics
@@ -227,7 +231,7 @@ Run a small correctness/runner check on a Hopper machine:
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m experiments.common.run \
     --devices hopper --smoke --method exhaustive --config-indices 0 \
-    --workloads gemm_square attention_noncausal kda_chunk_regular softmax_aligned
+    --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square
 ```
 
 Run top-K selection over each workload's full default grid:
@@ -250,7 +254,7 @@ Compilation/benchmark timing excludes process startup and reference generation;
 
 ## Workloads
 
-The standalone shared runner uses the same eight FP16 final cases as the family
+The standalone shared runner uses the same eight final cases (six FP16 and two FP8) as the family
 suites. BF16 and supported boundary shapes can be supplied explicitly for
 correctness checks; they do not add default experiment cases:
 
@@ -259,7 +263,7 @@ correctness checks; they do not add default experiment cases:
 | `gemm_square`, `gemm_square_large` | 4096³ and 8192³, pretransposed B, FP32 accumulation |
 | `attention_noncausal`, `attention_causal` | BSHD online attention with the example causal bounds |
 | `kda_chunk_regular`, `kda_chunk_tails` | Chunk output with equal and unequal head dimensions |
-| `softmax_aligned`, `softmax_irregular` | Two-pass online softmax with masked column tails |
+| `gemm_fp8_square`, `gemm_fp8_square_large` | Native FP8 GEMM with FP32 accumulation and FP8 output |
 
 Each family's `kernel.py` and `reference.py` supply its builder,
 input generator, reference, output indices, and correctness contract.
@@ -315,8 +319,9 @@ exhaustive-best performance overall. The linked report also records latency
 miscalibration, register-gate coverage losses, chunk-KDA ranking failures, and
 the cases where analysis costs more than exhaustive tuning.
 
-Those historical runs used explicit FNUZ dtypes for MI308 FP8. FP8 experiments
-are now retired. HIP compiler remarks retain VGPR, AGPR and SGPR counts separately.
+Those historical runs used explicit FNUZ dtypes for MI308 FP8. The current native
+FP8 example uses OCP encodings and supports HIP FP8 only on gfx950; those older
+FNUZ results do not validate it. HIP compiler remarks retain VGPR, AGPR and SGPR counts separately.
 Symbolic or absent counters stay unknown; register spill counts are not converted
 to byte counts. On CDNA3, the generic register count is available only when both
 architectural VGPR and AGPR observations are numeric. Occupancy remains a logical
@@ -495,7 +500,7 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 `python -m experiments.suite --suite smoke --plan` plans four families
 with deterministic subsets. Development uses eight cases and up to 256
 configurations; final uses the complete `expanded` pools (GEMM 2,304,
-FlashAttention 320, KDA 720 and softmax 224 per case) and three seeds. See
+FlashAttention 320, KDA 720 and FP8 GEMM 2,304 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 

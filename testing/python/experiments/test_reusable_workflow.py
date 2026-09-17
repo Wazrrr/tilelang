@@ -20,33 +20,36 @@ def write(path, data):
     write_json(path, data)
 
 
-@pytest.mark.parametrize("family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("softmax", 224)])
+@pytest.mark.parametrize("family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 2304)])
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
     assert len(plan) == 10
     assert len({row["workload"]["name"] for row in plan}) == 2
     assert {row["variant"] for row in plan} == set(VARIANTS)
-    assert all(row["indices"] == list(range(count)) and row["workload"]["dtype"] == "float16" for row in plan)
+    assert all(
+        row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "float16")
+        for row in plan
+    )
     assert system_plan(family, variants=["combined"], indices=[3, 1])[0]["indices"] == [3, 1]
 
 
 def test_only_measurement_changes_invalidate_source_identity(tmp_path):
-    for name in ("tilelang/tiletune/ranking.py", "tiletune_core/ranking.py", "src/lower.cc", "experiments/softmax/kernel.py"):
+    for name in ("tilelang/tiletune/ranking.py", "tiletune_core/ranking.py", "src/lower.cc", "experiments/gemm_fp8/kernel.py"):
         p = tmp_path / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("original")
-    before = baseline_store.measurement_sources(["softmax"], tmp_path)
+    before = baseline_store.measurement_sources(["gemm_fp8"], tmp_path)
     for name in ("tilelang/tiletune/ranking.py", "tiletune_core/ranking.py"):
         (tmp_path / name).write_text("new ranking")
-    assert baseline_store.measurement_sources(["softmax"], tmp_path) == before
-    (tmp_path / "experiments/softmax/kernel.py").write_text("new kernel")
-    assert baseline_store.measurement_sources(["softmax"], tmp_path) != before
+    assert baseline_store.measurement_sources(["gemm_fp8"], tmp_path) == before
+    (tmp_path / "experiments/gemm_fp8/kernel.py").write_text("new kernel")
+    assert baseline_store.measurement_sources(["gemm_fp8"], tmp_path) != before
     assert "src/lower.cc" in before
 
 
 def fixture_plan():
     device = Device("hopper", TARGETS["hopper"], performance_model={"test": 1})
-    plan = study_plan("full", [device], families=["softmax"])
+    plan = study_plan("full", [device], families=["gemm_fp8"])
     plan["splits"]["test"] = plan["splits"]["test"][:1]
     plan["budget"]["seeds"] = [123]
     from experiments.common.spec import Workload
@@ -56,6 +59,45 @@ def fixture_plan():
     device = Device("hopper", TARGETS["hopper"], performance_model={"test": 1}, configs={w.name: configs})
     plan["devices"] = [device.to_dict()]
     return plan, device, configs
+
+
+def test_runtime_probe_does_not_serialize_full_candidate_pools(monkeypatch):
+    plan = study_plan("full", [Device("ampere", TARGETS["ampere"])])
+    device = Device(**plan["devices"][0])
+    assert len(json.dumps(device.to_dict())) > 131072
+
+    def probe(argv, **kwargs):
+        assert json.loads(argv[-1]) == dict(name=device.name, target=device.target)
+        assert len(argv[-1]) < 1024
+        return '{"device": "test"}'
+
+    monkeypatch.setattr(baseline_store.subprocess, "check_output", probe)
+    assert baseline_store.runtime_identity(device) == {"device": "test"}
+
+
+def test_unsupported_fp8_study_retains_every_case_and_seed(tmp_path, monkeypatch):
+    import experiments.suite as suite
+
+    plan = study_plan("full", [Device("ampere", TARGETS["ampere"])], families=["gemm_fp8"])
+    monkeypatch.setattr(study, "runtime_identity", lambda device: {})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unsupported FP8 must not collect baselines, profile, or launch kernels")
+
+    monkeypatch.setattr(study, "collect_bundle", forbidden)
+    monkeypatch.setattr(suite, "_existing_or_run", forbidden)
+    assert study.execute(plan, tmp_path, {}, baseline_root=tmp_path / "baselines") == 1
+    references = json.loads((tmp_path / "baselines.json").read_text())
+    assert references["ampere"]["gemm_fp8"]["status"] == "unsupported"
+    for seed in plan["budget"]["seeds"]:
+        rows = json.loads((tmp_path / str(seed) / "ampere/comparison.json").read_text())["results"]
+        assert len(rows) == 2
+        for row in rows:
+            assert set(row["methods"]) == set(plan["methods"])
+            assert all(method["status"] == "unsupported" and "FP8" in method["reason"] for method in row["methods"].values())
+    acceptance = json.loads((tmp_path / "acceptance.json").read_text())
+    assert not acceptance["accepted"]
+    assert all(len(seed["cases"]) == 2 for seed in acceptance["targets"]["ampere"]["seeds"].values())
 
 
 def test_baseline_identity_ignores_tiletune_seed_and_k_but_includes_baseline_seed(monkeypatch):
@@ -135,7 +177,7 @@ def test_two_tiletune_runs_collect_baselines_once_and_preserve_artifacts(tmp_pat
         output.mkdir()
         study.execute(plan, output, settings, baseline_root=baseline_root)
         references = json.loads((output / "baselines.json").read_text())
-        assert references[device.name]["softmax"]["reused"] == (revision == "two")
+        assert references[device.name]["gemm_fp8"]["reused"] == (revision == "two")
         current_hashes = baseline_store.hash_files(baseline_root.rglob("*.json"), baseline_root)
         if revision == "one":
             original_hashes = current_hashes
@@ -147,7 +189,7 @@ def test_two_tiletune_runs_collect_baselines_once_and_preserve_artifacts(tmp_pat
         assert curve["methods"][0]["status"] == "unsupported"
         assert curve["methods"][2]["curves"][0]["oracle_at_k"] == 1
     assert calls == dict(collection=1, tiletune=2, remeasure=2)
-    bundle = Path(references[device.name]["softmax"]["path"])
+    bundle = Path(references[device.name]["gemm_fp8"]["path"])
     artifact = bundle / "collection" / device.name / "test" / workload["name"] / "xgboost/xgboost.json"
     artifact.write_text("changed")
     with pytest.raises(ValueError, match="artifact changed"):
@@ -207,7 +249,9 @@ def test_rejected_measurements_are_not_left_under_successful_report_names(tmp_pa
 
     monkeypatch.setattr(run, "run_external", rejected)
     request = run.make_request(
-        Workload("s", "softmax", dict(rows=4, columns=128)), Device("hopper", TARGETS["hopper"]), dict(method="brute_force")
+        Workload("s", "gemm_fp8", dict(m=64, n=128, k=128, transpose_b=True), dtype="float8_e4m3fn"),
+        Device("hopper", TARGETS["hopper"]),
+        dict(method="brute_force"),
     )
     output = tmp_path / "case"
     result = run.run_case(request, output)

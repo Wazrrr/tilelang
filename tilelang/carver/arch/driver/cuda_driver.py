@@ -53,7 +53,7 @@ def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> in
 
 
 def _load_cudart():
-    """Load the CUDA runtime library, searching for the version-suffixed DLL on Windows."""
+    """Load CUDA, including the versioned runtime shipped with PyTorch wheels."""
     if sys.platform == "win32":
         for ver in ("13", "12", "110", "11"):
             try:
@@ -61,7 +61,18 @@ def _load_cudart():
             except OSError:
                 continue
         raise OSError("Cannot find cudart64_*.dll")
-    return ctypes.cdll.LoadLibrary("libcudart.so")
+    try:
+        return ctypes.cdll.LoadLibrary("libcudart.so")
+    except OSError:
+        import torch
+
+        if torch.version.cuda is None:
+            raise
+        # Wheels load the runtime by SONAME and need not ship the unversioned
+        # development symlink. Reuse the same CUDA major as the active PyTorch.
+        major = int(torch.version.cuda.split(".")[0])
+        soname = str(major) if major >= 12 else "11.0" if major == 11 else torch.version.cuda
+        return ctypes.cdll.LoadLibrary(f"libcudart.so.{soname}")
 
 
 def get_device_attribute(attr: int, device_id: int = 0) -> int:

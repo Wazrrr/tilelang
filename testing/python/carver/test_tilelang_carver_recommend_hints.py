@@ -137,7 +137,9 @@ def run_fmha_recommend_hints(
 @tilelang.testing.requires_cuda_compute_version_eq(8, 0)
 def test_fmha_recommend_hints():
     run_fmha_recommend_hints(4, 32, 512, 512, 128, T.float16, T.float16, T.float16)
-    run_fmha_recommend_hints(4, 32, 512, 512, 128, T.int8, T.int32, T.int32)
+    # The attention template now includes normalization rather than modeling
+    # two unrelated matrix multiplications with integer accumulation.
+    run_fmha_recommend_hints(4, 32, 512, 512, 128, T.float16, T.float32, T.float16)
 
 
 if __name__ == "__main__":

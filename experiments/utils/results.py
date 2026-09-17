@@ -110,7 +110,7 @@ def metadata(path):
     return dict(
         workload=data["workload"],
         target=data.get("device", {}).get("target", data.get("target")),
-        device=data.get("device_observation", {}).get("name"),
+        device=(data.get("device_observation") or {}).get("name"),
         native_build=data.get("native_build"),
         measurement_identity=data.get("measurement_identity"),
         kernel_sources=data.get("source_sha256"),

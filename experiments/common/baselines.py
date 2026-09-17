@@ -1,6 +1,35 @@
 """Common-grid baselines with explicit workload support boundaries."""
 
-from experiments.gemm.carver import carver_rank as carver_rank, carver_support_reason as carver_support_reason
+
+def carver_support_reason(workload, device):
+    from experiments.common.spec import support_reason
+
+    if device.target["kind"] != "cuda":
+        return "Carver experiment templates currently require CUDA"
+    return support_reason(workload, device)
+
+
+def carver_rank(workload, device, configs, top_k):
+    reason = carver_support_reason(workload, device)
+    if reason:
+        raise ValueError(reason)
+    if workload.op == "gemm":
+        from experiments.gemm.carver import carver_rank
+
+        return carver_rank(workload, device, configs, top_k)
+    if workload.op == "gemm_fp8":
+        from experiments.gemm.carver import rank_configs
+
+        native = [{("thread_num" if k == "threads" else k): v for k, v in c.items()} for c in configs]
+        report = rank_configs(
+            native, **{k: workload.parameters[k] for k in ("m", "n", "k")}, dtype=workload.dtype, target=device.target, top_k=top_k
+        )
+        for row, config in zip(report["configs"], configs):
+            row["config"] = dict(config)
+        return dict(report, metric="carver_traffic_waves", score_units="byte-waves", template="MatmulTemplate")
+    from .carver_graph import rank_graph
+
+    return rank_graph(workload, device, configs, top_k)
 
 
 def exhaustive_selection(configs):

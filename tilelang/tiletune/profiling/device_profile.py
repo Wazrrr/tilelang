@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from ..targets import current_target, resolve_target
 
-PROFILE_VERSION = 5
+PROFILE_VERSION = 7
 
 
 def _signature(input_dtype, accum_dtype, instruction="cuda.wgmma"):
@@ -72,7 +72,7 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
     data = json.loads(Path(path).read_text())
     if memory_regime not in ("cached", "streaming"):
         raise ValueError("memory_regime must be cached or streaming")
-    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, PROFILE_VERSION):
+    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, 5, 6, PROFILE_VERSION):
         raise ValueError("unsupported device profile version; regenerate the profile")
     if expected_identity is not None and data["identity"] != expected_identity:
         raise ValueError("device/profile fingerprint mismatch; use a separate cache path or refresh explicitly")
@@ -87,8 +87,11 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
         if streaming_rate is None:
             raise ValueError("device profile has no streaming memory measurement")
         rates["global_bytes_per_cycle"] = streaming_rate
-    if data["common"].get("consumer_rates"):
-        rates["consumer_rates"] = data["common"]["consumer_rates"]
+    consumer_rates = copy.deepcopy(data["common"].get("consumer_rates", {}))
+    for threads, row in model.get("consumer_rates", {}).items():
+        consumer_rates.setdefault(threads, {}).update(row)
+    if consumer_rates:
+        rates["consumer_rates"] = consumer_rates
     result = {
         **rates,
         "gemm_signature": signature,
@@ -253,6 +256,7 @@ def _measure_common(identity):
         2: ("exp_ops_per_cycle", 128 * 8),
         3: ("reduction_ops_per_cycle", 4 * 8 * 31),
         5: ("rsqrt_ops_per_cycle", 128 * 8),
+        6: ("log_ops_per_cycle", 128 * 8),
     }
     for kind, (name, work) in counts.items():
         measurements = [_benchmark(probes.primitive(kind, n, blocks), [], [0]) for n in (256, 512)]
@@ -278,6 +282,17 @@ def _measure_common(identity):
             "measurements": [m[1] for m in measurements],
             "method": "physical FP32 local pair" if kind < 2 else "physical lane shuffle/combine pair; normalization included for sum",
         }
+    for kind, name in enumerate(("reduction_local_max_float16_per_cycle", "reduction_shuffle_max_float16_per_cycle")):
+        measurements = [_benchmark(probes.half_max_primitive(kind, n, blocks), [], [0], required_source="max.f16") for n in (256, 512)]
+        cycles = _slope(measurements[0][0], measurements[1][0], 256, clock)
+        work = 128 * 8
+        rates[name] = work * blocks / (cycles * sms)
+        evidence[name] = dict(
+            work_per_block_iteration=work,
+            iterations=[256, 512],
+            measurements=[m[1] for m in measurements],
+            method="physical FP16 max" if kind == 0 else "physical lane shuffle/FP16 max pair",
+        )
     _, obs, output = _benchmark(probes.primitive(4, 512, 1), [], [0])
     rates["barrier_cycles"] = output.float().median().item() / 512
     evidence["barrier_cycles"] = {**obs, "method": "device clock64 over 512 volatile bar.sync instructions, one CTA"}
@@ -361,7 +376,42 @@ def _measure_gemm(identity, clock, input_dtype, accum_dtype):
             + _instruction(identity)
             + " loop with bounded accumulator dependency (negation each iteration); no global transfers inside measured loop",
         }
-    return {"rates": rates, "evidence": evidence}
+    result = {"rates": rates, "evidence": evidence}
+    if str(input_dtype).startswith("float8"):
+        from .device_probes import fp8_conversion
+
+        name = f"convert_float32_to_{input_dtype}_per_cycle"
+        rows, observations = {}, {}
+        token = torch.tensor([0.125], device="cuda").to(dtype).view(torch.uint8).item()
+        # Packed conversion: eight independent instructions, two FP8 values
+        # each. Record aggregate SM and single-CTA limits separately.
+        for blocks, threads in [(identity["sm_count"] * 4, 128), *[(1, t) for t in (32, 64, 128, 256, 512)]]:
+            measurements = [
+                _benchmark(
+                    fp8_conversion(input_dtype, n, blocks, threads),
+                    [],
+                    [0],
+                    lambda out: torch.testing.assert_close(out, torch.full_like(out, token * 257 * 8)),
+                    required_source=f"cvt.rn.satfinite.{'e4m3' if str(input_dtype) == 'float8_e4m3fn' else 'e5m2'}x2.f32",
+                )
+                for n in (256, 512)
+            ]
+            cycles = _slope(measurements[0][0], measurements[1][0], 256, clock)
+            rate = threads * 16 * blocks / (cycles * (identity["sm_count"] if blocks > 1 else 1))
+            observation = dict(
+                blocks=blocks,
+                threads=threads,
+                converted_values_per_iteration=threads * 16,
+                iterations=[256, 512],
+                measurements=[m[1] for m in measurements],
+            )
+            if blocks > 1:
+                rates[name], evidence[name] = rate, observation
+            else:
+                rows[str(threads)] = {name: rate}
+                observations[str(threads)] = observation
+        result.update(consumer_rates=rows, conversion_evidence=observations)
+    return result
 
 
 def _measure_consumer_rates(clock):
@@ -379,6 +429,9 @@ def _measure_consumer_rates(clock):
             (probes.primitive, 0, "elementwise_ops_per_cycle", 2),
             (probes.primitive, 2, "exp_ops_per_cycle", 1),
             (probes.primitive, 5, "rsqrt_ops_per_cycle", 1),
+            (probes.primitive, 6, "log_ops_per_cycle", 1),
+            (probes.half_max_primitive, 0, "reduction_local_max_float16_per_cycle", 1),
+            (probes.half_max_primitive, 1, "reduction_shuffle_max_float16_per_cycle", 1),
             *[
                 (probes.reduction_primitive, kind, name, 1)
                 for kind, name in enumerate(

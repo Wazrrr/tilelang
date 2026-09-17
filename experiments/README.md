@@ -6,12 +6,12 @@ spaces, and experiment commands.
 For a new kernel family, follow the [agent guide](.agent). For existing kernels,
 start in the family folder:
 
-| Family | Final FP16 cases | Commands and implementation |
+| Family | Final cases | Commands and implementation |
 | --- | --- | --- |
 | GEMM | 4096³ and 8192³ | [gemm/](gemm/README.md) |
 | FlashAttention | Noncausal and causal | [flash_attention/](flash_attention/README.md) |
 | KDA | Chunk output with equal and unequal head dimensions | [kda/](kda/README.md) |
-| Softmax | Aligned and irregular rows | [softmax/](softmax/README.md) |
+| FP8 GEMM | 4096³ and 8192³, E4M3 inputs/output | [gemm_fp8/](gemm_fp8/README.md) |
 
 ## Layout
 
@@ -20,7 +20,7 @@ experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
 ├── flash_attention/         Same family conventions
 ├── kda/                     Direct chunk-output example study
-├── softmax/                 Direct online-softmax example study
+├── gemm_fp8/                Direct FP8 GEMM example study
 ├── common/                  Shared execution and comparison protocol
 ├── utils/                   Monitoring, baseline storage, result I/O and shared helpers
 ├── xgboost/                 Shared sampling, training, and prediction
@@ -38,14 +38,14 @@ create a result directory. Run commands from the repository root.
 python -m experiments.gemm.tiletune.run --suite final --device ampere --plan
 python -m experiments.flash_attention.tiletune.run --suite smoke --device ampere --plan
 python -m experiments.kda.tiletune.run --suite development --device ampere --plan
-python -m experiments.softmax.tiletune.run --suite development --device ampere --plan
+python -m experiments.gemm_fp8.tiletune.run --suite development --device ampere --plan
 ```
 
 A development run uses two test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
 The four final kernels call their [example builders directly](example_alignment.md).
 Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, and softmax 224 configs per case. There is no cap or structural
+KDA 720, and FP8 GEMM 2,304 configs per case. There is no cap or structural
 prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
@@ -64,8 +64,13 @@ settings are 600 rounds, depth 10, learning rate 0.05, subsampling 0.8, and
 validation patience 20. Baselines use one fixed seed (123 by default) and are
 reused across TileTune's three repeats and later revisions. Each new TileTune
 winner receives seven checks. Preparation costs are recorded separately.
-The existing Carver adapter supports CUDA GEMM; attention, KDA and softmax record
-`unsupported` with its reason rather than substitute another model.
+Carver uses its existing Matmul and FlashAttention templates and the KDA chunk-output
+template. The attention graph includes masking, stable normalization and the
+probability cast; KDA includes both query casts, gating and the causal term.
+Carver retains its traffic-times-waves priority. Its assumptions are saved in each
+ranking; TileTune separately models the example’s actual loop and ownership.
+Native FP8 requires suitable hardware: A100 records both FP8 cases as unsupported
+and still completes the six FP16 cases. Unavailable cases remain in acceptance reports.
 
 The family command checks acceptance for its requested cases and targets. Its
 report identifies the scope; full five-target final acceptance requires all four
@@ -80,7 +85,7 @@ python -m experiments.suite --suite development --devices ampere \
   --output experiments/results/development-v1
 ```
 
-Use `--families gemm softmax` to select families or `--device-manifest FILE`
+Use `--families gemm gemm_fp8` to select families or `--device-manifest FILE`
 for explicit worker environments and profiles. The five targets are A100,
 H200, B200/GB200, MI355X, and Ascend 910B/A2. Native implementations and calibrated
 profiles still need device validation; Ascend requires supplied native grids
@@ -126,6 +131,22 @@ also writes `oracle-curves.json` for K=1/5/10/20/50 and the requested K. A curve
 another K is a retrospective ranking evaluation, not a measurement of new tuning
 cost. Original baseline costs are labeled as coming from the baseline bundle.
 
+Export GPU-specific heuristics from a completed `full` or `final` study without
+collecting its oracle tables again:
+
+```bash
+python -m experiments.common.brute_force --device ampere \
+  --baseline-study experiments/results/tiletune/revision-a \
+  --output experiments/results/heuristic-validation/revision-a
+```
+
+This verifies the immutable baseline bundle and current measurement environment,
+then checks and remeasures each oracle winner seven times on the monitored GPU.
+The heuristic JSONs retain the original full-oracle path/hash and timing settings;
+incomplete pools cannot be exported. Use a new output directory. On hosts where
+CUDA is not detected automatically, set `CUDA_HOME` to the installed toolkit and
+`CXX` to its supported host compiler before running any GPU command.
+
 ## System optimization ablations
 
 All four family `system/run.py` entry points use the shared
@@ -137,7 +158,7 @@ python -m experiments.kda.system.run --variant all \
   --output experiments/results/kda/system-v1
 ```
 
-Replace `kda` with `gemm`, `flash_attention` or `softmax`. `--variant all` runs
+Replace `kda` with `gemm`, `flash_attention` or `gemm_fp8`. `--variant all` runs
 `baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined` in fresh processes
 with cold caches, identical inputs and numerical checks. Pipeline overlaps
 compilation/benchmarking; grouped combines compilation; multi_gpu distributes
@@ -229,8 +250,8 @@ See [common/README.md](common/README.md) for worker and diagnostic details,
 Family `system/run.py` commands benchmark compiler execution strategies using
 the same example builders; they are separate from tuner quality.
 
-The retired FP8/vector experiments, compatibility modules, and repair-study
-runner have been removed. The shared runner also uses the eight family-owned
+Softmax and the former supplementary vector experiments are removed from the active matrix.
+The new FP8 GEMM family directly uses the native example and the shared protocol. The shared runner also uses the eight family-owned
 cases; `--smoke` chooses their development shapes.
 Use the canonical `experiments.common.*` commands and `experiments.suite`.
 Source fingerprints cover active code roots and exclude `results/`; historical

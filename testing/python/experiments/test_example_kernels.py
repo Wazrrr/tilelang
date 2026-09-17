@@ -11,7 +11,7 @@ EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=64, block_N=64, num_stages=1, threads=128),
     "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
-    "softmax": dict(BLOCK_M=1, BLOCK_N=8192, threads=128),
+    "gemm_fp8": dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False),
 }
 
 
@@ -55,16 +55,9 @@ def example_program(w, c):
             threads=c["threads"],
             num_stages=c["num_stages"],
         )
-    from examples.online_softmax.online_softmax import softmax_kernel
-    import tilelang.language as T
+    from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
 
-    return softmax_kernel.get_tir(
-        T.Tensor((p["rows"], p["columns"]), w.dtype),
-        BLOCK_M=c["BLOCK_M"],
-        BLOCK_N=c["BLOCK_N"],
-        dtype=w.dtype,
-        threads=c["threads"],
-    )
+    return matmul.get_tir(M=p["m"], N=p["n"], K=p["k"], dtype=w.dtype, **c)
 
 
 @pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)
@@ -73,7 +66,7 @@ def test_final_programs_are_structurally_identical_to_examples(w, dtype):
     from tilelang import tvm
     from experiments.common.kernels import make_case
 
-    w = replace(w, dtype=dtype)
+    w = replace(w, dtype=("float8_e4m3fn" if dtype == "float16" else "float8_e5m2") if w.op == "gemm_fp8" else dtype)
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])
@@ -101,6 +94,11 @@ def test_final_example_kernels_on_gpu(w):
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
+    from experiments.common.spec import support_reason
+
+    reason = support_reason(w, Device("test", current_target()))
+    if reason:
+        pytest.skip(reason)
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     kernel = tilelang.compile(

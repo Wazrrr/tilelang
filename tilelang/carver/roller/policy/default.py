@@ -587,7 +587,10 @@ class DefaultPolicy:
             if np.prod(td.get_tile(node)) == 0:
                 return False
             node_grid_size = np.prod([(y + x - 1) // x for x, y in zip(td.get_tile(node), node.get_space_dim())])
-            if node_grid_size != td.grid_size:
+            # Explicit fused schedules may recompute a broadcast producer
+            # in each consumer tile. Automatic schedule generation retains
+            # the original one-to-one grid requirement.
+            if node_grid_size != td.grid_size and (not self.tags.get("allow_broadcast_recompute", False) or td.grid_size % node_grid_size):
                 return False
             if hasattr(node, "reduce_op") and node.reduce_op is not None and len(node.reduce_op.axis) == len(td.output_tile):
                 for i, tile_extent in enumerate(td.output_tile):

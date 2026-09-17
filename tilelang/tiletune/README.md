@@ -186,6 +186,19 @@ file/line that emitted them. Checkpoints use the variable names from the code:
 | `ranking` | Timing recomputed with active CTA contention, grid timing, and final score; or disabled/unknown status |
 | `tile_cost` | Combined cost report returned to the caller |
 
+Profiles include measured `log_ops_per_cycle` and separate
+`reduction_local_max_float16_per_cycle` /
+`reduction_shuffle_max_float16_per_cycle` rates, including single-CTA consumer
+ceilings. These cover the online-softmax example's `log2` and FP16 max without
+reusing FP32 reduction rates. Older profiles remain readable; operations whose
+rates are missing remain unscored. Regenerate primitive profiles to measure the
+new rates. Profile version 7 also measures FP32-to-FP8 packed conversion
+throughput separately for E4M3FN and E5M2, with aggregate SM rates and single-CTA
+ceilings. FP8 output conversion requires its matching measured rate; FP16
+arithmetic rates cannot substitute for it. These probes require native FP8
+hardware. Analysis version 25 invalidates cached rankings from before the
+conversion accounting and compiler-verified fragment ownership changes.
+
 Follow `buffer_id` across regions, GEMM operands and live sets, and follow
 `operation`/`index` through dependencies, phase work and phase timing. Bounds and
 other symbolic IR expressions are printed as strings; `null` retains unknown

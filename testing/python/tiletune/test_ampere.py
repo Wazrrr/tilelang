@@ -55,6 +55,37 @@ def test_parallel_scalar_work_counts_tile_elements():
     assert work["elementwise_ops"] == 4096
 
 
+@pytest.mark.parametrize("case_index", [0, 1])
+@pytest.mark.parametrize("missing", [None, "log_ops_per_cycle", "reduction_local_max_float16_per_cycle"])
+def test_online_softmax_requires_measured_log_and_half_max(case_index, missing):
+    from examples.online_softmax.online_softmax import softmax_kernel
+
+    shape = ((1536, 4096), (1031, 1537))[case_index]
+    func = softmax_kernel.get_tir(T.Tensor(shape, "float16"), BLOCK_M=4, BLOCK_N=256, threads=128, dtype="float16")
+    before = func.script()
+    rates = dict(
+        profile(),
+        log_ops_per_cycle=16,
+        reduction_local_max_float16_per_cycle=128,
+        reduction_shuffle_max_float16_per_cycle=32,
+    )
+    from tiletune_core.profile_schema import CONSUMER_RATE_FIELDS
+
+    rates["consumer_rates"] = {"128": {key: value for key, value in rates.items() if key in CONSUMER_RATE_FIELDS}}
+    if missing:
+        rates.pop(missing)
+    result = analyze_prim_func(func, dict(ranking_metric="pipeline_time", performance_model=rates), target=AMPERE, device_limits=LIMITS)
+    assert func.script() == before
+    if missing:
+        assert result["tile_cost"]["score"] is None
+    else:
+        assert result["tile_cost"]["score"] > 0
+        pipeline = result["modules"]["pipeline_overlap"]
+        assert not pipeline["unknown"]
+        assert sum(p["work"].get("log_ops", 0) for p in pipeline["phases"]) > 0
+        assert {p["reduction"]["dtype"] for p in pipeline["phases"] if p["reduction"]} == {"float16", "float32"}
+
+
 @pytest.mark.parametrize("name", ["softmax", "rmsnorm", "reduce_sum", "kda_recurrent"])
 def test_generic_reductions_use_compiler_ownership(name):
     if name == "kda_recurrent":
@@ -66,7 +97,7 @@ def test_generic_reductions_use_compiler_ownership(name):
         from regression_kernels import softmax_program
 
         # Preserve the FP32-reduction graph this profile was calibrated for.
-        # The experiment's online example also needs log2 and FP16-max rates.
+        # The online example also needs log2 and FP16-max rates.
         func = softmax_program(1024, 2048, "float16", 4, 256, 128, 1, 1)
         pass_configs = {}
     else:
@@ -188,3 +219,34 @@ def test_unsupported_operations_cannot_receive_zero_cost(kind):
     result = analyze(main)
     assert result["tile_cost"]["score"] is None
     assert "unresolved operation work" in result["modules"]["pipeline_overlap"]["unknown"]
+
+
+@pytest.mark.parametrize("stage", [0, 1, 2, 3, 4])
+def test_kda_example_pipeline_preserves_gate_work_and_value_tails(stage):
+    from experiments.kda.cases import cases
+    from experiments.kda.kernel import make_case
+
+    case = make_case(cases(True)[0])
+    func = case.build(block_DK=32, block_DV=48, num_stages=stage, threads=128)
+    before = func.script()
+    result = analyze(func)
+    assert func.script() == before
+    assert result["tile_cost"]["score"] > 0
+    pipeline = result["modules"]["pipeline_overlap"]
+    assert not pipeline["unknown"]
+    assert sum(p["work"]["exp_ops"] for p in pipeline["phases"]) == 64 * 32
+    assert pipeline["region_schedule"]["cta_work"]["grid_blocks"] == 128
+
+
+def test_last_use_cast_retires_source_storage_without_changing_accumulator_bound():
+    func = attention(stages=0, sequence=256, block_n=128)
+    result = analyze(func)
+    phases = result["pressure"]["tile_liveness"]["phases"]
+    casts = [p for p in phases if p["streamed_cast_storage"]]
+    assert len(casts) == 1
+    phase = casts[0]
+    logical = sum(b["logical_bits_with_modeled_replication"] for b in phase["buffers"])
+    retired = phase["streamed_cast_storage"]["retired_bits_estimate"]
+    assert retired > 0
+    assert phase["packed_registers_per_block_estimate"] == (logical - retired + 31) // 32
+    assert result["pressure"]["modeled_lower_bound"] == 64

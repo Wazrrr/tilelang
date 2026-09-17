@@ -18,7 +18,7 @@ from experiments.common.spec import Device, TARGETS, configuration_space
 from experiments.utils.subsets import pairwise_subset
 from experiments.common.spaces import PRESETS
 
-CORE_OPS = ("gemm", "attention", "kda_chunk_o", "softmax")
+CORE_OPS = ("gemm", "attention", "kda_chunk_o", "gemm_fp8")
 CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
 CORE_TARGETS = ("ampere", "hopper", "blackwell", "mi355x", "ascend910b")
 BUDGETS = {
@@ -86,7 +86,7 @@ def study_plan(suite, devices=None, *, families=None, config_space=None):
         budget=budget,
         metric="pipeline_time",
         top_k=20,
-        dtype="float16",
+        dtypes=sorted({w.dtype for w in tests}),
         devices=[d.to_dict() for d in planned],
         splits={k: [w.to_dict() for w in v] for k, v in splits.items()},
         subsets=audits,

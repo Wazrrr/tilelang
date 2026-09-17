@@ -29,6 +29,7 @@ def collect_producer_buffers(col, loop):
     """Read actual copy regions and consumers; do not infer operand roles by name."""
 
     inside = [op for op in col.operations if in_loop(op, loop)]
+    serial = loop is not None and _int(loop.annotations.get("num_stages", 0)) == 0
     producers = [
         op
         for op in inside
@@ -49,7 +50,7 @@ def collect_producer_buffers(col, loop):
         if (
             not uses
             or min(uses) <= op.index
-            or any(other is not op and any(r.buffer.same_as(buffer) for r in other.writes) for other in inside)
+            or (not serial and any(other is not op and any(r.buffer.same_as(buffer) for r in other.writes) for other in inside))
         ):
             raise ValueError("unresolved producer/consumer reuse or overwrite")
         dims = [_int(r.extent) for r in region.ranges]

@@ -19,7 +19,7 @@ EXAMPLES = {
     "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
     "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
     "kda": "examples/kda/chunk_o.py",
-    "softmax": "examples/online_softmax/online_softmax.py",
+    "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
 }
 
 
@@ -74,7 +74,10 @@ with redirect_stdout(sys.stderr):
     identity = _runtime_identity(Device(**json.loads(sys.argv[1])))
 print(json.dumps(identity))
 """
-    return json.loads(subprocess.check_output([sys.executable, "-c", code, json.dumps(device.to_dict())], text=True))
+    # Pool subsets can exceed the OS limit for a single argv value. Runtime
+    # observation needs only target identity, never thousands of config IDs.
+    description = dict(name=device.name, target=device.target)
+    return json.loads(subprocess.check_output([sys.executable, "-c", code, json.dumps(description)], text=True))
 
 
 def _runtime_identity(device):
@@ -152,6 +155,7 @@ def identities(plan, device, settings, runtime, baseline_seed=123):
         *(ROOT / "tilelang/carver").rglob("*.py"),
         ROOT / "experiments/gemm/carver.py",
         ROOT / "experiments/common/baselines.py",
+        ROOT / "experiments/common/carver_graph.py",
         ROOT / "experiments/common/comparison.py",
         ROOT / "experiments/utils/baseline_store.py",
     ]

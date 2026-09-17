@@ -1,6 +1,6 @@
 """Service accounting on compiler-resolved work counts."""
 
-from .profile_schema import CONSUMER_RATE_FIELDS
+from .profile_schema import CONSUMER_RATE_FIELDS, reduction_rate_field
 
 
 def estimate_phase_cycles(phase, profile, concurrent_ctas):
@@ -34,6 +34,9 @@ def estimate_phase_cycles(phase, profile, concurrent_ctas):
             "elementwise_ops": "elementwise_ops_per_cycle",
             "exp_ops": "exp_ops_per_cycle",
             "rsqrt_ops": "rsqrt_ops_per_cycle",
+            "log_ops": "log_ops_per_cycle",
+            "convert_float32_to_float8_e4m3fn": "convert_float32_to_float8_e4m3fn_per_cycle",
+            "convert_float32_to_float8_e5m2": "convert_float32_to_float8_e5m2_per_cycle",
             "reduction_ops": "reduction_ops_per_cycle",
         }[key]
         if amount and not profile.get(rate_key):
@@ -43,21 +46,21 @@ def estimate_phase_cycles(phase, profile, concurrent_ctas):
             return None
     if phase["work"]["reduction_ops"]:
         reduction = phase.get("reduction") or {}
-        if reduction.get("precision") != "predicted" or reduction["dtype"] != profile.get("reduction_dtype", "float32"):
+        if reduction.get("precision") != "predicted":
             return None
-        kind = reduction["operator"]
         for operation in ("local", "shuffle"):
             amount = reduction[f"{operation}_pairs"]
-            rate = profile.get(f"reduction_{operation}_{kind}_per_cycle")
+            field = reduction_rate_field(reduction, profile, operation)
+            rate = profile.get(field)
             if amount and not rate:
                 return None
-            cycles = service(amount, f"reduction_{operation}_{kind}_per_cycle")
+            cycles = service(amount, field)
             if cycles is None:
                 return None
             terms["reduction_ops"] += cycles
         if reduction.get("shared_pairs"):
             pairs = reduction["shared_pairs"]
-            combine = service(pairs, f"reduction_local_{kind}_per_cycle")
+            combine = service(pairs, reduction_rate_field(reduction, profile, "local"))
             element_bytes = reduction.get("element_bytes")
             if element_bytes is None:
                 # Archived facts supported scalar reductions only.
@@ -88,5 +91,8 @@ def estimate_phase_cycles(phase, profile, concurrent_ctas):
         + terms["elementwise_ops"]
         + terms["exp_ops"]
         + terms.get("rsqrt_ops", 0)
+        + terms.get("log_ops", 0)
+        + terms.get("convert_float32_to_float8_e4m3fn", 0)
+        + terms.get("convert_float32_to_float8_e5m2", 0)
         + terms["reduction_ops"]
     )

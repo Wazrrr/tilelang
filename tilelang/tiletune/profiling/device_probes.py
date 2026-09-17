@@ -48,6 +48,9 @@ __device__ __noinline__ float TileTunePrimitive(int tid) {
           x[j] = sum * 0.03125f;
         } else if constexpr (Kind == 5) {
           asm volatile("rsqrt.approx.ftz.f32 %0, %0;" : "+f"(x[j]));
+        } else if constexpr (Kind == 6) {
+          float input = x[j] * 0.01f + 2.0f;
+          asm volatile("lg2.approx.ftz.f32 %0, %1;" : "=f"(x[j]) : "f"(input));
         }
       }
     }
@@ -215,5 +218,93 @@ def reduction_primitive(kind, iterations, blocks, threads=128):
             T.import_source(REDUCTION_PRIMITIVES)
             tx = T.get_thread_binding()
             Out[bx, tx] = T.call_extern("float32", name, tx)
+
+    return main
+
+
+HALF_MAX_PRIMITIVES = r"""
+#include <cuda_fp16.h>
+template <int Kind, int Iterations>
+__device__ __noinline__ float TileTuneHalfMaxPrimitive(int tid) {
+  unsigned short x[8];
+  const unsigned short bound = __half_as_ushort(__float2half(0.5f));
+  #pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    x[j] = __half_as_ushort(__float2half(0.01f * (tid + j + 1)));
+  }
+  #pragma unroll 1
+  for (int i = 0; i < Iterations; ++i) {
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      unsigned short other = bound;
+      if constexpr (Kind == 1) {
+        unsigned int shuffled;
+        asm volatile("shfl.sync.bfly.b32 %0, %1, 1, 31, -1;"
+                     : "=r"(shuffled) : "r"(static_cast<unsigned int>(x[j])));
+        other = static_cast<unsigned short>(shuffled);
+      }
+      asm volatile("max.f16 %0, %0, %1;" : "+h"(x[j]) : "h"(other));
+    }
+  }
+  float result = 0;
+  #pragma unroll
+  for (int j = 0; j < 8; ++j) result += __half2float(__ushort_as_half(x[j]));
+  return result;
+}
+"""
+
+
+def half_max_primitive(kind, iterations, blocks, threads=128):
+    """FP16 local max or shuffle/max pair, matching scalar half reductions."""
+    name = f"TileTuneHalfMaxPrimitive<{kind}, {iterations}>"
+
+    @T.prim_func
+    def main(Out: T.Tensor((blocks, threads), "float32")):
+        with T.Kernel(blocks, threads=threads) as bx:
+            T.import_source(HALF_MAX_PRIMITIVES)
+            tx = T.get_thread_binding()
+            Out[bx, tx] = T.call_extern("float32", name, tx)
+
+    return main
+
+
+FP8_CONVERSION = r"""
+template <int Kind, int Iterations>
+__device__ __noinline__ float TileTuneFp8Conversion() {
+  unsigned short packed[8];
+  const float value = 0.125f;
+  #pragma unroll 1
+  for (int iteration = 0; iteration < Iterations; ++iteration) {
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      if constexpr (Kind == 0) {
+        asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;"
+                     : "=h"(packed[j]) : "f"(value), "f"(value));
+      } else {
+        asm volatile("cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;"
+                     : "=h"(packed[j]) : "f"(value), "f"(value));
+      }
+    }
+  }
+  unsigned int result = 0;
+  #pragma unroll
+  for (int j = 0; j < 8; ++j) result += packed[j];
+  return float(result);
+}
+"""
+
+
+def fp8_conversion(dtype, iterations, blocks, threads=128):
+    if str(dtype) not in ("float8_e4m3fn", "float8_e5m2"):
+        raise ValueError("FP8 conversion probe requires E4M3FN or E5M2")
+    kind = 0 if str(dtype) == "float8_e4m3fn" else 1
+    name = f"TileTuneFp8Conversion<{kind}, {iterations}>"
+
+    @T.prim_func
+    def main(Out: T.Tensor((blocks, threads), "float32")):
+        with T.Kernel(blocks, threads=threads) as bx:
+            T.import_source(FP8_CONVERSION)
+            tx = T.get_thread_binding()
+            Out[bx, tx] = T.call_extern("float32", name)
 
     return main

@@ -18,23 +18,42 @@ RATE_FIELDS = {
     "elementwise_ops_per_cycle",
     "exp_ops_per_cycle",
     "rsqrt_ops_per_cycle",
+    "log_ops_per_cycle",
+    "convert_float32_to_float8_e4m3fn_per_cycle",
+    "convert_float32_to_float8_e5m2_per_cycle",
     "reduction_ops_per_cycle",  # Legacy profile field; not used for mapped tile reductions.
     "reduction_local_sum_per_cycle",
     "reduction_local_max_per_cycle",
     "reduction_shuffle_sum_per_cycle",
     "reduction_shuffle_max_per_cycle",
+    "reduction_local_max_float16_per_cycle",
+    "reduction_shuffle_max_float16_per_cycle",
 }
 LATENCY_FIELDS = {"copy_latency_cycles", "barrier_cycles", "async_copy_latency_cycles"}
 CONSUMER_RATE_FIELDS = {
     "elementwise_ops_per_cycle",
     "exp_ops_per_cycle",
     "rsqrt_ops_per_cycle",
+    "log_ops_per_cycle",
+    "convert_float32_to_float8_e4m3fn_per_cycle",
+    "convert_float32_to_float8_e5m2_per_cycle",
     "reduction_local_sum_per_cycle",
     "reduction_local_max_per_cycle",
     "reduction_shuffle_sum_per_cycle",
     "reduction_shuffle_max_per_cycle",
+    "reduction_local_max_float16_per_cycle",
+    "reduction_shuffle_max_float16_per_cycle",
 }
 PROFILE_METADATA_FIELDS = {"gemm_signature", "profile_target", "profile_backend", "profile_id", "memory_regime", "reduction_dtype"}
+
+
+def reduction_rate_field(reduction, profile, primitive):
+    dtype, kind = reduction["dtype"], reduction["operator"]
+    if dtype == profile.get("reduction_dtype", "float32"):
+        return f"reduction_{primitive}_{kind}_per_cycle"
+    if dtype == "float16" and kind == "max":
+        return f"reduction_{primitive}_{kind}_float16_per_cycle"
+    return None
 
 
 def validate_performance_model(profile):

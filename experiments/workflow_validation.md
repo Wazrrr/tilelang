@@ -1,3 +1,5 @@
+> Historical checkpoint. The active suite now replaces softmax with native FP8 GEMM and has Carver templates for all four families; see the [current contracts](README.md).
+
 # Workflow validation — 2026-09-16
 
 The system, baseline-reuse and utility-organization changes were checked on this

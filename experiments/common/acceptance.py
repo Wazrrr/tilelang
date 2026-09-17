@@ -73,8 +73,7 @@ def aggregate_study(plan, root):
             preparation = []
             for p in sorted(base.rglob("profile-preparation.json")):
                 preparation.append(dict(path=str(p.relative_to(root)), **json.loads(p.read_text())))
-            profile = root / "preparation" / name / "result.json"
-            if profile.exists():
+            for profile in sorted((root / "preparation" / name).rglob("result.json")):
                 profile_result = json.loads(profile.read_text())
                 preparation.append(
                     dict(
@@ -86,7 +85,8 @@ def aggregate_study(plan, root):
             models = []
             model_paths = set(base.rglob("models/xgboost-*.json"))
             for reference in baseline_refs.get(name, {}).values():
-                model_paths.update((Path(reference["path"]) / "collection" / name / "models").glob("xgboost-*.json"))
+                if reference.get("path"):
+                    model_paths.update((Path(reference["path"]) / "collection" / name / "models").glob("xgboost-*.json"))
             for path in sorted(model_paths):
                 model = json.loads(path.read_text())
                 training = model.get("training", {})
@@ -120,7 +120,7 @@ def aggregate_study(plan, root):
             accepted=bool(seeds) and all(s["accepted"] for s in seeds.values()), seeds=seeds, unavailable=plan["unavailable"].get(name)
         )
     complete_matrix = set(targets) == {"ampere", "hopper", "blackwell", "mi355x", "ascend910b"}
-    complete_families = case_count == 8 and {c["op"] for c in plan["splits"]["test"]} == {"gemm", "attention", "kda_chunk_o", "softmax"}
+    complete_families = case_count == 8 and {c["op"] for c in plan["splits"]["test"]} == {"gemm", "attention", "kda_chunk_o", "gemm_fp8"}
     return dict(
         version=1,
         suite=plan["suite"],

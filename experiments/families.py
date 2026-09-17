@@ -6,7 +6,7 @@ FAMILIES = {
     "gemm": "gemm",
     "attention": "flash_attention",
     "kda_chunk_o": "kda",
-    "softmax": "softmax",
+    "gemm_fp8": "gemm_fp8",
 }
 
 

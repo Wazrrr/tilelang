@@ -114,8 +114,11 @@ def tilelang_chunk_fwd_o(
                     HIDDEN[bb, bs, bh, i_k * block_DK : (i_k + 1) * block_DK, bv * block_DV : (bv + 1) * block_DV], HIDDEN_shared
                 )  # [block_DK, block_DV]
                 for i_s, i_k2 in T.Parallel(block_S, block_DK):
-                    Q_shared[i_s, i_k2] = Q_shared[i_s, i_k2] * scale
-                    GQ_shared[i_s, i_k2] = Q_shared[i_s, i_k2] * T.exp2(GK_shared[i_s, i_k2])
+                    # Keep both rounding points without overwriting the input
+                    # copy's destination inside the software pipeline.
+                    GQ_shared[i_s, i_k2] = (Q_shared[i_s, i_k2].astype(accum_dtype) * scale).astype(input_dtype).astype(
+                        accum_dtype
+                    ) * T.exp2(GK_shared[i_s, i_k2])
                 T.gemm(GQ_shared, HIDDEN_shared, O_fragment)  # O_fragment as accumulator
             T.copy(V[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], V_shared)  # [block_S, block_DV]
             T.copy(A[bb, bs * block_S : (bs + 1) * block_S, bh, 0:block_S], A_shared)  # [block_S, block_S]

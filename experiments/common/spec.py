@@ -24,10 +24,10 @@ _PARAMETERS = {
     "gemm": ({"m", "n", "k"}, {"batch", "transpose_a", "transpose_b", "epilogue"}),
     "attention": ({"batch", "heads", "sequence", "dim"}, {"causal"}),
     "kda_chunk_o": ({"batch", "heads", "sequence", "dim", "value_dim", "chunk_size"}, set()),
-    "softmax": ({"rows", "columns"}, set()),
+    "gemm_fp8": ({"m", "n", "k"}, {"transpose_b"}),
 }
 
-_DTYPES = ("float16", "bfloat16", "float32")
+_DTYPES = ("float16", "bfloat16", "float32", "float8_e4m3fn", "float8_e5m2")
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,10 @@ class Workload:
                 raise ValueError(f"{key} must be a positive integer")
         if self.dtype not in _DTYPES:
             raise ValueError(f"Unsupported workload dtype {self.dtype}")
+        if self.op == "gemm_fp8" and self.dtype not in ("float8_e4m3fn", "float8_e5m2"):
+            raise ValueError("gemm_fp8 requires float8_e4m3fn or float8_e5m2")
+        if self.op != "gemm_fp8" and self.dtype.startswith("float8"):
+            raise ValueError("FP8 inputs require the gemm_fp8 example")
         if self.op in ("attention", "kda_chunk_o") and self.dtype not in ("float16", "bfloat16"):
             raise ValueError(f"{self.op} supports float16 and bfloat16")
         if self.op == "kda_chunk_o" and self.parameters["sequence"] % self.parameters["chunk_size"]:
@@ -185,6 +189,12 @@ def load_manifest(data):
 
 
 def support_reason(workload, device):
+    if workload.op == "gemm_fp8":
+        from experiments.gemm_fp8.spaces import support_reason as fp8_support_reason
+
+        reason = fp8_support_reason(workload, device)
+        if reason:
+            return reason
     if workload.op == "gemm":
         from experiments.gemm.spaces import support_reason as gemm_support_reason
 

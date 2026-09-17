@@ -38,7 +38,7 @@ is exactly 8 times larger. `block_S` stays equal to the workload's chunk size.
 Only the chunk-output example is used; recurrent KDA and the independent
 row/causal-tile rewrite have been removed from the experiment interface.
 
-Space version 5 has no alternative `current`, `large` or `exhaustive` presets
+Space version 6 has no alternative `current`, `large` or `exhaustive` presets
 for this family. There is no cap, protected subset, target-dependent domain or
 structural prefilter. Every declared candidate is attempted in a full sweep;
 compilation and correctness failures remain recorded. Counts describe candidate
@@ -90,6 +90,5 @@ python -m experiments.kda.tiletune.run --suite full --device hopper \
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
 on both final FP16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
-Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
-explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)
+Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `KDAChunkOutputTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

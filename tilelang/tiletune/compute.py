@@ -50,8 +50,14 @@ def operation_work(op, col=None):
         rsqrts = sum(name == "tirx.rsqrt" for name in names)
         if rsqrts:
             work["rsqrt_ops"] = elements * rsqrts if elements is not None else None
+        logs = sum(name == "tirx.log2" for name in names)
+        if logs:
+            work["log_ops"] = elements * logs if elements is not None else None
         work["elementwise_ops"] = elements * max(len(scalar_ops), 1) if elements is not None else None
-        if any(name not in ("tirx.exp", "tirx.exp2", "tirx.rsqrt", "tirx.if_then_else", "tirx.likely", "tl.infinity") for name in names):
+        if any(
+            name not in ("tirx.exp", "tirx.exp2", "tirx.rsqrt", "tirx.log2", "tirx.if_then_else", "tirx.likely", "tl.infinity")
+            for name in names
+        ):
             work["elementwise_ops"] = None
         elif col is not None and getattr(col, "inferred_layouts", {}).get(op.metadata.buffer.data) is not None:
             try:
@@ -66,6 +72,14 @@ def operation_work(op, col=None):
         if not any(r.buffer.scope() == "global" for r in op.reads):
             dims = [_int(r.extent) for r in op.writes[0].ranges]
             work["elementwise_ops"] = prod(dims) if all(v is not None for v in dims) else None
+            if len(op.reads) == 1 and str(op.reads[0].buffer.dtype) == "float32":
+                dtype = str(op.writes[0].buffer.dtype)
+                if dtype in ("float8_e4m3fn", "float8_e5m2"):
+                    # CUDA lowers the example's epilogue to packed FP8
+                    # conversion instructions. Charge converted values to a
+                    # measured dtype-specific rate, not FP32 arithmetic.
+                    work[f"convert_float32_to_{dtype}"] = work["elementwise_ops"]
+                    work["elementwise_ops"] = 0
     else:
         # Access-region reflection is not a timing implementation. In particular
         # scans, transpose and atomics must not silently receive zero cost.
@@ -204,7 +218,7 @@ def scalar_fragment_work(op, layout, *, reference=False):
             visit(node.false_value)
         elif isinstance(node, tir.Call):
             name = node.op.name if hasattr(node.op, "name") else str(node.op)
-            field = "exp_ops" if name in ("tirx.exp", "tirx.exp2") else "rsqrt_ops" if name == "tirx.rsqrt" else None
+            field = {"tirx.exp": "exp_ops", "tirx.exp2": "exp_ops", "tirx.rsqrt": "rsqrt_ops", "tirx.log2": "log_ops"}.get(name)
             if field:
                 result[field] = result.get(field, 0) + amount(node)
             elif name == "tirx.if_then_else":

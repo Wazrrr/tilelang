@@ -53,13 +53,19 @@ def make_context(workload, implementation, target, device_name, backend, source_
         "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
         "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
         "kda": "examples/kda/chunk_o.py",
-        "softmax": "examples/online_softmax/online_softmax.py",
+        "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
     }
     if family in examples:
         paths.append(examples[family])
-    paths += sorted(
-        path for path in source_hashes if path.startswith((f"experiments/{family}/", "experiments/common/")) and path.endswith(".py")
-    )
+    # Match code that determines the measured candidate, not orchestration.
+    # A study/export/census edit must not invalidate a model trained on the
+    # same kernel. Keep execution, timing, input and configuration dependencies.
+    dependencies = {
+        *(f"experiments/{family}/{name}.py" for name in ("kernel", "reference", "spaces")),
+        *(f"experiments/common/{name}.py" for name in ("kernels", "run", "execution", "spec", "spaces")),
+        *(f"experiments/utils/{name}.py" for name in ("kernel", "cli", "monitor")),
+    }
+    paths += sorted(dependencies & source_hashes.keys())
     missing = set(paths) - source_hashes.keys()
     if missing:
         raise ValueError(f"missing kernel source fingerprints: {sorted(missing)}")

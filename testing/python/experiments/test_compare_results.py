@@ -147,6 +147,20 @@ def test_unavailable_carver_is_explicit_and_xgboost_is_optional(inputs):
     assert result["methods"][1]["curves"] == []
 
 
+def test_analysis_report_without_device_observation_checks_remaining_metadata(inputs):
+    oracle, method, records, report = inputs
+    manifest = dict(workload=dict(op="gemm", parameters=dict(m=4096)), configs=[r["config"] for r in records])
+    write(oracle.parent / "experiment.json", dict(manifest, device_observation=dict(name="A100")))
+    method = write(method.parent / "analysis" / "tiletune.json", report)
+    write(method.parent / "experiment.json", dict(manifest, device_observation=None))
+    result = compare(oracle, {"tiletune": method}, [2])
+    assert result["methods"][0]["metadata_check"] == "matched shared workload fields"
+    changed = dict(manifest, workload=dict(op="gemm", parameters=dict(m=8192)), device_observation=None)
+    write(method.parent / "experiment.json", changed)
+    with pytest.raises(ValueError, match="workload differs"):
+        compare(oracle, {"tiletune": method}, [2])
+
+
 def test_embedded_oracle_identity_rejects_same_configs_for_another_shape(inputs):
     oracle, method, records, report = inputs
     identity = dict(workload=dict(op="gemm", dtype="float16", parameters=dict(m=4096, batch=1)))
