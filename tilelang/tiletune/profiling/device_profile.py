@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from ..targets import current_target, resolve_target
 
-PROFILE_VERSION = 5
+PROFILE_VERSION = 6
 
 
 def _signature(input_dtype, accum_dtype, instruction="cuda.wgmma"):
@@ -72,7 +72,7 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
     data = json.loads(Path(path).read_text())
     if memory_regime not in ("cached", "streaming"):
         raise ValueError("memory_regime must be cached or streaming")
-    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, PROFILE_VERSION):
+    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, 5, PROFILE_VERSION):
         raise ValueError("unsupported device profile version; regenerate the profile")
     if expected_identity is not None and data["identity"] != expected_identity:
         raise ValueError("device/profile fingerprint mismatch; use a separate cache path or refresh explicitly")
@@ -92,6 +92,17 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
     result = {
         **rates,
         "gemm_signature": signature,
+        "gemm_rates": [
+            dict(
+                signature=json.loads(key),
+                rates={
+                    field: rate
+                    for field, rate in {**data["common"]["rates"], **value["rates"]}.items()
+                    if field in ("gemm_flops_per_cycle", "wgmma_flops_per_cycle_per_warpgroup")
+                },
+            )
+            for key, value in data["gemm_models"].items()
+        ],
         "profile_target": data["identity"]["target_arch"],
         "profile_id": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
         "reference_clock_mhz": data["common"]["clock_mhz"],
@@ -163,10 +174,16 @@ def profile_device(*, input_dtype="float16", accum_dtype="float32", cache_path=N
                 raise ValueError("device/profile fingerprint mismatch; use a separate cache path or refresh explicitly")
         if data is None:
             data = {"identity": identity, "common": _measure_common(identity), "gemm_models": {}}
-        signature = _signature(input_dtype, accum_dtype, _instruction(identity))
-        key = json.dumps(signature, sort_keys=True)
-        if key not in data["gemm_models"]:
-            data["gemm_models"][key] = _measure_gemm(identity, data["common"]["clock_mhz"], input_dtype, accum_dtype)
+        instructions = [_instruction(identity)]
+        if instructions == ["cuda.wgmma"]:
+            instructions.append("cuda.mma")
+        for instruction in instructions:
+            signature = _signature(input_dtype, accum_dtype, instruction)
+            key = json.dumps(signature, sort_keys=True)
+            if key in data["gemm_models"]:
+                continue
+            probe_identity = dict(identity, matrix_instruction=instruction)
+            data["gemm_models"][key] = _measure_gemm(probe_identity, data["common"]["clock_mhz"], input_dtype, accum_dtype)
             data["updated_at_unix"] = time.time()
             temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
             temporary.write_text(json.dumps(data, indent=2) + "\n")
@@ -190,11 +207,13 @@ def _clock_mhz():
     return value
 
 
-def _benchmark(func, inputs, out_idx, check=None, required_source=None, *, target=None):
+def _benchmark(func, inputs, out_idx, check=None, required_source=None, *, target=None, pass_configs=None):
     import torch
     import tilelang
 
-    kernel = tilelang.compile(func, target=target or current_target(), out_idx=out_idx, execution_backend="tvm_ffi")
+    kernel = tilelang.compile(
+        func, target=target or current_target(), out_idx=out_idx, execution_backend="tvm_ffi", pass_configs=pass_configs
+    )
     source = kernel.get_kernel_source()
     if required_source is not None and required_source not in source:
         raise RuntimeError(f"primitive did not compile to its required instruction: {required_source}")
@@ -346,6 +365,7 @@ def _measure_gemm(identity, clock, input_dtype, accum_dtype):
                 [2],
                 lambda out: torch.testing.assert_close(out, torch.zeros_like(out)),
                 required_source="tl::wgmma_ss" if hopper else "tl::mma_sync",
+                pass_configs={"tl.disable_wgmma": True} if not hopper else None,
             )
             for n in (128, 256)
         ]

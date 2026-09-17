@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from experiments.utils.monitor import snapshot, foreign_processes, stop_worker
+from experiments.utils.monitor import snapshot, foreign_processes, stop_worker, visible_gpus, matches_cuda_device
 from .run import make_request, validate_result
 from experiments.utils.io import write_json
 from .spec import configuration_space, load_manifest
@@ -134,13 +134,15 @@ def main():
     if device.target["kind"] != "cuda":
         parser.error("this monitored runner requires CUDA")
     initial = snapshot()
-    gpus = [
-        g
-        for g in initial["gpus"]
-        if (args.gpus is None or int(g["index"]) in args.gpus) and re.search(device.expected_device_pattern, g["name"])
-    ]
+    gpus = [g for g in visible_gpus(initial) if (args.gpus is None or int(g["index"]) in args.gpus) and matches_cuda_device(g, device)]
     if not gpus:
         parser.error("no matching GPUs")
+    if args.gpus is not None and len(gpus) != len(set(args.gpus)):
+        parser.error("requested GPUs must be visible and match the target")
+    if args.gpus is None:
+        gpus = [g for g in gpus if g["name"] == gpus[0]["name"]]
+    if len({g["name"] for g in gpus}) != 1:
+        parser.error("select GPUs of one model; baseline measurements must not mix models")
     spaces = {w.name: configuration_space(w, device) for w in workloads}
     settings = dict(
         method="brute_force",

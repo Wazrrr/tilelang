@@ -38,9 +38,32 @@ PROFILE_METADATA_FIELDS = {"gemm_signature", "profile_target", "profile_backend"
 
 
 def validate_performance_model(profile):
-    if not isinstance(profile, dict) or set(profile) - RATE_FIELDS - LATENCY_FIELDS - PROFILE_METADATA_FIELDS - {"consumer_rates"}:
+    if not isinstance(profile, dict) or set(profile) - RATE_FIELDS - LATENCY_FIELDS - PROFILE_METADATA_FIELDS - {
+        "consumer_rates",
+        "gemm_rates",
+    }:
         raise ValueError("performance_model contains unsupported fields")
     for key, value in profile.items():
+        if key == "gemm_rates":
+            if not isinstance(value, list) or not value:
+                raise ValueError("gemm_rates requires measured instruction/dtype entries")
+            signatures = []
+            for entry in value:
+                if not isinstance(entry, dict) or set(entry) != {"signature", "rates"}:
+                    raise ValueError("gemm_rates entries require signature and rates")
+                validate_performance_model({"gemm_signature": entry["signature"]})
+                rates = entry["rates"]
+                if (
+                    not isinstance(rates, dict)
+                    or "gemm_flops_per_cycle" not in rates
+                    or set(rates) - {"gemm_flops_per_cycle", "wgmma_flops_per_cycle_per_warpgroup"}
+                ):
+                    raise ValueError("gemm_rates contains unsupported rates")
+                validate_performance_model(rates)
+                if entry["signature"] in signatures:
+                    raise ValueError("duplicate GEMM instruction/dtype signature")
+                signatures.append(entry["signature"])
+            continue
         if key == "consumer_rates":
             if not isinstance(value, dict) or not value:
                 raise ValueError("consumer_rates requires measured thread-count rows")
@@ -72,3 +95,21 @@ def validate_performance_model(profile):
             or (key in RATE_FIELDS and value == 0)
         ):
             raise ValueError("performance_model requires finite positive rates and nonnegative latencies")
+
+
+def resolve_gemm_profile(profile, participants):
+    """Match measured service to the compiler-chosen instruction and dtypes."""
+    participants = participants or {}
+    for entry in profile.get("gemm_rates", []):
+        if all(participants.get(key) == value for key, value in entry["signature"].items()):
+            result = dict(profile)
+            result.pop("gemm_flops_per_cycle", None)
+            result.pop("wgmma_flops_per_cycle_per_warpgroup", None)
+            result.update(entry["rates"])
+            return result
+    signature = profile.get("gemm_signature")
+    if signature is None:
+        return None if "gemm_rates" in profile else profile
+    if all(participants.get(key) == value for key, value in signature.items()):
+        return profile
+    return None

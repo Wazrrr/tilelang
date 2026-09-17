@@ -170,6 +170,8 @@ def test_gpu_mma_wgmma_and_function_settings(tmp_path):
 
 
 def test_decorator_binding_and_fresh_report(monkeypatch, tmp_path):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
     tuned = tilelang.autotune(
         configs=[{"block": 32, "pass_configs": {"tl.disable_wgmma": True}}, {"block": 64}],
         tiletune={"mode": "report_only", "report_path": str(tmp_path / "fresh.json")},

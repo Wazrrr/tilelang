@@ -9,7 +9,7 @@ Reusable helpers live here; coordinators and worker entry points live in
 | `kernel.py` | KernelCase contract, input helpers and numerical checks |
 | `tiletune.py` | Saved TileTune ranking and winner helpers |
 | `monitor.py`, `locking.py` | GPU observations, contention rejection and device leases |
-| `baseline_store.py` | Measurement identities and immutable baseline bundles |
+| `baseline_store.py` | Family/GPU storage, explicit collection/refresh, and read-only verified baseline reuse |
 | `results.py`, `io.py` | Backend-independent result reading, Oracle@K and atomic JSON writing |
 | `diagnostics.py` | Ranking coverage and oracle diagnostics |
 | `grid.py`, `subsets.py` | Grid enumeration and deterministic development subsets |

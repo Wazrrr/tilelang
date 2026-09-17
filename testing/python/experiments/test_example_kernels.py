@@ -11,7 +11,8 @@ EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=64, block_N=64, num_stages=1, threads=128),
     "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
-    "softmax": dict(BLOCK_M=1, BLOCK_N=8192, threads=128),
+    "gemm_fp8": dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False),
+    "grouped_gemm": dict(block_M=64, block_N=128, block_K=64, num_stages=0, threads=128),
 }
 
 
@@ -55,15 +56,14 @@ def example_program(w, c):
             threads=c["threads"],
             num_stages=c["num_stages"],
         )
-    from examples.online_softmax.online_softmax import softmax_kernel
-    import tilelang.language as T
+    if w.op == "gemm_fp8":
+        from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
 
-    return softmax_kernel.get_tir(
-        T.Tensor((p["rows"], p["columns"]), w.dtype),
-        BLOCK_M=c["BLOCK_M"],
-        BLOCK_N=c["BLOCK_N"],
-        dtype=w.dtype,
-        threads=c["threads"],
+        return matmul.get_tir(M=p["m"], N=p["n"], K=p["k"], dtype=w.dtype, **c)
+    from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
+
+    return grouped_gemm.get_tir(
+        K=p["k"], N=p["n"], batch_sizes_list=tuple(p["batch_sizes"]), trans_b=p.get("transpose_b", False), dtype=w.dtype, **c
     )
 
 
@@ -73,7 +73,7 @@ def test_final_programs_are_structurally_identical_to_examples(w, dtype):
     from tilelang import tvm
     from experiments.common.kernels import make_case
 
-    w = replace(w, dtype=dtype)
+    w = replace(w, dtype=({"float16": "float8_e4m3fn", "bfloat16": "float8_e5m2"}[dtype] if w.op == "gemm_fp8" else dtype))
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])

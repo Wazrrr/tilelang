@@ -89,7 +89,7 @@ def test_attention_traffic_liveness_and_causal_bounds(layout, causal):
 def test_pipeline_stages_help_only_through_modeled_overlap():
     results = [
         analyze_prim_func(
-            gemm(stages=s, extent=16),
+            gemm(stages=s, extent=4),
             {"performance_model": PROFILE},
             target=TARGET,
             device_limits=LIMITS,

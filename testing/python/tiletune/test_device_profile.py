@@ -77,6 +77,37 @@ def test_same_profile_handles_attention_work():
     assert any(p["work"]["exp_ops"] for p in result["modules"]["pipeline_overlap"]["phases"])
 
 
+def test_instruction_rates_bind_to_lowering_and_never_fall_back_on_a_miss():
+    from tiletune_core.profile_schema import resolve_gemm_profile
+
+    signature = profile()["gemm_signature"]
+    rates = dict(
+        profile(),
+        gemm_rates=[
+            dict(signature=signature, rates=dict(gemm_flops_per_cycle=4096, wgmma_flops_per_cycle_per_warpgroup=2048)),
+            dict(signature=dict(signature, instruction="cuda.mma"), rates=dict(gemm_flops_per_cycle=512)),
+        ],
+    )
+    mma = resolve_gemm_profile(rates, dict(signature, instruction="cuda.mma"))
+    assert mma["gemm_flops_per_cycle"] == 512
+    assert "wgmma_flops_per_cycle_per_warpgroup" not in mma
+    assert resolve_gemm_profile(rates, signature)["gemm_flops_per_cycle"] == 4096
+    for p in (rates, {k: v for k, v in rates.items() if k != "gemm_signature"}):
+        assert resolve_gemm_profile(p, dict(signature, a_dtype="float8_e4m3fn")) is None
+    result = analyze_prim_func(
+        matrix_pipeline(), dict(performance_model=rates), target=TARGET, device_limits=LIMITS, pass_configs={"tl.disable_wgmma": True}
+    )
+    assert result["tile_cost"]["score"] is not None, result["diagnostics"]
+
+
+def test_matrix_rate_entries_require_a_measured_rate_and_unique_signature():
+    row = dict(signature=profile()["gemm_signature"], rates=dict(gemm_flops_per_cycle=2048))
+    TileTuneConfig(performance_model=dict(gemm_rates=[row]))
+    for rows in ([row, row], [dict(row, rates={})], [dict(row, rates=dict(gemm_flops_per_cycle=0))]):
+        with pytest.raises(ValueError):
+            TileTuneConfig(performance_model=dict(gemm_rates=rows))
+
+
 @pytest.mark.parametrize("change", ["legacy", "dtype"])
 def test_reduction_profile_mismatch_retains_candidate(change):
     rates = profile()
@@ -102,7 +133,12 @@ def test_cached_profile_requires_no_gpu_or_benchmark(tmp_path, monkeypatch):
     identity = dict(profile_version=device_profile.PROFILE_VERSION, target_arch="sm_90a", device_name="test")
     signature = device_profile._signature("float8_e4m3fn", "float32")
     data = dict(
-        identity=identity, common=dict(rates=PROFILE, clock_mhz=1800), gemm_models={json.dumps(signature, sort_keys=True): dict(rates={})}
+        identity=identity,
+        common=dict(rates=PROFILE, clock_mhz=1800),
+        gemm_models={
+            json.dumps(dict(signature, instruction=instruction), sort_keys=True): dict(rates={"gemm_flops_per_cycle": 2048})
+            for instruction in ("cuda.wgmma", "cuda.mma")
+        },
     )
     path.write_text(json.dumps(data))
     monkeypatch.setattr(device_profile, "_identity", lambda: identity)
@@ -134,7 +170,7 @@ def test_missing_dtype_only_measures_dtype_primitives(tmp_path, monkeypatch):
         return dict(rates=dict(PROFILE, dram_bytes_per_cycle=12), clock_mhz=1800)
 
     def gemm(_identity, clock, dtype, accum_dtype):
-        gemm_calls.append(dtype)
+        gemm_calls.append((dtype, _identity["matrix_instruction"]))
         return dict(rates=dict(gemm_flops_per_cycle=4096 if dtype == "float8_e4m3fn" else 2048))
 
     monkeypatch.setattr(device_profile, "_measure_common", common)
@@ -142,7 +178,7 @@ def test_missing_dtype_only_measures_dtype_primitives(tmp_path, monkeypatch):
     for dtype in ("float8_e4m3fn", "float16", "float8_e4m3fn"):
         profile_device(input_dtype=dtype, cache_path=path)
     assert len(common_calls) == 1
-    assert gemm_calls == ["float8_e4m3fn", "float16"]
+    assert gemm_calls == [(dtype, instruction) for dtype in ("float8_e4m3fn", "float16") for instruction in ("cuda.wgmma", "cuda.mma")]
     streaming = load_device_profile(path, input_dtype="float16", memory_regime="streaming")
     assert streaming["global_bytes_per_cycle"] == 12
     assert streaming["memory_regime"] == "streaming"

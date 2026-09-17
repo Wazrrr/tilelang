@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 22
+ANALYSIS_VERSION = 23
 
 
 @dataclass(frozen=True)
@@ -24,15 +24,26 @@ class TileTuneConfig:
     specialization: str = "auto"
     ranking_metric: str = "pipeline_time"
     performance_model: dict | None = None
+    # Read-only one-dimensional integer parameters, keyed by PrimFunc argument
+    # index. Callers must verify these values against the supplied inputs.
+    input_values: dict | None = None
     trace_path: str | None = None  # Append intermediate analysis snapshots for manual review.
     facts_path: str | None = None  # Optional portable compiler-fact artifact.
 
     def __post_init__(self):
+        if self.input_values is not None and (
+            not isinstance(self.input_values, dict)
+            or any(
+                not str(k).isdigit() or not isinstance(v, list | tuple) or not v or any(type(x) is not int for x in v)
+                for k, v in self.input_values.items()
+            )
+        ):
+            raise ValueError("input_values maps parameter indices to nonempty integer vectors")
         if self.facts_path is not None and (not isinstance(self.facts_path, str) or not self.facts_path.strip()):
             raise ValueError("facts_path must be a nonempty string or None")
         if (
             isinstance(self.exploration_fraction, bool)
-            or not isinstance(self.exploration_fraction, (int, float))
+            or not isinstance(self.exploration_fraction, int | float)
             or not 0 <= self.exploration_fraction <= 1
         ):
             raise ValueError("exploration_fraction must be in [0, 1]")

@@ -95,3 +95,66 @@ Nine shared/family plans passed under `python -S` without importing GPU/compiler
 or ML runtimes. Ruff and whitespace checks passed. This cleanup did not collect
 new GPU performance measurements; the GPU checks above describe the preceding
 workflow validation.
+
+## Attention Carver adapter
+
+The attention baseline now uses the unchanged `FlashAttentionTemplate` and
+`TensorCorePolicy` through `flash_attention/carver.py`. It scores the existing
+320-config pool, checks the native thread counts, and measures selections through
+the ordinary example-kernel runner. No softmax/causal correction, memory-limit
+increase, candidate expansion or fallback ranking is added to Carver.
+
+Artifacts: [attention-carver-adapter-1789588721233592696](results/attention-carver-adapter-1789588721233592696/validation.json).
+Both development and both final FP16 cases ran with K=20 on NVIDIA H200 using
+3 warmup and 10 measurement repetitions, two compile workers, and the standard
+one-second process monitor. Every invocation was observed uncontended.
+
+| Split | Case | Selected / 320 | Result |
+| --- | --- | ---: | --- |
+| Development | noncausal, S=512, D=64 | 16 | All selected configs failed compilation |
+| Development | causal, S=640, D=128 | 4 | All selected configs failed compilation |
+| Final | noncausal, S=768, D=64 | 0 | All configs rejected by Carver's shared-memory limit |
+| Final | causal, S=1152, D=128 | 0 | All configs rejected by Carver's shared-memory limit |
+
+Development failures retain the example compiler's fragment-layout and FullRow
+warp-partition diagnostics. The final minimum shared-memory estimates are
+52,224 and 78,848 bytes against Carver's unchanged 49,152-byte limit. Final runs
+save complete reports with `model_unavailable`, zero selected candidates and no
+winner. This terminal model outcome is accepted by the reusable baseline cache;
+offline Oracle@K is N/A at every K. Compilation failures remain `failed` and are
+not promoted to successful reusable bundles. No attention latency/performance
+claim is made from these runs.
+
+Validation passed **307 offline tests, 33 skipped**, using the regression command
+above, plus **7 tests with CUDA enabled**, including both FP16/BF16 full-pool
+attention scores compared directly with the original policy and the existing
+GEMM tests. Cache tests cover reuse of empty Carver selections across TileTune
+revisions and N/A comparison curves. Standard-library-only planning, Ruff and
+whitespace checks passed. Source hashes confirm Carver, all FlashAttention
+example Python files, and attention kernel/case/pool/reference files are unchanged.
+
+## Family-owned result storage and explicit baseline refresh
+
+Baseline storage now defaults to `<family>/results/<GPU model>/baselines/`.
+The family command's `--run-baselines` invocation collects a new bundle and
+updates `current.json` only after successful completion. Ordinary TileTune runs
+only load and verify that reference: missing or incompatible baselines require
+an explicit rerun. Failed refreshes leave previous references and bundles intact.
+
+Ten existing single-family result directories were relocated into GEMM,
+attention and softmax folders. All migrated file contents were checked before
+and after the move. The two GEMM heuristic JSONs now point to the relocated
+oracle/report/monitor files; the oracle SHA256 values and measurements are
+unchanged. Old path symlinks preserve absolute references in raw records.
+No GPU experiment or baseline measurement was rerun for this storage change.
+
+Validation passed **330 offline tests, 41 skipped**, using the regression command
+above. Tests cover read-only reuse, missing/mismatched identities, successful
+explicit refresh, failure preserving the previous baseline, and exclusion of
+generated family results from source fingerprints. Eight family plans (ordinary
+and explicit baseline mode for each core family) passed under `python -S`
+without importing GPU/compiler/ML runtimes. Ruff and whitespace checks passed.
+
+The [migration audit](utils/results/family-storage-migration-20260916/migration.json)
+records old/new locations and verified file counts. The [result guide](RESULTS.md)
+describes the current storage paths and the scope of existing measurements.

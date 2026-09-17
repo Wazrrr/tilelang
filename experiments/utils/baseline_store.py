@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 from experiments.utils.io import write_json
-from experiments.utils.results import load_oracle
+from experiments.utils.results import config_key, load_oracle, records_by_index, validate_order
 from experiments.common.spec import Workload, configuration_space
 from experiments.families import FAMILIES
 from experiments.xgboost.data import digest
@@ -20,7 +20,7 @@ EXAMPLES = {
     "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
     "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
     "kda": "examples/kda/chunk_o.py",
-    "softmax": "examples/online_softmax/online_softmax.py",
+    "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
 }
 
 
@@ -30,7 +30,8 @@ def hash_files(paths, root=ROOT):
 
 def measurement_sources(families, root=ROOT):
     # TileTune and tiletune_core only rank candidates; changes there do not
-    # change the baseline kernels. Compiler/JIT/profiler changes do invalidate.
+    # change the baseline kernels. Keep compiler/JIT/profiler provenance even
+    # though it is not a condition for reusing the fixed baseline measurements.
     paths = []
     for directory in ("src", "tilelang", "cmake"):
         paths += [
@@ -152,6 +153,7 @@ def identities(plan, device, settings, runtime, baseline_seed=123):
         *(ROOT / "experiments/xgboost").glob("*.py"),
         *(ROOT / "tilelang/carver").rglob("*.py"),
         ROOT / "experiments/gemm/carver.py",
+        ROOT / "experiments/flash_attention/carver.py",
         ROOT / "experiments/common/baselines.py",
         ROOT / "experiments/common/comparison.py",
         ROOT / "experiments/utils/baseline_store.py",
@@ -182,6 +184,103 @@ def verify_bundle(path, identity):
     return manifest
 
 
+def reuse_identity(identity):
+    """Identify the measured cases, independently of collection provenance."""
+    runtime = identity.get("measurement", {}).get("runtime", {})
+    cases = {}
+    for item in identity["splits"]["test"]:
+        workload = Workload(**item)
+        cases[workload.name] = dict(
+            op=workload.op,
+            parameters=workload.parameters,
+            dtype=workload.dtype,
+            configs=sorted(config_key(config) for config in identity["pools"][workload.name]),
+        )
+    return dict(gpu={key: runtime.get(key) for key in ("device", "target")}, cases=cases)
+
+
+def storage_root(family, device, runtime, override=None):
+    """Keep each family's baseline records beside its experiment definition."""
+    if override is not None:
+        return Path(override).resolve() / device.name / family
+    gpu = runtime["device"].removeprefix("NVIDIA ").replace("/", "_")
+    return ROOT / "experiments" / family / "results" / gpu / "baselines"
+
+
+def load_bundle(root, identity, *, reference=None):
+    """Read the pinned study reference, or current.json for a new TileTune run."""
+    root = Path(root)
+    if reference is None:
+        current = root / "current.json"
+        if not current.is_file():
+            raise FileNotFoundError(f"No saved baseline bundle in {root}; run the family command with --run-baselines first")
+        reference = json.loads(current.read_text())
+        path = root / reference["path"]
+    else:
+        path = Path(reference["path"])
+    if hashlib.sha256((path / "complete.json").read_bytes()).hexdigest() != reference["manifest_sha256"]:
+        raise ValueError(f"baseline completion manifest changed: {path}")
+    recorded = json.loads((path / "complete.json").read_text())["identity"]
+    if "identity_sha256" in reference and reference["identity_sha256"] != digest(recorded):
+        raise ValueError(f"baseline identity reference changed: {path}")
+    saved, requested = reuse_identity(recorded), reuse_identity(identity)
+    if saved["gpu"] != requested["gpu"] or any(saved["cases"].get(name) != case for name, case in requested["cases"].items()):
+        raise ValueError(
+            f"Saved baselines in {root} do not match the workload, GPU or configuration pool; explicitly rerun with --run-baselines"
+        )
+    verify_bundle(path, recorded)
+    return path, True
+
+
+def publish_bundle(root, path, identity):
+    """Called only by explicit collection, after the complete bundle is verified."""
+    write_json(
+        root / "current.json",
+        dict(
+            path=str(path.relative_to(root)),
+            identity_sha256=digest(identity),
+            manifest_sha256=hashlib.sha256((path / "complete.json").read_bytes()).hexdigest(),
+        ),
+    )
+
+
+def validate_case_bundle(case, configs):
+    """Require the exact declared pool and a complete permutation of its ranking."""
+    oracle = load_oracle(case / "brute_force")
+    expected = {config_key(c) for c in configs}
+    if set(oracle["records"]) != expected:
+        raise ValueError("baseline oracle pool differs from the declared configurations")
+    for method in ("carver", "xgboost"):
+        result = json.loads((case / method / "result.json").read_text())
+        if result["status"] not in ("completed", "unsupported", "model_unavailable"):
+            raise ValueError(f"baseline {method} failed for {case.name}: {result}")
+        if result["status"] != "completed" and method != "carver":
+            raise ValueError("XGBoost baseline is required")
+        if result["status"] == "unsupported":
+            continue
+        report = json.loads((case / method / (method + ".json")).read_text())
+        records = records_by_index(report["configs"])
+        if {config_key(r["config"]) for r in records.values()} != expected:
+            raise ValueError(f"{method} pool differs from the declared configurations")
+        ranked = validate_order([r["index"] for r in report["ranking"]], records)
+        if len(ranked) != len(records):
+            raise ValueError(f"incomplete {method} ranking")
+        selected = validate_order(report["selection"]["selected_indices"], records)
+        if result["status"] == "model_unavailable":
+            if (
+                selected
+                or any(r["status"] != "model_rejected" for r in records.values())
+                or any(r["score"] is not None or r["tier"] == "eligible" for r in report["ranking"])
+            ):
+                raise ValueError("unavailable Carver baseline must record rejection of the complete pool")
+        elif (
+            result["selection"] != report["selection"]
+            or result["winner"]["index"] not in selected
+            or config_key(result["winner"]["config"]) != config_key(records[result["winner"]["index"]]["config"])
+        ):
+            raise ValueError(f"{method} result does not match its frozen selection")
+
+
 @contextmanager
 def bundle_lock(root, key):
     root.mkdir(parents=True, exist_ok=True)
@@ -193,18 +292,25 @@ def bundle_lock(root, key):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def collect_bundle(root, identity, measurement, device, settings, *, run=subprocess.run):
-    """Collect once. Completed bundles are verified and never written on reuse."""
+def collect_bundle(root, identity, measurement, device, settings, *, refresh=False, run=subprocess.run):
+    """Explicit collection; publish a new current reference only after success.
+
+    A refresh keeps prior bundles intact so earlier TileTune runs still refer to
+    their original measurements. A failed refresh leaves current.json unchanged.
+    """
+    root = Path(root).resolve()
     key = digest(identity)
-    with bundle_lock(Path(root), key) as path:
+    with bundle_lock(root, "collection"):
+        import time
+
+        path = root / "runs" / (f"{key}.{time.time_ns()}" if refresh else key)
         if (path / "complete.json").exists():
             verify_bundle(path, identity)
+            publish_bundle(root, path, identity)
             return path, True
         if path.exists():
-            import time
-
             path.rename(path.with_name(path.name + f".incomplete.{time.time_ns()}"))
-        path.mkdir()
+        path.mkdir(parents=True)
         write_json(path / "identity.json", identity)
         write_json(path / "measurement.json", measurement)
         write_json(path / "splits.json", dict(version=1, devices=[device.to_dict()], splits=identity["splits"]))
@@ -238,20 +344,8 @@ def collect_bundle(root, identity, measurement, device, settings, *, run=subproc
         run(command, check=True)
         cases = path / "collection" / device.name / "test"
         for w in identity["splits"]["test"]:
-            case = cases / w["name"]
-            oracle = load_oracle(case / "brute_force")
-            if len(oracle["records"]) != len(identity["pools"][w["name"]]):
-                raise ValueError("baseline oracle pool is incomplete")
-            for method in ("carver", "xgboost"):
-                result = json.loads((case / method / "result.json").read_text())
-                if result["status"] not in ("completed", "unsupported"):
-                    raise ValueError(f"baseline {method} failed for {w['name']}: {result}")
-                if result["status"] == "unsupported" and method != "carver":
-                    raise ValueError("XGBoost baseline is required")
-                if result["status"] == "completed" and len(json.loads((case / method / (method + ".json")).read_text())["ranking"]) != len(
-                    oracle["records"]
-                ):
-                    raise ValueError(f"incomplete {method} ranking")
+            validate_case_bundle(cases / w["name"], identity["pools"][w["name"]])
         artifacts = hash_files(path.rglob("*.json"), path)
         write_json(path / "complete.json", dict(version=1, identity=identity, artifacts=artifacts))
+        publish_bundle(root, path, identity)
         return path, False

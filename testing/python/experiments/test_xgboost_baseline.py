@@ -35,9 +35,9 @@ def test_declared_pool_schema_includes_knobs_without_successful_training_labels(
     assert len(Predictor(path, workers=1).predict(heldout[0]["context"], [extra])) == 1
 
 
-def write_run(path, rows, *, name="softmax", failed=(), sample_fraction=None):
+def write_run(path, rows, *, name="gemm", failed=(), sample_fraction=None):
     path.mkdir(parents=True)
-    workload = Workload(name, "softmax", dict(rows=rows, columns=128))
+    workload = Workload(name, "gemm", dict(m=rows, n=128, k=128, transpose_b=True))
     plan = sampling_plan(canonical_workload(workload), GRID, fraction=sample_fraction) if sample_fraction is not None else None
     indices = plan["selected_indices"] if plan is not None else list(range(len(GRID)))
     experiment = dict(
@@ -52,9 +52,9 @@ def write_run(path, rows, *, name="softmax", failed=(), sample_fraction=None):
                 "experiments/common/kernels.py",
                 "experiments/utils/kernel.py",
                 "experiments/families.py",
-                "experiments/softmax/kernel.py",
-                "experiments/softmax/reference.py",
-                "examples/online_softmax/online_softmax.py",
+                "experiments/gemm/kernel.py",
+                "experiments/gemm/reference.py",
+                "examples/gemm/example_gemm_advanced_autotune.py",
             )
         },
         native_build="test-compiler-build",
@@ -112,7 +112,7 @@ def test_model_learns_and_roundtrips_without_test_labels(trained):
 def test_split_is_semantic_not_run_name_or_configuration_subset(tmp_path):
     pytest.importorskip("xgboost")
     training = read_runs([write_run(tmp_path / "train", 16)])
-    validation = read_runs([write_run(tmp_path / "alias", 16, name="renamed_softmax")])
+    validation = read_runs([write_run(tmp_path / "alias", 16, name="renamed_gemm")])
     validation[0]["samples"] = validation[0]["samples"][3:]
     with pytest.raises(ValueError, match="workload overlap"):
         train(training, validation, tmp_path / "bad.json")
@@ -169,7 +169,7 @@ def test_model_cannot_silently_change_execution_domain(trained, change):
 
 def test_model_fingerprint_is_frozen_in_worker_request(trained):
     path, _, _, _ = trained
-    workload = Workload("test", "softmax", dict(rows=64, columns=128))
+    workload = Workload("test", "gemm", dict(m=64, n=128, k=128, transpose_b=True))
     request = make_request(workload, Device("hopper", TARGETS["hopper"]), dict(method="xgboost", xgb_model=str(path)))
     assert validate_request(request)[0] == workload
     expected = request["settings"]["xgb_model_sha256"]
@@ -182,7 +182,7 @@ def test_model_fingerprint_is_frozen_in_worker_request(trained):
 def test_worker_result_must_keep_model_and_selection_budget(trained):
     path, _, _, _ = trained
     request = make_request(
-        Workload("test", "softmax", dict(rows=64, columns=128)),
+        Workload("test", "gemm", dict(m=64, n=128, k=128, transpose_b=True)),
         Device("hopper", TARGETS["hopper"]),
         dict(method="xgboost", xgb_model=str(path), top_k=2),
     )
@@ -256,7 +256,9 @@ def _build_with_bad_rows(block_rows, threads):
 
     if block_rows <= 0:
         raise ValueError("bad selected tile")
-    return make_case(Workload("softmax", "softmax", dict(rows=16, columns=128))).build(BLOCK_M=block_rows, BLOCK_N=128, threads=threads)
+    return make_case(Workload("gemm", "gemm", dict(m=16, n=128, k=128, transpose_b=True))).build(
+        block_M=32 * block_rows, block_N=64, block_K=32, num_stages=0, thread_num=threads, enable_rasteration=False
+    )
 
 
 @pytest.mark.parametrize("all_failed", [False, True])
@@ -271,7 +273,7 @@ def test_gpu_frozen_selection_keeps_elaboration_failures_and_original_indices(tm
     monkeypatch.setenv("TILELANG_DISABLE_CACHE", "1")
     monkeypatch.setenv("TILELANG_AUTO_TUNING_DISABLE_CACHE", "1")
     monkeypatch.setenv("TILELANG_AUTO_TUNING_CPU_COUNTS", "2")
-    case = make_case(Workload("softmax", "softmax", dict(rows=16, columns=128)))
+    case = make_case(Workload("gemm", "gemm", dict(m=16, n=128, k=128, transpose_b=True)))
     case.build = _build_with_bad_rows
     configs = [dict(block_rows=b, threads=128) for b in [0, -1 if all_failed else 1, 2]]
     report = dict(
@@ -361,7 +363,7 @@ def test_invalid_sampling_fractions(fraction):
 
 
 def test_sampling_is_reproducible_and_independent_of_pool_order():
-    workload = canonical_workload(Workload("softmax", "softmax", dict(rows=16, columns=128)))
+    workload = canonical_workload(Workload("gemm", "gemm", dict(m=16, n=128, k=128, transpose_b=True)))
     plans = [sampling_plan(workload, GRID, fraction=0.5, seed=seed) for seed in (123, 123, 456)]
     assert plans[0] == plans[1]
     assert plans[0]["selected_indices"] != plans[2]["selected_indices"]

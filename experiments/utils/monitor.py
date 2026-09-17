@@ -1,9 +1,10 @@
 """Run local CUDA workers with recorded, continuous contention checks."""
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 import json
 import os
+import re
 import signal
 from pathlib import Path
 import subprocess
@@ -19,7 +20,10 @@ def snapshot():
 
     return dict(
         timestamp=datetime.now(timezone.utc).isoformat(),
-        gpus=query("query-gpu", ["index", "uuid", "name", "utilization.gpu", "memory.used", "clocks.sm", "temperature.gpu", "power.draw"]),
+        gpus=query(
+            "query-gpu",
+            ["index", "uuid", "name", "compute_cap", "utilization.gpu", "memory.used", "clocks.sm", "temperature.gpu", "power.draw"],
+        ),
         processes=query("query-compute-apps", ["gpu_uuid", "pid", "process_name", "used_memory"]),
     )
 
@@ -57,8 +61,47 @@ def visible_gpus(observation):
     return result
 
 
-def idle_gpus(observation):
-    return [g for g in visible_gpus(observation) if not foreign_processes(observation, g["uuid"]) and float(g["utilization.gpu"]) <= 5]
+def idle_gpus(observation, *, ignore_pid=None):
+    return [
+        g
+        for g in visible_gpus(observation)
+        if not [p for p in foreign_processes(observation, g["uuid"]) if int(p["pid"]) != ignore_pid] and float(g["utilization.gpu"]) <= 5
+    ]
+
+
+def matches_cuda_device(gpu, device):
+    arch = device.target["arch"].removeprefix("sm_").rstrip("af")
+    return gpu["compute_cap"].replace(".", "") == arch and bool(
+        re.search(device.expected_device_pattern or ".*", gpu["name"], re.IGNORECASE)
+    )
+
+
+def select_cuda_gpu(device):
+    """Select within the caller's visible set using architecture and model."""
+    # A coordinator may retain an idle context after primitive profiling.
+    # The monitor also excludes that PID while rejecting every foreign worker.
+    for gpu in idle_gpus(snapshot(), ignore_pid=os.getpid()):
+        if matches_cuda_device(gpu, device):
+            return gpu
+    raise RuntimeError(f"no matching idle visible CUDA GPU for {device.name} ({device.target['arch']})")
+
+
+@contextmanager
+def cuda_device(device):
+    """Bind one study target, restoring visibility before the next target."""
+    if device.worker or device.target["kind"] != "cuda":
+        yield
+        return
+    gpu = select_cuda_gpu(device)
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    os.environ["CUDA_VISIBLE_DEVICES"] = gpu["uuid"]
+    try:
+        yield
+    finally:
+        if visible is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = visible
 
 
 def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wait_idle=True):

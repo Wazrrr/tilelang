@@ -25,10 +25,10 @@ _PARAMETERS = {
     "grouped_gemm": ({"batch_sizes", "n", "k"}, {"transpose_b"}),
     "attention": ({"batch", "heads", "sequence", "dim"}, {"causal"}),
     "kda_chunk_o": ({"batch", "heads", "sequence", "dim", "value_dim", "chunk_size"}, set()),
-    "softmax": ({"rows", "columns"}, set()),
+    "gemm_fp8": ({"m", "n", "k"}, {"transpose_b"}),
 }
 
-_DTYPES = ("float16", "bfloat16", "float32")
+_DTYPES = ("float16", "bfloat16", "float32", "float8_e4m3fn", "float8_e5m2")
 
 
 @dataclass(frozen=True)
@@ -189,13 +189,17 @@ def load_manifest(data):
 
 
 def support_reason(workload, device):
-    if workload.op in ("gemm", "grouped_gemm"):
+    if workload.op in ("gemm", "gemm_fp8", "grouped_gemm"):
         from experiments.families import family_module
 
         reason = family_module(workload.op, "spaces").support_reason(workload)
         if reason:
             return reason
     kind = device.target["kind"]
+    if workload.op == "gemm_fp8" and kind == "cuda":
+        version = device.target["arch"].removeprefix("sm_").rstrip("af")
+        if not version.isdigit() or int(version) < 89:
+            return "FP8 GEMM requires native FP8 tensor cores (CUDA sm_89 or newer)"
     if kind not in ("cuda", "hip"):
         return (
             None

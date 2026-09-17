@@ -14,9 +14,10 @@ and N and K are shared by every group. The independent reference computes each
 product in FP32 and casts to the input dtype. Both elementwise and relative-norm
 checks use 0.01 tolerance. FLOPs are `2 * sum(Mi) * N * K`.
 
-The family is opt-in: use its commands or `experiments.suite --families grouped_gemm`.
+Use its family commands or `experiments.suite --families grouped_gemm` to run it alone.
 Its frozen holdouts live in [grouped_gemm_final.json](../manifests/grouped_gemm_final.json).
-The default four-family/eight-case matrix and historical results are unchanged.
+Grouped GEMM is included in the default five-family/ten-case matrix; historical
+results retain their original scope.
 
 ## One configuration set
 
@@ -77,19 +78,20 @@ python -m experiments.grouped_gemm.tiletune.run --suite full --device hopper --p
 # Check the two example launches through all system variants.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
   python -m experiments.grouped_gemm.system.run --variant all \
-  --config-indices 60 125 --output experiments/results/grouped_gemm/system-v1
+  --config-indices 60 125 --output experiments/grouped_gemm/results/system-v1
 
-# Compare complete pools and reuse saved baselines across TileTune revisions.
+# Collect baselines explicitly, then reuse them across TileTune revisions.
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.grouped_gemm.tiletune.run --suite full --device hopper --run-baselines
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
   python -m experiments.grouped_gemm.tiletune.run --suite full --device hopper \
-  --baseline-root experiments/results/baselines \
-  --output experiments/results/grouped_gemm/tiletune-revision-a
+  --output experiments/grouped_gemm/results/tiletune-revision-a
 
 # Exhaustive oracle collection and audited heuristic export.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
   python -m experiments.common.brute_force \
   --manifest experiments/manifests/grouped_gemm_final.json --device hopper \
-  --output experiments/results/grouped_gemm/oracle-v1
+  --output experiments/grouped_gemm/results/oracle-v1
 ```
 
 System modes are `baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined`.
@@ -97,12 +99,15 @@ Here the `grouped` mode groups kernel compilations; every mode executes grouped
 matrix multiplication. Multi-GPU modes require two idle devices of the same model.
 The shared runners monitor contention and record per-config failures and timings.
 
-Carver has no grouped GEMM adapter and records `unsupported`. Brute force,
+Carver uses `GroupedMatmulTemplate`, reusing MatmulTemplate for each exact group
+and summing the original traffic/wave priorities. Group metadata lookup and CTA
+interleaving are outside that baseline model; ragged groups may be rejected by
+its divisibility checks. Brute force,
 XGBoost, and TileTune use the shared comparison workflow. `full` runs the complete
 pool without claiming final acceptance; `final` requires passing development
-gates. The shared workflow collects missing baselines and reuses verified bundles
-from the same `--baseline-root` across TileTune revisions. Reusable baseline
-collection runs on local CUDA. HIP and external Ascend
+gates. Only `--run-baselines` collects or refreshes baselines; ordinary TileTune
+runs read a compatible bundle from `results/<GPU model>/baselines/`.
+Reusable baseline collection runs on local CUDA. HIP and external Ascend
 execution require separate device validation and, for Ascend, native schedules.
 No complete sweep or tuned winner is bundled with this family.
 
@@ -125,3 +130,10 @@ had foreign compute processes attached during validation.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m pytest testing/python/experiments/test_grouped_gemm.py -q
 ```
+
+TileTune receives the actual integer group sizes, offsets and padded offsets as
+`input_values`, keyed by PrimFunc parameter index. The runner checks the tensors
+against this contract before execution. Analysis resolves metadata in its own
+IR view, counts the runtime metadata loads, full padded matrix work and masked
+stores, and leaves the compiled example unchanged. See
+[model contracts](../model_contracts.md).

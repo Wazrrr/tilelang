@@ -69,11 +69,11 @@ python -m experiments.gemm.tiletune.run --suite final --device hopper --plan
 
 # Compile/check a smoke subset, retaining original pool indices.
 python -m experiments.gemm.tiletune.run --suite smoke --device hopper \
-  --output experiments/results/gemm/smoke
+  --output experiments/gemm/results/smoke
 
 # Compare TileTune, Carver, XGBoost and brute force on development shapes.
 python -m experiments.gemm.tiletune.run --suite development --device hopper \
-  --output experiments/results/gemm/development
+  --output experiments/gemm/results/development
 ```
 
 The monitored sweep disables compilation/autotune caches and checks each
@@ -100,15 +100,17 @@ took approximately 22.1 active minutes on 6–8 available GPUs.
 ```bash
 python -m experiments.gemm.system.run --variant all --plan
 python -m experiments.gemm.system.run --variant all \
-  --output experiments/results/gemm/system-v1
+  --output experiments/gemm/results/system-v1
+python -m experiments.gemm.tiletune.run --suite full --device hopper --run-baselines
 python -m experiments.gemm.tiletune.run --suite full --device hopper \
-  --baseline-root experiments/results/baselines \
-  --output experiments/results/gemm/tiletune-revision-a
+  --output experiments/gemm/results/tiletune-revision-a
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
 on both final FP16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
-Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
-explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)
+Baselines live under `results/<GPU model>/baselines/`, with `current.json` pointing
+to the saved bundle. Only `--run-baselines` collects or refreshes them; ordinary
+TileTune runs are read-only and require an existing compatible bundle.
+Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses the original GEMM policy. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

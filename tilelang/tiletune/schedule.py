@@ -25,8 +25,11 @@ from tiletune_core.schedule import repeat_transition as repeat_transition
 from tiletune_core.schedule import buffer_transition as buffer_transition
 
 
-def collect_producer_buffers(col, loop):
+def collect_producer_buffers(col, loop, *, serial=False):
     """Read actual copy regions and consumers; do not infer operand roles by name."""
+
+    # In a serial loop an in-place consumer (KDA's Q scaling, for example)
+    # cannot race a future producer. Overlapping pipelines still reject it.
 
     inside = [op for op in col.operations if in_loop(op, loop)]
     producers = [
@@ -49,7 +52,7 @@ def collect_producer_buffers(col, loop):
         if (
             not uses
             or min(uses) <= op.index
-            or any(other is not op and any(r.buffer.same_as(buffer) for r in other.writes) for other in inside)
+            or (not serial and any(other is not op and any(r.buffer.same_as(buffer) for r in other.writes) for other in inside))
         ):
             raise ValueError("unresolved producer/consumer reuse or overwrite")
         dims = [_int(r.extent) for r in region.ranges]

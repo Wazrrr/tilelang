@@ -54,11 +54,11 @@ python -m experiments.kda.tiletune.run --suite final --device hopper --plan
 
 # Analyze, compile and check a 16-config subset.
 python -m experiments.kda.tiletune.run --suite smoke --device hopper \
-  --output experiments/results/kda/smoke-v5
+  --output experiments/kda/results/smoke-v5
 
 # Audit the complete development pools on idle devices.
 python -m experiments.kda.census --device hopper --config-space expanded \
-  --wait-idle --output experiments/results/kda/census-v5
+  --wait-idle --output experiments/kda/results/census-v5
 ```
 
 The [shared runner](../common/README.md) describes brute-force collection,
@@ -81,15 +81,23 @@ They describe old kernels and pools. Current measurements belong in
 ```bash
 python -m experiments.kda.system.run --variant all --plan
 python -m experiments.kda.system.run --variant all \
-  --output experiments/results/kda/system-v1
+  --output experiments/kda/results/system-v1
+python -m experiments.kda.tiletune.run --suite full --device hopper --run-baselines
 python -m experiments.kda.tiletune.run --suite full --device hopper \
-  --baseline-root experiments/results/baselines \
-  --output experiments/results/kda/tiletune-revision-a
+  --output experiments/kda/results/tiletune-revision-a
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
 on both final FP16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
-Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
-explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)
+Baselines live under `results/<GPU model>/baselines/`, with `current.json` pointing
+to the saved bundle. Only `--run-baselines` collects or refreshes them; ordinary
+TileTune runs are read-only and require an existing compatible bundle.
+Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `KDAChunkTemplate`: gated Q×H and causal A×V feed a fused
+output cast. The template retains both input-dtype rounding points and exp2,
+while the original policy supplies its traffic/wave priority. Chunk sizes that
+fail its tensor-core partition rules (including the final 48-row tail case)
+produce `model_unavailable`, with no fallback. TileTune matches each lowered
+MMA/WGMMA instruction to its own measured rate; unresolved compiler schedules
+remain unscored. See [model contracts](../model_contracts.md). See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

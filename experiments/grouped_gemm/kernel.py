@@ -26,6 +26,8 @@ def make_case(workload):
         raise ValueError(reason)
     p, dtype = workload.parameters, workload.dtype
     sizes = tuple(p["batch_sizes"])
+    # AutoTuner's builder cache key requires scalar closure values.
+    sizes_csv = ",".join(map(str, sizes))
     n, k, transpose_b = p["n"], p["k"], p.get("transpose_b", False)
 
     def build(block_M, block_N, block_K, num_stages, threads):
@@ -34,7 +36,7 @@ def make_case(workload):
         return _grouped_program(
             K=k,
             N=n,
-            batch_sizes_list=sizes,
+            batch_sizes_list=tuple(map(int, sizes_csv.split(","))),
             trans_b=transpose_b,
             dtype=dtype,
             block_M=block_M,
@@ -56,4 +58,14 @@ def make_case(workload):
         ]
 
     # T.empty in the eager example already identifies the output parameter.
-    return KernelCase(build, inputs, lambda a, b, *metadata: reference(a, b, sizes, transpose_b), None, rtol=0.01, atol=0.01)
+    offsets = list(accumulate(sizes, initial=0))[:-1]
+    padded = [((size + BLOCK_M - 1) // BLOCK_M) * BLOCK_M for size in sizes]
+    return KernelCase(
+        build,
+        inputs,
+        lambda a, b, *metadata: reference(a, b, sizes, transpose_b),
+        None,
+        rtol=0.01,
+        atol=0.01,
+        input_values={"2": list(sizes), "3": offsets, "4": list(accumulate(padded, initial=0))[:-1]},
+    )

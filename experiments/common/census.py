@@ -36,7 +36,7 @@ def main(argv=None, *, family=None):
     parser.add_argument("--case-timeout", type=int, default=1800)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
-        "--output", type=Path, required=family is None, default=Path(f"experiments/results/{family}/census") if family else None
+        "--output", type=Path, required=family is None, default=Path(f"experiments/{family}/results/census") if family else None
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--plan", action="store_true")

@@ -2,12 +2,12 @@
 
 Named family suites now use `study.py`: it collects one immutable baseline bundle
 per family/device, then runs only TileTune for each repeat/revision. See the
-[baseline reuse and system commands](../README.md#reuse-baselines-across-tiletune-revisions).
+[baseline reuse and system commands](../README.md#collect-baselines-explicitly-then-run-tiletune).
 Reusable helpers live in [`../utils/`](../utils/README.md). The `comparison.py`
 commands below describe the lower-level collector; invoke named suites for
 automatic reuse across revisions.
 
-To collect only the eight final brute-force baselines on all idle H200 GPUs:
+To collect only the ten final brute-force baselines on all idle H200 GPUs:
 
 ```bash
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
@@ -42,7 +42,8 @@ The same complete domain is used for both cases and all native targets.
 | [GEMM](../gemm/README.md) | 2,304 | All 288 autotune configs; 8× expansion |
 | [FlashAttention](../flash_attention/README.md) | 320 | Single autotune config and explicit 128/128 launch |
 | [KDA chunk output](../kda/README.md) | 720 | All 90 autotune configs; 8× expansion |
-| [Online softmax](../softmax/README.md) | 224 | Default launch; example has no autotune grid |
+| [FP8 GEMM](../gemm_fp8/README.md) | 2,304 | All 288 example schedules; 8× expansion |
+| [Grouped GEMM](../grouped_gemm/README.md) | 192 | Fixed 64-row tiles and native example knobs |
 
 Shapes, dtype, causal mode and chunk size are workload properties. They do not
 multiply the config count. Full sweeps have no cap, protected subset or
@@ -59,15 +60,15 @@ source hashes and pools, and start new runs in new output directories.
 
 GEMM fixes the example's Square/panel-10 defaults. Attention keeps its example's
 QK/PV policies, fragment recurrence and causal loop bound. KDA keeps `block_S`
-equal to the chunk size. Softmax retains the example's two passes and tail mask.
-There are no alternative experiment kernels or supplementary vector/FP8
-families. The shared configuration code accepts only the `expanded` pool.
+equal to the chunk size. FP8 preserves FP32 accumulation and FP8 output.
+Grouped GEMM preserves runtime metadata lookup, padding and group masks.
+There are no alternative experiment kernels or supplementary vector families. The shared configuration code accepts only the `expanded` pool.
 
 Inspect a space without loading TileLang or querying hardware:
 
 ```bash
 python -m experiments.common.run --plan --devices ampere \
-  --workloads gemm_square attention_noncausal kda_chunk_regular softmax_aligned \
+  --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square \
   --config-space expanded
 ```
 
@@ -83,7 +84,7 @@ python -m experiments.common.census \
 Repeat the exact command with `--resume` to reuse completed shards. Interrupted
 shards are preserved and retried in a fresh process. The census reports compile
 failures, correctness, distinct generated device-source hashes and best timings
-over the declared pool. `current_best_ms` is null for the four example pools,
+over the declared pool. `current_best_ms` is null for the five family pools,
 which no longer have a retained current prefix. Source identity is a
 conservative diagnostic; it does not prove binary equivalence. Census compilation
 is development/oracle work, not free input to either online tuner.
@@ -93,7 +94,7 @@ Run the sampled baseline comparison on the full expanded pools:
 ```bash
 bash experiments/common/run_accelerator.sh \
   --device ampere \
-  --workloads gemm_square attention_causal kda_chunk_regular softmax_aligned \
+  --workloads gemm_square attention_causal kda_chunk_regular gemm_fp8_square \
   --methods tiletune xgboost --top-k 20 --xgb-sample-fraction 0.1 \
   --wait-idle --output experiments/results/expanded-comparison
 ```
@@ -112,7 +113,7 @@ Parameter ranges and constraints live in each family’s `spaces.py`.
 See [validation](../validation.md) for the checks performed on the organized scripts.
 
 This suite separates the mathematical workload, candidate grid, hardware model,
-and execution environment. GEMM, FlashAttention, KDA and softmax share this
+and execution environment. GEMM, FP8 GEMM, FlashAttention, KDA and grouped GEMM share this
 protocol and the same example builders in system and tuner-quality studies.
 
 ```mermaid
@@ -149,7 +150,7 @@ requests, source hashes and native build before reusing completed cases; use a
 new output directory after code changes. The earlier single-method runner below
 remains available.
 
-By default, the comparison uses the same eight final cases and the family-owned
+By default, the comparison uses the same ten final cases and the family-owned
 two-training/one-validation shape splits as the named suites. A custom
 `--manifest` or explicit `--train-scales` / `--validation-scales` / `--test-scales`
 selects a scaled-shape study. Missing scale lists then default to training at
@@ -190,10 +191,17 @@ published results are historical and do not measure this sampled protocol.
 `--method brute_force` on the single-method runner measures every supplied
 candidate independently of TileTune analysis. The older `exhaustive` method
 still means exhaustive **report-only TileTune** analysis/measurement. The new
-Carver adapter accepts plain, nonbatched FP16/BF16 GEMMs, including transpose
-variants, and maps the exact supplied grid to the existing policy. It reports
-unsupported for fused/batched GEMMs and other operations. The experiment
-workload schema rejects FP8 dtypes; their supplementary runners are retired.
+Carver adapters accept the example's plain FP16/BF16 GEMM and attention workloads,
+and map the exact supplied grid to the existing policies. The attention adapter
+uses the unchanged `FlashAttentionTemplate` graph and records its omitted softmax,
+causal work and streamed-KV behavior. Rejection of the entire pool produces
+`model_unavailable` with all candidate records, no replacement shortlist, and N/A
+Oracle@K; reusable baseline bundles retain this outcome. The original Carver
+model does not support Blackwell; its adapter records `unsupported` before GPU
+execution, allowing other methods to proceed. FP8 reuses MatmulTemplate; grouped
+GEMM and chunk KDA use new mathematical templates with the original policy
+equations. See [model contracts](../model_contracts.md) for their feasibility
+limits and approximations.
 
 Each test case records method outcomes, an independent oracle table, ranking
 diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics
@@ -227,7 +235,7 @@ Run a small correctness/runner check on a Hopper machine:
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m experiments.common.run \
     --devices hopper --smoke --method exhaustive --config-indices 0 \
-    --workloads gemm_square attention_noncausal kda_chunk_regular softmax_aligned
+    --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square
 ```
 
 Run top-K selection over each workload's full default grid:
@@ -236,7 +244,7 @@ Run top-K selection over each workload's full default grid:
 python -m experiments.common.run --devices hopper --method top_k --top-k 20
 ```
 
-`--smoke` selects the eight family-owned development cases, preserving the grid. `--config-indices` explicitly
+`--smoke` selects the ten family-owned development cases, preserving the grid. `--config-indices` explicitly
 selects a subset and retains original indices. Remove that argument for full-grid
 experiments. The default method is `analyze`; it performs no compilation,
 benchmarking, or device-limit query. Supply device limits in a manifest to obtain
@@ -250,7 +258,7 @@ Compilation/benchmark timing excludes process startup and reference generation;
 
 ## Workloads
 
-The standalone shared runner uses the same eight FP16 final cases as the family
+The standalone shared runner uses the same ten FP16/FP8 final cases as the family
 suites. BF16 and supported boundary shapes can be supplied explicitly for
 correctness checks; they do not add default experiment cases:
 
@@ -259,7 +267,8 @@ correctness checks; they do not add default experiment cases:
 | `gemm_square`, `gemm_square_large` | 4096³ and 8192³, pretransposed B, FP32 accumulation |
 | `attention_noncausal`, `attention_causal` | BSHD online attention with the example causal bounds |
 | `kda_chunk_regular`, `kda_chunk_tails` | Chunk output with equal and unequal head dimensions |
-| `softmax_aligned`, `softmax_irregular` | Two-pass online softmax with masked column tails |
+| `gemm_fp8_square`, `gemm_fp8_square_large` | FP8 operands/output with FP32 accumulation |
+| `grouped_gemm_aligned`, `grouped_gemm_ragged` | Packed groups with runtime metadata and masked stores |
 
 Each family's `kernel.py` and `reference.py` supply its builder,
 input generator, reference, output indices, and correctness contract.
@@ -291,7 +300,7 @@ architecture. Reports include the actual device name and runtime version.
 | Target | Execution code | Current timing model |
 | --- | --- | --- |
 | Ampere | Native CUDA + `tvm_ffi` | MMA and asynchronous-copy probes; compiler-ordered software pipelines use `pipeline_time` |
-| Hopper | Native CUDA + `tvm_ffi` | WGMMA, supported pure-TMA producer pipelines and existing primitive profiles |
+| Hopper | Native CUDA + `tvm_ffi` | Instruction-specific MMA/WGMMA rates, supported pure-TMA pipelines and metadata-resolved serial regions |
 | Blackwell | Native CUDA + `tvm_ffi`, regular `T.gemm`/MMA path | Explicit MMA/synchronous-copy profiling; TCGEN05/TMEM and Blackwell warp-specialized schedules need separate models |
 | MI308 | Native HIP + `tvm_ffi` in a ROCm build | Traffic/waves with supplied or queried CU capacities; timing needs a measured HIP profile and supported schedule |
 | Huawei 910 | External worker contract | An Ascend worker and Cube/Vector/L0/L1/UB resource/schedule model must be provided |
@@ -315,8 +324,8 @@ exhaustive-best performance overall. The linked report also records latency
 miscalibration, register-gate coverage losses, chunk-KDA ranking failures, and
 the cases where analysis costs more than exhaustive tuning.
 
-Those historical runs used explicit FNUZ dtypes for MI308 FP8. FP8 experiments
-are now retired. HIP compiler remarks retain VGPR, AGPR and SGPR counts separately.
+Those historical runs used explicit FNUZ dtypes for MI308 FP8. The current
+FP8 family uses E4M3FN/E5M2 and needs separate HIP validation. HIP compiler remarks retain VGPR, AGPR and SGPR counts separately.
 Symbolic or absent counters stay unknown; register spill counts are not converted
 to byte counts. On CDNA3, the generic register count is available only when both
 architectural VGPR and AGPR observations are numeric. Occupancy remains a logical
@@ -492,10 +501,10 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 
 ## Compact five-target suites
 
-`python -m experiments.suite --suite smoke --plan` plans four families
-with deterministic subsets. Development uses eight cases and up to 256
+`python -m experiments.suite --suite smoke --plan` plans five families
+with deterministic subsets. Development uses ten cases and up to 256
 configurations; final uses the complete `expanded` pools (GEMM 2,304,
-FlashAttention 320, KDA 720 and softmax 224 per case) and three seeds. See
+FlashAttention 320, KDA 720, FP8 GEMM 2,304 and grouped GEMM 192 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 
@@ -508,3 +517,10 @@ GEMM uses regular square matrices with M=N=K and pretransposed B=(N,K):
 
 Smoke uses the 1024-square case. The final dimensions are recorded in
 [`five_target_final.json`](../manifests/five_target_final.json).
+
+Analysis version 23 accepts verified read-only integer `input_values`, resolves
+metadata-dependent addresses without rewriting the executable, and preserves
+actual loads and masked stores. Profile version 6 measures both MMA and WGMMA on
+Hopper and selects rates by exact instruction and dtype. See
+[model contracts](../model_contracts.md) for the distinction between exact work
+counts, estimated latency and unsupported scheduling.

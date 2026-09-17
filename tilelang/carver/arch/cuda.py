@@ -90,6 +90,7 @@ ada_tensorcore_supported = [
     ("int8", "int32"),
     ("float8_e5m2", "float32"),
     ("float8_e4m3", "float32"),
+    ("float8_e4m3fn", "float32"),
 ]
 hopper_tensorcore_supported = ada_tensorcore_supported
 

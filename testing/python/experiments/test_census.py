@@ -46,12 +46,12 @@ def test_census_resumes_interruption_preserves_indices_and_checks_provenance(tmp
 
     monkeypatch.setattr(census, "run_case", run_case)
     root = tmp_path / "census"
-    args = ["--workloads", "softmax_aligned", "--config-indices", "0", "6", "223", "--shard-size", "2", "--output", str(root)]
+    args = ["--workloads", "gemm_square", "--config-indices", "0", "6", "223", "--shard-size", "2", "--output", str(root)]
     with pytest.raises(RuntimeError, match="interrupted worker"):
         census.main(args)
     assert census.main(args + ["--resume"]) == 0
     assert calls == [[0, 6], [223], [223]]
-    directory = root / "ampere" / "softmax_aligned"
+    directory = root / "ampere" / "gemm_square"
     preserved = list(directory.glob("shard-00001.interrupted-*"))
     assert len(preserved) == 1
     assert (preserved[0] / "worker.log").read_text() == "original worker log"

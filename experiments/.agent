@@ -6,10 +6,10 @@ Follow the organization in [gemm/](gemm/README.md) and
 The [experiment README](README.md) describes the current execution protocol;
 [utils/README.md](utils/README.md) describes shared helpers.
 
-The current final matrix has four families and eight FP16 cases. Preserve existing
+The current final matrix has five families and ten cases (FP16 and FP8). Preserve existing
 cases, pools, and recorded results unless the task explicitly changes them.
-The FP8/vector experiment families and their separate manifests/CLI adapters are
-retired; add future families through this guide rather than restoring them.
+Softmax and the old vector families are retired. FP8 GEMM uses the current
+family structure and authoritative FP8 example.
 Shared-runner defaults come from the same family-owned case definitions.
 Historical alignment reports describe earlier checkpoints; use current source
 and family READMEs for the active contracts.
@@ -58,8 +58,8 @@ alternative local kernels, or compatibility wrappers for removed paths.
 
 For orientation, GEMM uses `example_gemm_advanced_autotune.py` with A=(M,K),
 B=(N,K), `transpose_B=True`, and the shared-memory epilogue. Attention uses
-`example_mha_fwd_bshd.py`. KDA uses `examples/kda/chunk_o.py`; softmax uses
-`examples/online_softmax/online_softmax.py`. These details are part of the kernel
+`example_mha_fwd_bshd.py`. KDA uses `examples/kda/chunk_o.py`; FP8 GEMM uses
+`examples/gemm_fp8/example_tilelang_gemm_fp8.py`. These details are part of the kernel
 contract, not tuning-method choices.
 
 ## Define cases and the single expanded pool first
@@ -89,7 +89,7 @@ contract, not tuning-method choices.
   they do not define a new pool. All tuning methods use the same ordered pool.
 
 Current counts per case are GEMM 2,304 (288 × 8), attention 320, KDA 720 (90 × 8),
-and softmax 224. Counts describe declared candidates, not guaranteed compilable
+FP8 GEMM 2,304 (288 × 8), and grouped GEMM 192. Counts describe declared candidates, not guaranteed compilable
 or distinct generated kernels. An intentional pool change needs new identities
 and results; review `common/spaces.py::SPACE_VERSION` and frozen manifests.
 
@@ -103,11 +103,11 @@ Check all integration points; adding a folder alone is insufficient:
 | `common/spec.py` | Parameter schema, dtype/semantic validation, support checks, and family-owned default workloads. |
 | `suite.py::CORE_OPS` and `common/system.py::OPS` | Register named-suite and system commands. Core membership changes the default matrix. |
 | `utils/cli.py::SOURCE_ROOTS` | Include family and authoritative example sources in run provenance; exclude generated results. |
-| `utils/baseline_store.py::EXAMPLES` / `measurement_sources` | Hash the actual example and all relevant dependencies for baseline invalidation. |
+| `utils/baseline_store.py::EXAMPLES` / `measurement_sources` | Record the actual example and its dependencies as baseline provenance. |
 | `xgboost/data.py::make_context` | Include the authoritative example in learned-model source identity too. |
 | `manifests/`, `common/acceptance.py`, relevant tests | Keep frozen workloads and acceptance scope consistent with the intended matrix. |
 
-`common/acceptance.py` currently recognizes eight cases across four operations
+`common/acceptance.py` currently recognizes ten cases across five operations
 as the complete family matrix. If the task expands that matrix, update this
 assumption, manifests, tests, and documentation together. Do not silently relabel
 an expanded or partial study as the old complete final study.
@@ -127,23 +127,41 @@ at least two idle devices of the same model. With only one available, report
 those variants as unverified rather than claiming a complete ablation.
 
 TileTune studies compare brute force, Carver, XGBoost, and TileTune. Collect the
-three baselines once per family/device/experiment identity with `common/study.py`
-and `utils/baseline_store.py`. Reuse the same `--baseline-root` across TileTune
-revisions and use a new run output directory for each revision. Verify completion
+three baselines explicitly with the family command's `--run-baselines` option,
+using `common/study.py` and `utils/baseline_store.py`. Store them under
+`<family>/results/<GPU model>/baselines/`; `current.json` identifies the current
+complete bundle. Ordinary TileTune runs must only read saved baselines, including
+when their identity is incompatible: request an explicit baseline rerun instead
+of collecting automatically. Only an explicit baseline invocation may update the
+current reference, and only after success. Preserve previous bundles referenced
+by earlier studies. Use a new run output directory for each revision. Verify completion
 manifests and artifact hashes; incomplete collections cannot become baselines.
 
-Kernel, pool, shape, dtype, compiler/JIT/profiler, toolchain/runtime/driver, GPU,
-measurement, or baseline-setting changes invalidate the relevant baseline
-identity. Changes confined to TileTune ranking, repeat seeds, or evaluation K
-reuse it. Preserve saved baseline costs instead of charging collection again.
+Reuse saved baselines for the same workload, dtype, GPU and configuration pool.
+Source/compiler/runtime changes, timing settings, baseline settings, TileTune
+ranking changes, repeat seeds and evaluation K do not force recollection. Keep
+their original provenance and costs; only an explicit `--run-baselines` invocation
+refreshes them. A missing or different requested case/pool requires explicit
+collection, never an automatic baseline run.
 Follow the existing fixed baseline seed and XGBoost training/validation protocol;
 do not train on final oracle labels or resample baselines for each TileTune repeat.
 
-The reusable collection workflow currently runs on local CUDA. Carver currently
-supports CUDA FP16/BF16 GEMM only. Record `unsupported` with a reason for other
-families; do not substitute a heuristic and label it Carver. Planning another
-backend does not establish that it runs. The offline result comparator itself
-is independent of backend.
+The reusable collection workflow currently runs on local CUDA. Reuse existing
+Carver templates where available. Grouped GEMM and chunk KDA have explicit
+mathematical templates; FP8 reuses MatmulTemplate. Preserve Carver's policy
+scores and feasibility limits, recording any template approximations. An entirely
+rejected pool records `model_unavailable` with a complete rejection report and
+no fallback. Blackwell remains unsupported by the existing policy. Do not present
+a new template as a precise instruction-timing model. See model_contracts.md.
+
+Ampere/Hopper/Blackwell share the same example builders and ordered pools.
+Keep system planning independent of a CUDA architecture. Let the compiler choose
+the matrix/copy lowering: smoke evidence must inspect emitted instructions rather
+than demand WGMMA, TCGEN05 or TMA merely because the device supports them. Include
+grouped GEMM in matrix-instruction checks. Bind local study targets independently
+with `utils.monitor.cuda_device`, honoring the caller's visible GPUs and restoring
+visibility for the next target. Cross-compilation proves compilation only;
+correctness and performance require the corresponding hardware.
 
 ## GPU monitoring and recorded results
 
@@ -178,8 +196,9 @@ Oracle@K = best valid latency in the full oracle
 Higher is better; 1.0 matches the oracle. Failed candidates consume slots without
 refilling K; no valid candidate is N/A; fewer than K candidates is a shortfall.
 Keep ranking curves separate from actual saved online selections and tuning cost.
-Read timings from the matching oracle; do not mix incompatible measurement
-identities or rerun GPUs for an offline comparison.
+Read every comparison timing from the saved oracle for that case and GPU.
+Record provenance differences without rejecting reuse or rerunning GPUs for an
+offline comparison.
 
 ## Validation and commands
 
@@ -193,12 +212,15 @@ python -m experiments.gemm.tiletune.run --suite full --device hopper --plan
 # Let the monitored runner select GPUs; the wrapper must not restrict it to one.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
   python -m experiments.gemm.system.run --variant all \
-  --config-indices 1534 1535 --output experiments/results/gemm/system-check-v1
+  --config-indices 1534 1535 --output experiments/gemm/results/system-check-v1
 
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
   python -m experiments.gemm.tiletune.run --suite full --device hopper \
-  --baseline-root experiments/results/baselines \
-  --output experiments/results/gemm/tiletune-revision-a
+  --run-baselines
+
+.agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
+  python -m experiments.gemm.tiletune.run --suite full --device hopper \
+  --output experiments/gemm/results/tiletune/revision-a
 
 python -m experiments.compare_results --oracle PATH_TO_ORACLE_JSON \
   --tiletune PATH_TO_TILETUNE_JSON --carver PATH_TO_CARVER_JSON \

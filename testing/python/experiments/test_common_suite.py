@@ -28,7 +28,7 @@ SETTINGS = dict(
 
 
 def test_plan_does_not_import_gpu_runtime():
-    code = "from experiments.common.spec import default_workloads; from experiments.common import run; import sys; assert 'torch' not in sys.modules; assert 'tilelang' not in sys.modules; assert len(default_workloads()) == 8"
+    code = "from experiments.common.spec import default_workloads; from experiments.common import run; import sys; assert 'torch' not in sys.modules; assert 'tilelang' not in sys.modules; assert len(default_workloads()) == 10"
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
@@ -39,13 +39,13 @@ def test_default_workloads_match_the_family_suites():
     assert default_workloads(smoke=True) == core_cases("development")
 
 
-@pytest.mark.parametrize("op", ["rmsnorm", "reduce_sum", "elementwise", "gemm_fp8"])
+@pytest.mark.parametrize("op", ["rmsnorm", "reduce_sum", "elementwise", "softmax"])
 def test_retired_operations_are_rejected(op):
     with pytest.raises(ValueError, match="Unknown operation"):
         Workload("retired", op, {})
 
 
-@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+@pytest.mark.parametrize("dtype", ["float8_e4m3fnuz", "float8_e5m2fnuz"])
 def test_retired_fp8_dtypes_are_rejected(dtype):
     with pytest.raises(ValueError, match="Unsupported workload dtype"):
         replace(default_workloads()[0], dtype=dtype)
@@ -86,6 +86,30 @@ def test_request_and_result_cannot_substitute_a_different_experiment():
     assert validate_result(result, request) == result
     result["workload"] = "another_kernel"
     with pytest.raises(ValueError, match="identity"):
+        validate_result(result, request)
+
+
+@pytest.mark.parametrize("method", ["carver", "top_k", "random"])
+def test_all_ranked_worker_results_enforce_the_frozen_selection(method):
+    w, d = default_workloads(True)[0], Device("hopper", TARGETS["hopper"])
+    request = make_request(w, d, dict(method=method, top_k=2))
+    result = dict(
+        version=1,
+        request_id=request["request_id"],
+        workload=w.name,
+        device=d.name,
+        status="completed",
+        correctness="passed",
+        winner=dict(index=0, latency_ms=1),
+        selection=dict(requested_k=2, selected_count=2, selected_indices=[0, 1]),
+        device_observation=dict(name="test", target=TARGETS["hopper"]),
+    )
+    assert validate_result(result, request) == result
+    result["selection"].update(selected_indices=[0, 1, 2], selected_count=3)
+    with pytest.raises(ValueError, match="selection budget"):
+        validate_result(result, request)
+    result["selection"].update(selected_indices=[1, 2], selected_count=2)
+    with pytest.raises(ValueError, match="selection budget"):
         validate_result(result, request)
 
 
@@ -134,11 +158,11 @@ def test_missing_dtype_profile_keeps_analysis_available(tmp_path):
 
 def test_small_signal_corruption_fails_correctness():
     import torch
-    from experiments.common.kernels import make_case
 
-    case = make_case(Workload("softmax", "softmax", dict(rows=2, columns=4096)))
-    inputs = case.inputs("cpu", torch.Generator().manual_seed(123))
-    expected = case.reference(*inputs)
+    from experiments.utils.kernel import KernelCase
+
+    case = KernelCase(None, None, None, None)
+    expected = torch.full((2, 4096), 1e-4)
     assert expected.max() < 0.02
     with pytest.raises(AssertionError):
         case.check([torch.zeros_like(expected)], [expected])
@@ -153,7 +177,7 @@ def test_kernel_build_closures_obey_autotuner_contract(name):
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])
 
 
-def test_gpu_softmax_boundaries():
+def test_gpu_fp8_boundaries():
     import torch
     import tilelang
     from experiments.common.kernels import make_case
@@ -161,9 +185,9 @@ def test_gpu_softmax_boundaries():
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
-    w = Workload("softmax", "softmax", dict(rows=7, columns=93))
+    w = Workload("fp8", "gemm_fp8", dict(m=37, n=93, k=160), dtype="float8_e4m3fn")
     case = make_case(w)
-    program = case.build(BLOCK_M=2, BLOCK_N=128, threads=128)
+    program = case.build(block_M=64, block_N=64, block_K=32, num_stages=0, threads=128, enable_rasteration=False)
     kernel = tilelang.compile(program, target=current_target(), execution_backend="tvm_ffi", out_idx=case.out_idx)
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
     result = kernel(*inputs)

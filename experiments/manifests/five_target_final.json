@@ -159,22 +159,61 @@
       "config_space": "expanded"
     },
     {
-      "name": "softmax_aligned",
-      "op": "softmax",
+      "name": "gemm_fp8_square",
+      "op": "gemm_fp8",
       "parameters": {
-        "rows": 1536,
-        "columns": 4096
+        "m": 4096,
+        "n": 4096,
+        "k": 4096,
+        "transpose_b": true
+      },
+      "dtype": "float8_e4m3fn",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "gemm_fp8_square_large",
+      "op": "gemm_fp8",
+      "parameters": {
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "transpose_b": true
+      },
+      "dtype": "float8_e4m3fn",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "grouped_gemm_aligned",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          64,
+          128,
+          256
+        ],
+        "n": 8192,
+        "k": 8192,
+        "transpose_b": false
       },
       "dtype": "float16",
       "configs": null,
       "config_space": "expanded"
     },
     {
-      "name": "softmax_irregular",
-      "op": "softmax",
+      "name": "grouped_gemm_ragged",
+      "op": "grouped_gemm",
       "parameters": {
-        "rows": 1031,
-        "columns": 1537
+        "batch_sizes": [
+          63,
+          77,
+          111,
+          280
+        ],
+        "n": 4096,
+        "k": 8192,
+        "transpose_b": true
       },
       "dtype": "float16",
       "configs": null,

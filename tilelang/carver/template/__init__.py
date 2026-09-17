@@ -7,3 +7,5 @@ from .elementwise import ElementwiseTemplate  # noqa: F401
 from .general_reduce import GeneralReductionTemplate  # noqa: F401
 from .flashattention import FlashAttentionTemplate  # noqa: F401
 from .conv import ConvTemplate  # noqa: F401
+from .grouped_matmul import GroupedMatmulTemplate  # noqa: F401
+from .kda_chunk import KDAChunkTemplate  # noqa: F401

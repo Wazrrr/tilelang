@@ -8,7 +8,7 @@ import sys
 import time
 
 from experiments.utils.io import write_json
-from experiments.common.spec import Workload, Device, TARGETS, configuration_space
+from experiments.common.spec import Workload
 from experiments.families import FAMILIES, family_module
 
 VARIANTS = {
@@ -29,11 +29,12 @@ def system_plan(family, *, workloads=None, variants=None, indices=None):
         cases = [w for w in cases if w.name in workloads]
     from experiments.utils.cli import select_configs
 
+    pool = family_module(OPS[family], "spaces").get_configs()
     return [
         dict(
             workload=w.to_dict(),
             variant=v,
-            indices=select_configs(configuration_space(w, Device("hopper", TARGETS["hopper"]))["configs"], indices)[0],
+            indices=select_configs(pool, indices)[0],
         )
         for w in cases
         for v in (variants or VARIANTS)
@@ -57,6 +58,7 @@ def worker(request_path, output):
     pool = family_module(w.op, "spaces").get_configs()
     indices, configs = select_configs(pool, request["indices"])
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(settings["seed"]))
+    case.check_input_values(inputs)
     references = {d: case.reference(*(value.to(f"cuda:{d}") for value in inputs)) for d in devices}
     for d in devices:
         torch.cuda.synchronize(d)

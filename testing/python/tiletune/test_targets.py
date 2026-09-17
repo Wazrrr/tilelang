@@ -212,16 +212,15 @@ def test_hip_compile_reuses_frozen_ir_and_preserves_flag_ownership(monkeypatch):
     from tilelang.autotuner.param import CompileArgs
     from tilelang.tiletune.runtime import TileTuneSession
     from tilelang.contrib.hip_resource_info import KernelResourceUsage
-    from experiments.common.spec import Workload
-    from experiments.common.kernels import make_case
+    from regression_kernels import softmax_program
 
     target = {"kind": "hip", "mcpu": "gfx942", "thread_warp_size": 64}
     configs = [{"BLOCK_M": 1, "BLOCK_N": 128, "threads": 128}, {"BLOCK_M": 2, "BLOCK_N": 128, "threads": 128}]
-    case = make_case(Workload("softmax", "softmax", dict(rows=32, columns=128)))
     built = []
 
     def elaborate(**kwargs):
-        func = case.build(**kwargs).with_attr("tilelang_compile_flags", ["-DFUNCTION_FLAG=1"])
+        func = softmax_program(32, 128, "float16", kwargs["BLOCK_M"], kwargs["BLOCK_N"], kwargs["threads"], 1, 1)
+        func = func.with_attr("tilelang_compile_flags", ["-DFUNCTION_FLAG=1"])
         built.append(func)
         return func
 

@@ -51,7 +51,7 @@
     "relative_spread": 0.10184773107059532
   },
   "reference": {
-    "path": "/m-coriander/coriander/ziren/code/tilelang/experiments/results/h200-gemm-expanded-2304-20260916-v1/gemm_square_large/oracle.json",
+    "path": "/m-coriander/coriander/ziren/code/tilelang/experiments/gemm/results/H200/baselines/oracle-20260916/gemm_square_large/oracle.json",
     "sha256": "e07932d7237b674890916a3a4ca55fe8d2306970f2701309d3e65ea6de0e19c2"
   },
   "identity": {
@@ -1053,11 +1053,11 @@
   "contention": {
     "poll_interval_seconds": 1,
     "policy": "discard and retry any shard with an observed foreign compute process",
-    "observations_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/results/h200-gemm-expanded-2304-20260916-v1/gpu_observations.jsonl",
+    "observations_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/gemm/results/H200/baselines/oracle-20260916/gpu_observations.jsonl",
     "accepted_attempts_observed_uncontended": true,
     "limitation": "process polling cannot exclude interference shorter than the polling interval"
   },
-  "validation_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/results/h200-gemm-expanded-2304-20260916-v1/gemm_square_large/attempt-1789539508874395303",
+  "validation_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/gemm/results/H200/baselines/oracle-20260916/gemm_square_large/attempt-1789539508874395303",
   "sweep_winner_gpu": {
     "index": "5",
     "uuid": "GPU-6b9761c5-beeb-b620-45cf-7fef8ebc6aeb",
@@ -1112,12 +1112,12 @@
     ],
     "same_config_as_previous_example": false,
     "experiment_example_ir_and_cuda_identical_for_same_config": true,
-    "report_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/results/h200-gemm-expanded-2304-20260916-v1/report.md",
-    "summary_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/results/h200-gemm-expanded-2304-20260916-v1/final-summary.json",
+    "report_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/gemm/results/H200/baselines/oracle-20260916/report.md",
+    "summary_path": "/m-coriander/coriander/ziren/code/tilelang/experiments/gemm/results/H200/baselines/oracle-20260916/final-summary.json",
     "summary_sha256": "607bf51ba6a19efdad4061719d722661706b5c8225af79c9d5f75c5cd411dd95"
   },
   "timing_audit": {
-    "path": "/m-coriander/coriander/ziren/code/tilelang/experiments/results/h200-gemm-expanded-2304-20260916-v1/audit.json",
+    "path": "/m-coriander/coriander/ziren/code/tilelang/experiments/gemm/results/H200/baselines/oracle-20260916/audit.json",
     "sha256": "9038f3c7da44781a89dec4f8bc4d113bdb2eeda56ba055de0efd38b310e4963b"
   }
 }

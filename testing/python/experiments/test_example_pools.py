@@ -10,7 +10,7 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 320, "kda_chunk_o": 720, "softmax": 224}
+COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 2304, "grouped_gemm": 192}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 
 
@@ -49,13 +49,16 @@ def test_every_example_config_and_explicit_default_is_included():
 
     fa = family_module("attention", "spaces").get_configs()
     kda = family_module("kda_chunk_o", "spaces").get_configs()
-    softmax = family_module("softmax", "spaces").get_configs()
+    fp8 = family_module("gemm_fp8", "spaces").get_configs()
+    from examples.gemm_fp8.example_gemm_fp8_tiletune import get_configs as fp8_configs
+
     assert len(fa_configs()) == 1 and all(c in fa for c in fa_configs())
     assert dict(block_M=128, block_N=128, num_stages=1, threads=128) in fa
     assert len(kda_configs()) == 90 and len(kda) == 8 * len(kda_configs())
     assert all(c in kda for c in kda_configs())
     assert dict(block_DK=64, block_DV=64, num_stages=0, threads=256) in kda
-    assert dict(BLOCK_M=1, BLOCK_N=8192, threads=128) in softmax
+    assert len(fp8_configs()) == 288 and all(c in fp8 for c in fp8_configs())
+    assert len(fp8) == 8 * len(fp8_configs())
 
 
 def test_every_case_split_and_frozen_manifest_use_the_single_pool():

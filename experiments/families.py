@@ -6,12 +6,12 @@ FAMILIES = {
     "gemm": "gemm",
     "attention": "flash_attention",
     "kda_chunk_o": "kda",
-    "softmax": "softmax",
+    "gemm_fp8": "gemm_fp8",
     "grouped_gemm": "grouped_gemm",
 }
 
-# Preserve the frozen four-family study; additional families are opt-in.
-DEFAULT_OPS = ("gemm", "attention", "kda_chunk_o", "softmax")
+# The active matrix; archived studies retain their frozen manifests.
+DEFAULT_OPS = tuple(FAMILIES)
 
 
 def family_module(op, component):

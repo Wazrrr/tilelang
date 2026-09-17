@@ -165,6 +165,25 @@ def _operation(op, phase, domains, col):
         for region in regions:
             if region.buffer.scope() != "global":
                 continue
+            # Resolve singleton CTA coordinates before bounding parallel axes.
+            # Otherwise an interval analyzer may union unrelated arms of a
+            # metadata lookup and turn one row tile into a span across groups.
+            fixed = {v: tir.const(lo, v.dtype) for v, (lo, n) in domains.items() if n == 1}
+            if fixed:
+                from .src.ir import Region
+
+                ana = Analyzer()
+                region = Region(
+                    region.buffer,
+                    [
+                        Range.from_min_extent(
+                            ana.simplify(tir.stmt_functor.substitute(r.min, fixed)),
+                            ana.simplify(tir.stmt_functor.substitute(r.extent, fixed)),
+                        )
+                        for r in region.ranges
+                    ],
+                    region.precision,
+                )
             intervals = {v: tvm.arith.IntervalSet(lo, lo + n - 1) for v, (lo, n) in active.items()}
             if op.kind == "elementwise" and not rectangular_scalar_access(region, op.loops):
                 raise UnresolvedRegion("unresolved_memory_bounds", "nonrectangular scalar access requires an exact address-count model")

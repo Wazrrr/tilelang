@@ -3,30 +3,33 @@
 Each kernel family owns its cases, implementations, references, configuration
 spaces, and experiment commands.
 
+Saved measurements belong under each kernel's `results/` directory. The
+[result guide](RESULTS.md) identifies the saved GEMM oracle, baseline storage,
+validation records and historical data.
+
 For a new kernel family, follow the [agent guide](.agent). For existing kernels,
 start in the family folder:
 
-| Family | Final FP16 cases | Commands and implementation |
+| Family | Final cases | Commands and implementation |
 | --- | --- | --- |
 | GEMM | 4096³ and 8192³ | [gemm/](gemm/README.md) |
 | FlashAttention | Noncausal and causal | [flash_attention/](flash_attention/README.md) |
 | KDA | Chunk output with equal and unequal head dimensions | [kda/](kda/README.md) |
-| Softmax | Aligned and irregular rows | [softmax/](softmax/README.md) |
-| Grouped GEMM (opt-in) | Aligned and ragged groups, NN and NT layouts | [grouped_gemm/](grouped_gemm/README.md) |
+| FP8 GEMM | 4096³ and 8192³, E4M3FN | [gemm_fp8/](gemm_fp8/README.md) |
+| Grouped GEMM | Aligned and ragged groups, NN and NT layouts | [grouped_gemm/](grouped_gemm/README.md) |
 
-Grouped GEMM follows the same family structure with a 192-config pool. Select it
-through its family commands or `--families grouped_gemm`; the default four-family,
-eight-case matrix remains unchanged. Its holdouts have a separate frozen manifest.
+The default matrix contains these five families and ten cases. FP8 GEMM replaces
+softmax; historical softmax results and its archived source remain available.
 
 ## Layout
 
 ```text
 experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
-├── grouped_gemm/            Opt-in concatenated grouped forward GEMM study
+├── grouped_gemm/            Concatenated grouped forward GEMM study
 ├── flash_attention/         Same family conventions
 ├── kda/                     Direct chunk-output example study
-├── softmax/                 Direct online-softmax example study
+├── gemm_fp8/                Direct FP8 GEMM example study
 ├── common/                  Shared execution and comparison protocol
 ├── utils/                   Monitoring, baseline storage, result I/O and shared helpers
 ├── xgboost/                 Shared sampling, training, and prediction
@@ -44,14 +47,14 @@ create a result directory. Run commands from the repository root.
 python -m experiments.gemm.tiletune.run --suite final --device ampere --plan
 python -m experiments.flash_attention.tiletune.run --suite smoke --device ampere --plan
 python -m experiments.kda.tiletune.run --suite development --device ampere --plan
-python -m experiments.softmax.tiletune.run --suite development --device ampere --plan
+python -m experiments.gemm_fp8.tiletune.run --suite development --device hopper --plan
 ```
 
 A development run uses two test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
-The four final kernels call their [example builders directly](example_alignment.md).
+All five families call their example builders directly; each family README identifies its source.
 Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, and softmax 224 configs per case. There is no cap or structural
+KDA 720, FP8 GEMM 2,304 and grouped GEMM 192 configs per case. There is no cap or structural
 prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
@@ -68,13 +71,17 @@ exhaustive oracle. Final selection uses K=20 and `pipeline_time`; XGBoost uses
 10% of each of two training pools and one validation pool per family. Its
 settings are 600 rounds, depth 10, learning rate 0.05, subsampling 0.8, and
 validation patience 20. Baselines use one fixed seed (123 by default) and are
-reused across TileTune's three repeats and later revisions. Each new TileTune
+read without updates across TileTune's three repeats and later revisions. Each new TileTune
 winner receives seven checks. Preparation costs are recorded separately.
-The existing Carver adapter supports CUDA GEMM; attention, KDA and softmax record
-`unsupported` with its reason rather than substitute another model.
+Carver uses existing matmul and attention templates, plus new grouped-matmul
+and chunk-KDA templates. Its policy equations and feasibility limits are retained.
+FP8 uses the matmul template with its actual dtype. Blackwell remains unsupported
+by Carver. Attention, ragged groups and KDA tails can have fully rejected pools;
+these record `model_unavailable`, complete rejection reports and N/A Oracle@K.
+See [model contracts](model_contracts.md) for modeling scope and limitations.
 
 The family command checks acceptance for its requested cases and targets. Its
-report identifies the scope; full five-target final acceptance requires all four
+report identifies the scope; full five-target final acceptance requires all five
 families, all five targets, and all three seeds. Final execution requires a
 passing development report covering the requested cases and targets.
 
@@ -86,43 +93,61 @@ python -m experiments.suite --suite development --devices ampere \
   --output experiments/results/development-v1
 ```
 
-Use `--families gemm softmax` to select families or `--device-manifest FILE`
+Use `--families gemm gemm_fp8` to select families or `--device-manifest FILE`
 for explicit worker environments and profiles. The five targets are A100,
 H200, B200/GB200, MI355X, and Ascend 910B/A2. Native implementations and calibrated
 profiles still need device validation; Ascend requires supplied native grids
 and its external worker. Planning a target does not establish hardware support.
 The reusable baseline workflow currently executes on local CUDA devices.
+Ampere, Hopper and Blackwell use the same example kernels, config pools and
+commands; select `--device ampere`, `hopper` or `blackwell`. Each local target
+selects a matching idle GPU within `CUDA_VISIBLE_DEVICES`, and keeps its own
+baseline measurements. System ablations detect the selected GPU at runtime.
+See the [CUDA portability review](cuda_portability.md) for compilation evidence
+and the remaining hardware validation.
 The lower-level `experiments.common.comparison` and external worker protocol
 remain available for independently configured HIP/Ascend studies.
 
-## Reuse baselines across TileTune revisions
+## Collect baselines explicitly, then run TileTune
 
 ```bash
-python -m experiments.suite --suite full --devices hopper \
-  --baseline-root experiments/results/baselines \
-  --output experiments/results/tiletune/revision-a
+# Collect brute force, Carver and XGBoost; this command does not run TileTune.
+python -m experiments.gemm.tiletune.run --suite full --device hopper --run-baselines
 
-# After changing TileTune, use a new run directory and the same baseline root.
-python -m experiments.suite --suite full --devices hopper \
-  --baseline-root experiments/results/baselines \
-  --output experiments/results/tiletune/revision-b
+# Ordinary runs only read the saved baseline bundle.
+python -m experiments.gemm.tiletune.run --suite full --device hopper \
+  --output experiments/gemm/results/tiletune/revision-a
+python -m experiments.gemm.tiletune.run --suite full --device hopper \
+  --output experiments/gemm/results/tiletune/revision-b
 ```
 
-`full` uses all eight final cases and complete pools without asserting final
-acceptance. Family commands support the same flags. Baselines are collected once
-per family/device/experiment identity under `baseline-root/TARGET/FAMILY/HASH/`.
+The shared `full` suite uses all ten final cases and complete pools; a family
+command uses that family's two cases, without asserting final acceptance.
+Baselines are collected explicitly
+per family/device/experiment identity under
+`experiments/FAMILY/results/GPU/baselines/runs/`. The GPU folder uses the observed
+model, for example `H200`. `baselines/current.json` identifies the current complete
+bundle. The optional `--baseline-root` override keeps the custom
+`ROOT/TARGET/FAMILY/` convention.
 The bundle contains all oracle outcomes, Carver rankings or explicit unsupported
 records, frozen XGBoost models, training/validation records and test rankings.
 Its completion manifest hashes the artifacts; reuse verifies them without writing
 to the bundle. Incomplete collections are archived and never treated as complete.
 
-The identity covers example kernels, ordered pools, shapes/dtypes, compiler
-sources/toolchain, runtime/driver, GPU model and measurement settings. Baseline
-implementations, XGBoost settings and `--baseline-seed` also identify the bundle.
-Changes confined to `tilelang/tiletune/` or `tiletune_core/`, TileTune repeat seeds,
-and evaluation K reuse the same baselines. Compiler/JIT/profiler or kernel changes
-select a new bundle. The kernel compiler must be rebuilt after native source
-changes; source identity does not rebuild the installed compiler.
+Reuse checks the requested workload, dtype, GPU and configuration pool. Changing
+TileTune code, seeds, top K, compiler/runtime, timing settings or baseline settings
+does not force recollection. The complete original source, environment and training
+metadata remain recorded as provenance. Offline Oracle@K comparisons use only the
+saved oracle timings, and report provenance differences without rejecting reuse.
+Use `--run-baselines` explicitly when new baseline measurements are wanted.
+
+Only `--run-baselines` collects or refreshes baseline measurements. A successful
+collection updates `current.json`; a failed collection leaves the previous
+reference and its measurements intact. Earlier bundles remain immutable so
+previous TileTune comparisons remain reproducible. Missing or incompatible
+baselines stop an ordinary TileTune invocation with an explicit rerun instruction;
+they never trigger automatic collection. This storage change does not itself
+rerun any baseline.
 
 New run directories contain `baselines.json` references and per-case links to the
 three saved baselines. Only TileTune executes again. Baseline collection uses
@@ -134,8 +159,8 @@ cost. Original baseline costs are labeled as coming from the baseline bundle.
 
 ## System optimization ablations
 
-All four family `system/run.py` entry points use the shared
-[system runner](common/system.py) and the same two final FP16 cases/pools:
+All five family `system/run.py` entry points use the shared
+[system runner](common/system.py) and the same two final cases/pools:
 
 ```bash
 python -m experiments.kda.system.run --plan
@@ -143,7 +168,7 @@ python -m experiments.kda.system.run --variant all \
   --output experiments/results/kda/system-v1
 ```
 
-Replace `kda` with `gemm`, `flash_attention` or `softmax`. `--variant all` runs
+Replace `kda` with `gemm`, `flash_attention`, `gemm_fp8` or `grouped_gemm`. `--variant all` runs
 `baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined` in fresh processes
 with cold caches, identical inputs and numerical checks. Pipeline overlaps
 compilation/benchmarking; grouped combines compilation; multi_gpu distributes
@@ -210,10 +235,9 @@ in `spaces.py`. Each family owns its structural legality and equivalence rules;
 `common/spaces.py` handles deterministic enumeration and audit records. Counts
 are declared candidates before compilation and correctness validation.
 
-All four final families use only `expanded`, with the example's native parameter
+All five final families use only `expanded`, with the example's native parameter
 names. Their full grids include the original example configs/defaults. Explicit
-CUDA/HIP configs must be members of these grids. Separate vector workloads
-retain their existing presets. The
+CUDA/HIP configs must be members of these grids. Retired vector workloads are outside this matrix. The
 [configuration-space reference](common/README.md#configuration-spaces)
 documents counts, failure recording and index migration.
 
@@ -235,12 +259,12 @@ See [common/README.md](common/README.md) for worker and diagnostic details,
 Family `system/run.py` commands benchmark compiler execution strategies using
 the same example builders; they are separate from tuner quality.
 
-The retired FP8/vector experiments, compatibility modules, and repair-study
-runner have been removed. The shared runner also uses the eight family-owned
+The retired vector experiments, compatibility modules, and repair-study
+runner have been removed. The shared runner also uses the ten family-owned
 cases; `--smoke` chooses their development shapes.
 Use the canonical `experiments.common.*` commands and `experiments.suite`.
 Source fingerprints cover active code roots and exclude `results/`; historical
 measurements retain their original hashes. Begin a new run after code changes.
 
 See [workflow validation](workflow_validation.md) for the offline tests, GPU
-checks of all eight cases, and measured baseline-reuse verification.
+historical checks of eight cases, and measured baseline-reuse verification.

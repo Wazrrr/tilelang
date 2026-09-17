@@ -23,7 +23,11 @@ def _opaque_call(node):
 
 
 class _Collector:
-    def __init__(self, func):
+    def __init__(self, func, input_values=None):
+        from .input_values import parameter_values
+
+        self.input_values = parameter_values(func, input_values)
+        self.scalar_values = {}
         self.operations = []
         self.buffers = list(func.buffer_map.values())
         self.layouts = {}
@@ -38,6 +42,8 @@ class _Collector:
         self.parse = tvm_ffi.get_global_func("tl.tiletune.ParseOperator")
         self.access = tvm_ffi.get_global_func("tl.tiletune.GetAccessRegions")
         self.visit(func.body)
+        if any(region.buffer in self.input_values for op in self.operations for region in op.writes):
+            raise ValueError("input_values parameters must be read-only")
         for i, buffer in enumerate(self.buffers):
             if any(buffer.data.same_as(other.data) and not buffer.same_as(other) for other in self.buffers[:i]):
                 self.unknown.append("multiple buffer views share a data variable")
@@ -80,7 +86,25 @@ class _Collector:
         annotations = dict(annotations or {})
 
         def resolve(expr):
+            if self.input_values:
+                from .input_values import ValueResolver
+                from tvm.arith import Analyzer
+
+                ana = Analyzer()
+                for var, domain in self.block_domains.values():
+                    ana.bind(var, domain)
+                return ana.simplify(ValueResolver(self).visit_expr(expr))
             return tir.stmt_functor.substitute(expr, self.bindings) if self.bindings else expr
+
+        def scalar_reads(expr):
+            reads = []
+            tir.stmt_functor.post_order_visit(
+                expr,
+                lambda n: reads.append(Region(n.buffer, [Range.from_min_extent(resolve(i), 1) for i in n.indices]))
+                if isinstance(n, tir.BufferLoad)
+                else None,
+            )
+            return reads
 
         def visit(child, **kw):
             self.visit(
@@ -96,6 +120,20 @@ class _Collector:
                 visit(stmt)
         elif isinstance(node, tir.Bind):
             value = resolve(node.value)
+            if self.input_values and scalar_reads(node.value):
+                # Retain the actual metadata loads and scalar work even though
+                # their values become constants in later address expressions.
+                buffer = tir.decl_buffer((1,), str(node.var.dtype), name=str(node.var), scope="local.var")
+                store = tir.BufferStore(buffer, node.value, [0])
+                self.add(
+                    "elementwise",
+                    scalar_reads(node.value),
+                    [Region(buffer, [Range.from_min_extent(0, 1)])],
+                    store,
+                    loops,
+                    predicates,
+                    branches,
+                )
             unsafe = []
             tir.stmt_functor.post_order_visit(
                 value, lambda n: unsafe.append(n) if isinstance(n, tir.BufferLoad) or _opaque_call(n) else None
@@ -107,6 +145,20 @@ class _Collector:
                 # the original PrimFunc is retained unchanged for compilation.
                 self.bindings[node.var] = value
         elif isinstance(node, tir.For):
+            from .input_values import metadata_loop
+
+            if self.input_values and not self.active_pipeline_stages and metadata_loop(node):
+                start = _int(resolve(node.min))
+                if start is not None:
+                    previous = self.bindings.get(node.loop_var)
+                    for value in range(start, start + _int(node.extent)):
+                        self.bindings[node.loop_var] = tir.const(value, node.loop_var.dtype)
+                        visit(node.body)
+                    if previous is None:
+                        self.bindings.pop(node.loop_var, None)
+                    else:
+                        self.bindings[node.loop_var] = previous
+                    return
             node = tir.For(
                 node.loop_var, resolve(node.min), resolve(node.extent), node.kind, node.body, node.thread_binding, node.annotations
             )
@@ -155,6 +207,7 @@ class _Collector:
                 visit(node.init, annotations=annotations)
             visit(node.body, annotations=annotations)
         elif isinstance(node, tir.BufferStore):
+            original = node
             node = tir.BufferStore(node.buffer, resolve(node.value), [resolve(i) for i in node.indices])
             reads = []
             tir.stmt_functor.post_order_visit(
@@ -171,6 +224,22 @@ class _Collector:
             for index in node.indices:
                 tir.stmt_functor.post_order_visit(index, lambda n: opaque.append(n) if isinstance(n, tir.BufferLoad | tir.Call) else None)
             self.add("elementwise", reads, writes, node, loops, predicates, branches, bool(opaque))
+            if self.input_values:
+                self.operations[-1].reads = scalar_reads(original.value)
+                self.operations[-1].metadata = tir.BufferStore(original.buffer, original.value, node.indices)
+                if (
+                    node.buffer.scope() == "local.var"
+                    and not self.active_pipeline_stages
+                    and not predicates
+                    and all(kind == "4" for _, _, kind in loops)
+                    and len(node.indices) == 1
+                    and _int(node.indices[0]) == 0
+                ):
+                    self.scalar_values[node.buffer] = node.value
+                else:
+                    # Conditional or unevaluated loop writes invalidate the
+                    # previous value; never carry a stale constant past them.
+                    self.scalar_values.pop(node.buffer, None)
         elif isinstance(node, tir.Evaluate) and isinstance(node.value, tir.Call):
             call = resolve(node.value)
             op = self.parse(call, annotations)

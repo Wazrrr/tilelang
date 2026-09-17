@@ -1,10 +1,14 @@
 """Service accounting on compiler-resolved work counts."""
 
-from .profile_schema import CONSUMER_RATE_FIELDS
+from .profile_schema import CONSUMER_RATE_FIELDS, resolve_gemm_profile
 
 
 def estimate_phase_cycles(phase, profile, concurrent_ctas):
     """Apply aggregate SM rates and optional consumer/warpgroup ceilings."""
+    if phase["work"].get("gemm_flops"):
+        profile = resolve_gemm_profile(profile, phase.get("compute_participants"))
+        if profile is None:
+            return None
     terms = {}
 
     def service(amount, rate_key):

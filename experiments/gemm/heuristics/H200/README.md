@@ -22,7 +22,7 @@ GPUs. Two contended sweep shards were discarded and retried. Monitoring
 records absence of observed foreign compute processes; it cannot exclude
 interference between observations.
 
-See the [full report](../../../results/h200-gemm-expanded-2304-20260916-v1/report.md)
+See the [full report](../../results/H200/baselines/oracle-20260916/report.md)
 for exact timing settings, comparison with both example baselines, all failures,
 per-GPU variation, provenance and raw logs. Previous records are archived under
 `experiments/results/gemm-pre-single-pool-20260916/heuristics/`.

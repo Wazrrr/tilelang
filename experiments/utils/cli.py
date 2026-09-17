@@ -32,14 +32,14 @@ SOURCE_ROOTS = (
     "experiments/grouped_gemm",
     "experiments/flash_attention",
     "experiments/kda",
-    "experiments/softmax",
+    "experiments/gemm_fp8",
     "experiments/xgboost",
     "experiments/ascend",
     "examples/gemm",
     "examples/grouped_gemm",
     "examples/flash_attention",
     "examples/kda",
-    "examples/online_softmax",
+    "examples/gemm_fp8",
     "tiletune_core",
     "tilelang/tiletune",
     "tilelang/carver",
@@ -53,7 +53,7 @@ def source_hashes(kernel_source, *extra_sources):
     paths = {root / name for name in (kernel_source, *extra_sources)}
     paths.update((root / "experiments").glob("*.py"))
     for directory in SOURCE_ROOTS:
-        paths.update((root / directory).rglob("*.py"))
+        paths.update(p for p in (root / directory).rglob("*.py") if "results" not in p.relative_to(root).parts)
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(paths)}
 
 

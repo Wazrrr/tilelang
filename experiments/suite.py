@@ -22,12 +22,12 @@ CORE_OPS = DEFAULT_OPS
 CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
 CORE_TARGETS = ("ampere", "hopper", "blackwell", "mi355x", "ascend910b")
 BUDGETS = {
-    "smoke": dict(cases=4, configurations=16, seeds=[123], compare=False),
-    "development": dict(cases=8, configurations=256, seeds=[123], compare=True),
-    "final": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
+    "smoke": dict(cases=5, configurations=16, seeds=[123], compare=False),
+    "development": dict(cases=10, configurations=256, seeds=[123], compare=True),
+    "final": dict(cases=10, configurations=None, seeds=[123, 456, 789], compare=True),
     # A complete expanded-pool benchmark can precede the development gates.
     # It uses the final shapes/protocol without claiming final acceptance.
-    "full": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
+    "full": dict(cases=10, configurations=None, seeds=[123, 456, 789], compare=True),
 }
 DEVICE_PATTERNS = dict(ampere="A100", hopper="H200", blackwell="B200|GB200", mi355x="MI355X", ascend910b="910B|A2")
 
@@ -42,8 +42,6 @@ def core_cases(suite, families=None):
     cases = [w for op in ops for w in family_module(op, "cases").cases(holdout=suite in ("full", "final"))]
     if suite in ("full", "final"):
         frozen = json.loads(Path(__file__).with_name("manifests").joinpath("five_target_final.json").read_text())["workloads"]
-        if "grouped_gemm" in ops:
-            frozen += json.loads(Path(__file__).with_name("manifests").joinpath("grouped_gemm_final.json").read_text())["workloads"]
         frozen = [w for w in frozen if w["op"] in ops]
         if [w.to_dict() for w in cases] != frozen:
             raise ValueError("final family definitions differ from the frozen holdout manifest")
@@ -88,7 +86,7 @@ def study_plan(suite, devices=None, *, families=None, config_space=None):
         budget=budget,
         metric="pipeline_time",
         top_k=20,
-        dtype="float16",
+        dtypes=sorted({w.dtype for w in tests}),
         devices=[d.to_dict() for d in planned],
         splits={k: [w.to_dict() for w in v] for k, v in splits.items()},
         subsets=audits,
@@ -150,34 +148,34 @@ def _existing_or_run(request, output):
 def execute_smoke(plan, output, settings):
     from experiments.common.spec import Workload
     from experiments.common.comparison import wait_for_idle
+    from experiments.utils.monitor import cuda_device
 
     results = []
     for description in plan["devices"]:
         device = Device(**description)
-        for item in plan["splits"]["test"]:
-            workload = Workload(**item)
-            if device.name in plan["unavailable"]:
-                result = dict(device=device.name, workload=workload.name, status="unavailable", reason=plan["unavailable"][device.name])
-            else:
-                if not device.worker:
-                    wait_for_idle(output)
-                request = make_request(
-                    workload,
-                    device,
-                    dict(settings, method="smoke", metric="pipeline_time", top_k=20, seed=123, trace=False, memory_regime="streaming"),
-                )
-                result = _existing_or_run(request, output / device.name / workload.name)
-            results.append(result)
-            write_json(output / "smoke.json", dict(version=1, results=results))
+        with cuda_device(device):
+            for item in plan["splits"]["test"]:
+                workload = Workload(**item)
+                if device.name in plan["unavailable"]:
+                    result = dict(device=device.name, workload=workload.name, status="unavailable", reason=plan["unavailable"][device.name])
+                else:
+                    if not device.worker:
+                        wait_for_idle(output)
+                    request = make_request(
+                        workload,
+                        device,
+                        dict(settings, method="smoke", metric="pipeline_time", top_k=20, seed=123, trace=False, memory_regime="streaming"),
+                    )
+                    result = _existing_or_run(request, output / device.name / workload.name)
+                results.append(result)
+                write_json(output / "smoke.json", dict(version=1, results=results))
     return int(any(r["status"] != "smoke_passed" for r in results))
 
 
-def execute_comparison(plan, output, settings, *, baseline_root=None, baseline_seed=123):
+def execute_comparison(plan, output, settings, *, baseline_root=None, baseline_seed=123, run_baselines=False):
     from experiments.common.study import execute
 
-    return execute(
-        plan, output, settings, baseline_root=baseline_root or Path("experiments/results/baselines").resolve(), baseline_seed=baseline_seed
-    )
+    return execute(plan, output, settings, baseline_root=baseline_root, baseline_seed=baseline_seed, run_baselines=run_baselines)
 
 
 def main(argv=None, *, family=None):
@@ -194,13 +192,13 @@ def main(argv=None, *, family=None):
         help="Core families use expanded; final/full use the complete frozen pools",
     )
     parser.add_argument("--device-manifest", type=Path, help="JSON list of explicit Device objects, including external worker argv")
-    parser.add_argument("--output", type=Path, default=Path("experiments/results") / (f"{family}/study" if family else "five-target-study"))
+    parser.add_argument("--output", type=Path, help="Run output; family commands default to their own results directory")
     parser.add_argument(
         "--baseline-root",
         type=Path,
-        default=Path("experiments/results/baselines"),
-        help="Shared immutable baselines across TileTune run directories",
+        help="Override family-owned GPU-specific baseline storage (ROOT/TARGET/FAMILY)",
     )
+    parser.add_argument("--run-baselines", action="store_true", help="Explicitly collect/refresh baselines only; do not run TileTune")
     parser.add_argument(
         "--baseline-seed", type=int, default=123, help="Fixed XGBoost collection/training seed, independent of TileTune repeats"
     )
@@ -227,29 +225,32 @@ def main(argv=None, *, family=None):
         parser.error("positive top-k and nonnegative baseline seed required")
     if args.suite == "final" and args.top_k != 20:
         parser.error("final acceptance uses K=20; use --suite full for other online budgets")
-    plan.update(top_k=args.top_k, baseline_seed=args.baseline_seed, baseline_root=str(args.baseline_root.resolve()))
+    if args.run_baselines and args.suite == "smoke":
+        parser.error("--run-baselines requires a comparison suite, such as --suite full")
+    baseline_root = args.baseline_root.resolve() if args.baseline_root else None
+    plan.update(
+        top_k=args.top_k,
+        baseline_seed=args.baseline_seed,
+        baseline_root=str(baseline_root) if baseline_root else None,
+        baseline_action="collect" if args.run_baselines else "read_only",
+    )
     if args.plan:
         print(json.dumps(plan, indent=2))
         return 0
     settings = {k: getattr(args, k) for k in ("workers", "warmup", "rep", "timeout", "case_timeout")}
     if any(v <= 0 for v in settings.values()):
         parser.error("execution budgets must be positive")
-    if not args.freeze:
-        import os
-        from experiments.utils.monitor import snapshot, idle_gpus
+    if args.output is None:
+        from datetime import datetime, timezone
 
-        if "CUDA_VISIBLE_DEVICES" not in os.environ and any(d.target["kind"] == "cuda" and not d.worker for d in devices):
-            import re
-
-            available = [g for g in idle_gpus(snapshot()) if any(re.search(d.expected_device_pattern or ".*", g["name"]) for d in devices)]
-            if not available:
-                parser.error("no matching idle CUDA GPU; retry when one is available")
-            os.environ["CUDA_VISIBLE_DEVICES"] = available[0]["uuid"]
+        root = Path("experiments") / args.families[0] / "results" if len(args.families) == 1 else Path("experiments/results/studies")
+        category = "baseline-collection" if args.run_baselines else "tiletune"
+        args.output = root / category / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     output = args.output.resolve()
     freeze(plan, output, settings)
     if args.freeze:
         return 0
-    if args.suite == "final":
+    if args.suite == "final" and not args.run_baselines:
         gate = json.loads(args.development_report.read_text()) if args.development_report else {}
         if (
             gate.get("suite") != "development"
@@ -266,7 +267,9 @@ def main(argv=None, *, family=None):
     return (
         execute_smoke(plan, output, settings)
         if args.suite == "smoke"
-        else execute_comparison(plan, output, settings, baseline_root=args.baseline_root.resolve(), baseline_seed=args.baseline_seed)
+        else execute_comparison(
+            plan, output, settings, baseline_root=baseline_root, baseline_seed=args.baseline_seed, run_baselines=args.run_baselines
+        )
     )
 
 

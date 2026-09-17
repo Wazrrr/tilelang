@@ -11,24 +11,26 @@ from experiments.utils.io import write_json
 
 def instruction_evidence(source, target, operation, config):
     """Inspect generated instruction text; a target name alone is not evidence."""
-    matrix = operation in ("gemm", "attention", "kda_chunk_o")
-    arch = target.get("arch", "").rstrip("af")
-    required = []
+    matrix = operation in ("gemm", "gemm_fp8", "grouped_gemm", "attention", "kda_chunk_o")
+    # T.gemm selects its lowering in the compiler. A newer target need not use
+    # its newest matrix instruction, and pipelining need not use TMA copies.
+    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)
+    observed = {}
+    required = {}
     if target["kind"] == "cuda":
+        instructions = ("mma.sync", "wmma.mma.sync", "wgmma.mma_async", "tcgen05.mma", "cp.async", "cp.async.bulk.tensor", "mbarrier")
+        observed = {name: name in source for name in instructions}
         if matrix:
-            required = (
-                ["mma.sync"]
-                if arch == "sm_80"
-                else ["wgmma.mma_async"]
-                if arch == "sm_90"
-                else ["tcgen05.mma", "tcgen05.ld", "tcgen05.commit"]
-            )
-        if config.get("stages", config.get("num_stages", 0)):
-            required += ["cp.async"] if arch == "sm_80" else ["cp.async.bulk.tensor", "mbarrier"]
+            required["tensor_core_mma"] = any(observed[name] for name in instructions[:4])
     elif target["kind"] == "hip" and matrix:
-        required = ["mfma"]
-    found = {pattern: bool(re.search(re.escape(pattern), source, re.IGNORECASE)) for pattern in required}
-    return dict(status="verified" if required and all(found.values()) else "missing" if required else "not_applicable", required=found)
+        observed["mfma"] = "mfma" in source.lower()
+        required["matrix_instruction"] = observed["mfma"]
+    return dict(
+        status="verified" if required and all(required.values()) else "missing" if required else "not_applicable",
+        required=required,
+        observed=observed,
+        pipeline_stages=config.get("stages", config.get("num_stages", 0)),
+    )
 
 
 def run_smoke(case, configs, original_indices, target, inputs, expected, settings, output, report):

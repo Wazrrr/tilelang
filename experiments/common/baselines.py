@@ -1,6 +1,38 @@
 """Common-grid baselines with explicit workload support boundaries."""
 
-from experiments.gemm.carver import carver_rank as carver_rank, carver_support_reason as carver_support_reason
+from importlib import import_module
+
+
+def carver_target_support_reason(target):
+    """Respect the unchanged CUDA model's architecture boundary before launch."""
+    if target["kind"] != "cuda":
+        return "the existing Carver comparison adapter requires CUDA"
+    arch = target.get("arch", "")
+    version = arch.removeprefix("sm_").rstrip("af")
+    # Original precision dispatch covers Volta, Ampere, Ada and Hopper only.
+    # Do not map Blackwell to an older GPU just to obtain a baseline score.
+    if not version.isdigit() or not 70 <= int(version) <= 90:
+        return f"the unchanged Carver CUDA model does not support {arch}; no substitute architecture is used"
+    return None
+
+
+def carver_support_reason(workload, device):
+    from experiments.families import FAMILIES
+
+    family = FAMILIES.get(workload.op)
+    if family is None:
+        return "no Carver template is registered for this operation"
+    return import_module(f"experiments.{family}.carver").carver_support_reason(workload, device)
+
+
+def carver_rank(workload, device, configs, top_k):
+    reason = carver_support_reason(workload, device)
+    if reason:
+        raise ValueError(reason)
+    from experiments.families import FAMILIES
+
+    family = FAMILIES[workload.op]
+    return import_module(f"experiments.{family}.carver").carver_rank(workload, device, configs, top_k)
 
 
 def exhaustive_selection(configs):

@@ -13,19 +13,19 @@ def model_target(target):
     return Target(target)
 
 
-def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True):
+def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True, thread_key="thread_num"):
     from tilelang import tvm
 
     Target = tvm.target.Target
     from tilelang.carver.arch import CUDA
     from tilelang.carver.matmul_analysis import get_tensorized_func_and_tags
     from tilelang.carver.roller.policy import TensorCorePolicy
-    from tilelang.carver.template import MatmulTemplate
+    from tilelang.carver.template.grouped_matmul import ExplicitArchMatmul
     from tilelang.tiletune.ranking import rank_records, select_top_k
 
     arch = CUDA(model_target(target))
-    template = MatmulTemplate(
-        M=m, N=n, K=k, trans_A=transpose_a, trans_B=transpose_b, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32"
+    template = ExplicitArchMatmul(
+        M=m, N=n, K=k, trans_A=transpose_a, trans_B=transpose_b, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32", _arch=arch
     )
     func, tags = get_tensorized_func_and_tags(template.equivalent_function(), arch.target, allow_gemv=True)
     if func is None or not tags:
@@ -41,7 +41,7 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
         td = policy.compute_tile_dict([config["block_M"], config["block_N"]], steps)
         valid = td.valid and policy.check_tile_shape_isvalid(td)
         if valid:
-            valid = all(policy._assign_block_size(node, td, config["thread_num"]) is not None for node in policy.ordered_nodes)
+            valid = all(policy._assign_block_size(node, td, config[thread_key]) is not None for node in policy.ordered_nodes)
         # Exactly DefaultPolicy.dfs_smem_tile's priority, evaluated at the supplied
         # reduction step. Do not expand tiles/steps or substitute TileTune estimates.
         score = float((td.traffic + 1) * td.num_wave) if valid else None
@@ -86,8 +86,11 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
 
 
 def carver_support_reason(workload, device):
-    if device.target["kind"] != "cuda":
-        return "the existing Carver comparison adapter requires CUDA"
+    from experiments.common.baselines import carver_target_support_reason
+
+    reason = carver_target_support_reason(device.target)
+    if reason:
+        return reason
     if workload.op != "gemm" or workload.dtype not in ("float16", "bfloat16"):
         return "the existing Carver comparison adapter supports FP16/BF16 GEMM only"
     from experiments.gemm.spaces import support_reason
