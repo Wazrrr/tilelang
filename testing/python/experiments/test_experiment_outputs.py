@@ -28,7 +28,7 @@ def test_all_variants_share_one_version_directory(tmp_path, monkeypatch):
     root = tmp_path / "run"
     assert system.main(["--family", "gemm", "--output", str(root), "--config-indices", "0", "1"]) == 0
     comparison = json.loads((root / "comparison.json").read_text())
-    assert len(comparison) == 10
+    assert len(comparison) == 25
     assert all((root / row["workload"] / row["variant"] / "summary.json").is_file() for row in comparison)
     with pytest.raises(FileExistsError):
         system.main(["--family", "gemm", "--output", str(root)])

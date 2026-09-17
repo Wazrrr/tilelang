@@ -1,10 +1,16 @@
-"""Aligned and ragged grouped GEMMs with independent model and final shapes."""
+"""Grouped GEMMs for common MoE decode, prefill, and up/down projections."""
 
 
 def cases(holdout=False):
     from experiments.common.spec import Workload
 
-    shapes = ((8192, 8192), (4096, 8192)) if holdout else ((512, 512), (768, 512))
+    shapes = (
+        ("decode", [1, 2, 4, 8] if holdout else [1, 1, 2, 4], 2048, 7168, False),
+        ("prefill", [16, 32, 48, 64] if holdout else [8, 16, 24, 32], 2048, 7168, False),
+        ("aligned", [64, 128, 256] if holdout else [32, 64, 128], 2048, 7168, False),
+        ("down_aligned", [64, 128, 256] if holdout else [32, 64, 128], 7168, 2048, True),
+        ("ragged", [63, 77, 111, 280] if holdout else [31, 47, 81, 129], 7168, 2048, True),
+    )
     return [
         Workload(
             "grouped_gemm_" + role,
@@ -12,7 +18,7 @@ def cases(holdout=False):
             dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b),
             config_space="expanded",
         )
-        for (role, sizes, transpose_b), (n, k) in zip((("aligned", [64, 128, 256], False), ("ragged", [63, 77, 111, 280], True)), shapes)
+        for role, sizes, n, k, transpose_b in shapes
     ]
 
 
@@ -27,8 +33,8 @@ def training_cases():
             config_space="expanded",
         )
         for split, sizes, n, k, transpose_b in (
-            ("train_a", [32, 96], 256, 256, False),
-            ("train_b", [47, 81, 129], 384, 256, True),
-            ("validation", [65, 127], 256, 384, False),
+            ("train_a", [16, 32, 64], 2048, 7168, False),
+            ("train_b", [15, 31, 65], 7168, 2048, True),
+            ("validation", [24, 40, 72], 2048, 7168, False),
         )
     ]

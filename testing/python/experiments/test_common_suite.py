@@ -28,7 +28,11 @@ SETTINGS = dict(
 
 
 def test_plan_does_not_import_gpu_runtime():
-    code = "from experiments.common.spec import default_workloads; from experiments.common import run; import sys; assert 'torch' not in sys.modules; assert 'tilelang' not in sys.modules; assert len(default_workloads()) == 10"
+    code = (
+        "from experiments.common.spec import default_workloads; from experiments.common import run; import sys; "
+        "assert 'torch' not in sys.modules; assert 'tilelang' not in sys.modules; "
+        "assert len(default_workloads()) == 25"
+    )
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
@@ -129,7 +133,7 @@ def test_target_grids_preserve_workload_semantics():
     grid = [{"block_m": 128, "block_n": 256, "k_l1": 64}]
     device = Device("ascend910", TARGETS["ascend910"], configs={workload.name: grid})
     assert configurations(workload, device) == grid
-    assert workload.parameters == dict(m=1024, n=1024, k=1024, transpose_b=True)
+    assert workload.parameters == dict(m=64, n=4096, k=4096, transpose_b=True)
     with pytest.raises(ValueError, match="unknown workloads"):
         load_manifest(dict(version=1, workloads=[workload.to_dict()], devices=[replace(device, configs={"typo": grid}).to_dict()]))
     with pytest.raises(ValueError, match="input dtypes"):

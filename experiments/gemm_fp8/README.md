@@ -6,13 +6,15 @@ It preserves A=(M,K), pretransposed B=(N,K), FP32 accumulation, FP8 output,
 rasterization and the example's shared-memory epilogue. Both `float8_e4m3fn`
 and `float8_e5m2` are supported; final cases use `float8_e4m3fn`.
 
-| Case | Development M=N=K | Final M=N=K |
-| --- | ---: | ---: |
-| `gemm_fp8_square` | 1024 | 4096 |
-| `gemm_fp8_square_large` | 2048 | 8192 |
+The five final cases cover 128-token continuous-batch decode, 1024-token prefill, FFN contraction,
+a 4096-token projection, and a 4096-token FFN expansion. All five use E4M3 on
+this branch. Training and validation
+use the same serving dimensions at smaller token counts. Ampere is rejected
+because it has no native FP8 tensor-core path; Hopper and Blackwell use the same
+source kernel and configuration pool.
 
-Training shapes (512,512,512) and (1024,256,768), and validation shape
-(384,768,512), are disjoint from the test shapes.
+Training shapes (32,4096,4096) and (512,14336,4096), and validation shape
+(2048,4096,4096), are disjoint from the test shapes.
 
 The single expanded pool contains 2,304 schedules, including all 288 schedules
 from `example_gemm_fp8_tiletune.py`:

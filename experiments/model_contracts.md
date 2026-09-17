@@ -1,6 +1,6 @@
 # Current workload and model contracts
 
-The active matrix has five families and ten final cases: FP16 GEMM, FP8 GEMM,
+The active matrix has five families and twenty-five final cases: FP16 GEMM, FP8 GEMM,
 FlashAttention, chunk-KDA output and grouped GEMM. Softmax source is archived in
 `results/archive/softmax-source-20260917/`; existing measurements keep their
 original meaning. All experiment kernels call their authoritative example
@@ -28,7 +28,7 @@ Analysis version 23 separates the following inputs and assumptions:
   Older cached profiles remain readable but cannot supply missing signatures.
   The 48-row KDA tail kernel needs MMA measurements even on Hopper.
 
-These changes make all ten workloads analyzable with matching profiles and
+These changes make all twenty-five workloads analyzable with matching profiles and
 supported configurations. They do not guarantee every configuration has a score.
 Unresolved compiler pipeline plans, resource limits, missing measurements and
 unsupported instructions remain explicit diagnostics. In particular, positive-

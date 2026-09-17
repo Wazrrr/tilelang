@@ -51,8 +51,8 @@ def write(path, data):
 )
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
-    assert len(plan) == 10
-    assert len({row["workload"]["name"] for row in plan}) == 2
+    assert len(plan) == 25
+    assert len({row["workload"]["name"] for row in plan}) == 5
     assert {row["variant"] for row in plan} == set(VARIANTS)
     assert all(
         row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "float16")
