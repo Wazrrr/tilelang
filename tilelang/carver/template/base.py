@@ -23,7 +23,9 @@ class BaseTemplate(ABC):
     """
 
     # The architecture of the device, inferred automatically unless explicitly set
-    _arch: TileDevice = field(default_factory=auto_infer_current_arch, init=False, repr=False)
+    # Keep automatic inference for existing callers, while allowing experiment
+    # adapters and cross-target tests to inject the architecture explicitly.
+    _arch: TileDevice = field(default_factory=auto_infer_current_arch, repr=False, kw_only=True)
 
     # The function associated with this template, initially None
     _func: PrimFunc = field(default=None, init=False, repr=False)

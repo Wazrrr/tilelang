@@ -191,17 +191,13 @@ published results are historical and do not measure this sampled protocol.
 `--method brute_force` on the single-method runner measures every supplied
 candidate independently of TileTune analysis. The older `exhaustive` method
 still means exhaustive **report-only TileTune** analysis/measurement. The new
-Carver adapters accept the example's plain FP16/BF16 GEMM and attention workloads,
-and map the exact supplied grid to the existing policies. The attention adapter
-uses the unchanged `FlashAttentionTemplate` graph and records its omitted softmax,
-causal work and streamed-KV behavior. Rejection of the entire pool produces
-`model_unavailable` with all candidate records, no replacement shortlist, and N/A
-Oracle@K; reusable baseline bundles retain this outcome. The original Carver
-model does not support Blackwell; its adapter records `unsupported` before GPU
-execution, allowing other methods to proceed. FP8 reuses MatmulTemplate; grouped
-GEMM and chunk KDA use new mathematical templates with the original policy
-equations. See [model contracts](../model_contracts.md) for their feasibility
-limits and approximations.
+Carver adapters map the exact supplied grids through one canonical template
+selector. Plain FP16/BF16 GEMM uses `MatmulTemplate`, FP8 GEMM uses the dedicated
+`FP8MatmulTemplate`, attention uses `FlashAttentionTemplate`, grouped GEMM uses
+`GroupedMatmulTemplate`, and KDA uses `KDAChunkTemplate`. Rejection of the
+entire pool produces `model_unavailable` with all candidate records and no
+replacement shortlist. See [model contracts](../model_contracts.md) for the
+remaining feasibility limits and approximations.
 
 Each test case records method outcomes, an independent oracle table, ranking
 diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics

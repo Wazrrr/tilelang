@@ -34,9 +34,9 @@ checks also apply.
 
 TileTune uses the lowered matrix instruction and exact operand/accumulator
 dtypes to select measured primitive rates. Version-6 Hopper profiles include
-both MMA and WGMMA measurements. Missing signatures stay unscored. Carver reuses
-the existing `MatmulTemplate` and tensor-core policy with FP8 operands/output;
-the E4M3FN spelling is registered in its CUDA precision table.
+both MMA and WGMMA measurements. Missing signatures stay unscored. Carver uses
+the dedicated `FP8MatmulTemplate`; it retains the kernel dtype and lowers
+E4M3FN to Carver's tensorizable E4M3 spelling internally.
 
 ```bash
 python -m experiments.gemm_fp8.system.run --plan

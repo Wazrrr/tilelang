@@ -1,47 +1,29 @@
-"""Grouped matrix multiplication as independent, possibly ragged GEMMs.
-
-The mathematical graph preserves each group's M and B layout. The caller must
-state how independent graph costs are combined for its packed kernel launch.
-"""
+"""Carver template for the padded-CTA grouped GEMM used by TileLang."""
 
 from dataclasses import dataclass, field
-from .base import BaseTemplate
+
 from .matmul import MatmulTemplate
 
 
 @dataclass
-class ExplicitArchMatmul(MatmulTemplate):
-    _arch: object = field(default=None, repr=False)
+class GroupedMatmulTemplate(MatmulTemplate):
+    """Equivalent dense domain for a grouped kernel with fixed M-sized CTAs.
 
+    The example dispatches one full M tile for every ``ceil(group_m / block_m)``
+    unit. Flattening those padded units preserves its CTA count, tensor-core
+    work, and tile storage while group offsets affect addresses only.
+    """
 
-@dataclass
-class GroupedMatmulTemplate(BaseTemplate):
-    _arch: object = field(default=None, repr=False)
-    batch_sizes: tuple = ()
-    N: int = 1
-    K: int = 1
-    trans_B: bool = False
-    in_dtype: str = "float16"
-    out_dtype: str = "float16"
-    accum_dtype: str = "float32"
+    batch_sizes: list[int] = field(default_factory=list)
+    block_m: int = 64
 
-    def initialize_function(self):
-        if not self.batch_sizes or any(type(m) is not int or m <= 0 for m in self.batch_sizes):
-            raise ValueError("grouped matmul requires positive group sizes")
-        self.groups = [
-            ExplicitArchMatmul(
-                M=m,
-                N=self.N,
-                K=self.K,
-                trans_B=self.trans_B,
-                in_dtype=self.in_dtype,
-                out_dtype=self.out_dtype,
-                accum_dtype=self.accum_dtype,
-                _arch=self.arch,
-            )
-            for m in self.batch_sizes
-        ]
-        self.set_function([group.equivalent_function() for group in self.groups])
+    def initialize_function(self) -> None:
+        if not self.batch_sizes or any(type(size) is not int or size <= 0 for size in self.batch_sizes):
+            raise ValueError("batch_sizes must contain positive integers")
+        if self.block_m <= 0:
+            raise ValueError("block_m must be positive")
+        self.M = sum((size + self.block_m - 1) // self.block_m for size in self.batch_sizes) * self.block_m
+        super().initialize_function()
 
-    def get_hardware_aware_configs(self, arch=None, topk=10):
-        return [group.get_hardware_aware_configs(arch or self.arch, topk) for group in self.groups]
+    def params_as_dict(self):
+        return {**super().params_as_dict(), "batch_sizes": self.batch_sizes, "block_m": self.block_m}

@@ -12,4 +12,13 @@ from .analysis import (
 from .common_schedules import get_block, get_output_blocks, try_inline, try_inline_contiguous_spatial  # noqa: F401
 from .roller import *
 from .arch import CUDA, CDNA, RDNA  # noqa: F401
-from .template import MatmulTemplate, GEMVTemplate, ElementwiseTemplate, GeneralReductionTemplate, FlashAttentionTemplate  # noqa: F401
+from .template import (  # noqa: F401
+    MatmulTemplate,
+    FP8MatmulTemplate,
+    GEMVTemplate,
+    ElementwiseTemplate,
+    GeneralReductionTemplate,
+    FlashAttentionTemplate,
+    GroupedMatmulTemplate,
+    KDAChunkTemplate,
+)

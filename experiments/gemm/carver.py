@@ -8,24 +8,45 @@ def model_target(target):
     Target = tvm.target.Target
 
     target = dict(Target(target).export())
-    if target.get("arch") == "sm_90a":
+    if target.get("arch") in ("sm_90a", "sm_100a"):
         target["arch"] = "sm_90"
     return Target(target)
 
 
-def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True, thread_key="thread_num"):
+def rank_configs(
+    configs,
+    *,
+    m,
+    n,
+    k,
+    dtype,
+    target,
+    top_k,
+    transpose_a=False,
+    transpose_b=True,
+    template=None,
+    thread_key="thread_num",
+):
     from tilelang import tvm
 
     Target = tvm.target.Target
     from tilelang.carver.arch import CUDA
     from tilelang.carver.matmul_analysis import get_tensorized_func_and_tags
     from tilelang.carver.roller.policy import TensorCorePolicy
-    from tilelang.carver.template.grouped_matmul import ExplicitArchMatmul
+    from tilelang.carver.template import MatmulTemplate
     from tilelang.tiletune.ranking import rank_records, select_top_k
 
     arch = CUDA(model_target(target))
-    template = ExplicitArchMatmul(
-        M=m, N=n, K=k, trans_A=transpose_a, trans_B=transpose_b, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32", _arch=arch
+    template = template or MatmulTemplate(
+        M=m,
+        N=n,
+        K=k,
+        trans_A=transpose_a,
+        trans_B=transpose_b,
+        in_dtype=dtype,
+        out_dtype=dtype,
+        accum_dtype="float32",
+        _arch=arch,
     )
     func, tags = get_tensorized_func_and_tags(template.equivalent_function(), arch.target, allow_gemv=True)
     if func is None or not tags:
@@ -70,6 +91,7 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
         model="legacy_carver_common_grid",
         model_target=str(arch.target),
         compile_target=str(Target(target)),
+        template=type(template).__name__,
         formula="(traffic_bytes + 1) * num_wave",
         ranking=ranking,
         configs=records,
@@ -86,11 +108,8 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
 
 
 def carver_support_reason(workload, device):
-    from experiments.common.baselines import carver_target_support_reason
-
-    reason = carver_target_support_reason(device.target)
-    if reason:
-        return reason
+    if device.target["kind"] != "cuda":
+        return "the existing Carver comparison adapter requires CUDA"
     if workload.op != "gemm" or workload.dtype not in ("float16", "bfloat16"):
         return "the existing Carver comparison adapter supports FP16/BF16 GEMM only"
     from experiments.gemm.spaces import support_reason
@@ -110,7 +129,10 @@ def carver_rank(workload, device, configs, top_k):
     reason = carver_support_reason(workload, device)
     if reason:
         raise ValueError(reason)
+    from experiments.common.carver import _architecture, workload_template
+
     p = workload.parameters
+    template = workload_template(workload, configs, arch=_architecture(device.target))
     report = rank_configs(
         configs,
         m=p["m"],
@@ -121,8 +143,7 @@ def carver_rank(workload, device, configs, top_k):
         top_k=top_k,
         transpose_a=p.get("transpose_a", False),
         transpose_b=p.get("transpose_b", False),
+        template=template,
     )
-    for record, config in zip(report["configs"], configs):
-        record["config"] = config
     report.update(metric="carver_traffic_waves", score_units="byte-waves")
     return report

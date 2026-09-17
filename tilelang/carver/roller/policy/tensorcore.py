@@ -22,13 +22,14 @@ class TensorCorePolicy(DefaultPolicy):
     use_async_copy: bool = False
     block_reduction_depth: int | None = None
 
-    def _init_with_prim_func(self, func: tvm.tirx.PrimFunc, name: str | None = None):
-        super()._init_with_prim_func(func, name)
+    def _init_with_output_nodes(self, nodes):
+        super()._init_with_output_nodes(nodes)
         self._legalize_info()
         return self
 
     def _legalize_info(self):
-        pipleline_stage = self.prim_func_node.get_tag("pipeline_stage")
+        node = next((n for n in self.ordered_nodes if n.get_tag("tensorcore_config")), self.ordered_nodes[0])
+        pipleline_stage = node.get_tag("pipeline_stage")
         if pipleline_stage:
             self.pipeline_stage = pipleline_stage
         else:
@@ -38,8 +39,8 @@ class TensorCorePolicy(DefaultPolicy):
                 self.pipeline_stage = 2
             else:
                 self.pipeline_stage = 1
-        use_async_copy = self.prim_func_node.get_tag("use_async_copy")
-        if use_async_copy:
+        use_async_copy = node.get_tag("use_async_copy")
+        if use_async_copy is not None:
             self.use_async_copy = use_async_copy
         else:
             if self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
@@ -48,7 +49,7 @@ class TensorCorePolicy(DefaultPolicy):
                 self.use_async_copy = False
         # TODO: block reduction depth is not used for now.
         # As there still exists some performance issues for block reduction.
-        block_reduction_depth = self.prim_func_node.get_tag("block_reduction_depth")
+        block_reduction_depth = node.get_tag("block_reduction_depth")
         if block_reduction_depth:
             self.block_reduction_depth = block_reduction_depth
 
@@ -207,8 +208,9 @@ class TensorCorePolicy(DefaultPolicy):
         if not node.get_tag("tensorcore_config"):
             return super().get_node_reduce_step_candidates(node)
         else:
-            # must be a a multiple of wmma_k
-            return {k.var.name: [x * self.wmma_k for x in get_all_factors(int(k.dom.extent) // self.wmma_k)] for k in node.raxis}
+            dtype = node.get_buffer_dtype(node.block_analyzer.get_input_buffers(node.reduction_block)[0])
+            wmma_k = 32 if dtype.bits == 8 else self.wmma_k
+            return {k.var.name: [x * wmma_k for x in get_all_factors(int(k.dom.extent) // wmma_k)] for k in node.raxis}
 
     def check_tile_shape_isvalid(self, td: TileDict):
         for node in self.ordered_nodes:
@@ -222,7 +224,9 @@ class TensorCorePolicy(DefaultPolicy):
                 wmma_invalid = [block_m < wmma_m or block_n < wmma_n for wmma_m, wmma_n in self.arch.get_avaliable_tensorintrin_shapes()]
                 if all(wmma_invalid):
                     return False
-                if any([y % x for x, y in zip(td.tile_map[node], node.get_space_dim())]):
+                if not self.tags.get("allow_partial_tiles", False) and any(
+                    y % x for x, y in zip(td.tile_map[node], node.get_space_dim())
+                ):
                     return False
         return super().check_tile_shape_isvalid(td)
 

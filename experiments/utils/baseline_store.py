@@ -152,8 +152,7 @@ def identities(plan, device, settings, runtime, baseline_seed=123):
     baseline_paths = [
         *(ROOT / "experiments/xgboost").glob("*.py"),
         *(ROOT / "tilelang/carver").rglob("*.py"),
-        ROOT / "experiments/gemm/carver.py",
-        ROOT / "experiments/flash_attention/carver.py",
+        *(ROOT / "experiments").glob("*/carver.py"),
         ROOT / "experiments/common/baselines.py",
         ROOT / "experiments/common/comparison.py",
         ROOT / "experiments/utils/baseline_store.py",

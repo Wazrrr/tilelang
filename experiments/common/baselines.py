@@ -1,38 +1,30 @@
 """Common-grid baselines with explicit workload support boundaries."""
 
-from importlib import import_module
-
-
-def carver_target_support_reason(target):
-    """Respect the unchanged CUDA model's architecture boundary before launch."""
-    if target["kind"] != "cuda":
-        return "the existing Carver comparison adapter requires CUDA"
-    arch = target.get("arch", "")
-    version = arch.removeprefix("sm_").rstrip("af")
-    # Original precision dispatch covers Volta, Ampere, Ada and Hopper only.
-    # Do not map Blackwell to an older GPU just to obtain a baseline score.
-    if not version.isdigit() or not 70 <= int(version) <= 90:
-        return f"the unchanged Carver CUDA model does not support {arch}; no substitute architecture is used"
-    return None
-
 
 def carver_support_reason(workload, device):
-    from experiments.families import FAMILIES
+    if device.target["kind"] != "cuda":
+        return "the Carver experiment adapters require CUDA"
+    from .spec import support_reason
 
-    family = FAMILIES.get(workload.op)
-    if family is None:
-        return "no Carver template is registered for this operation"
-    return import_module(f"experiments.{family}.carver").carver_support_reason(workload, device)
+    reason = support_reason(workload, device)
+    if reason:
+        return reason
+    from experiments.families import family_module
+
+    try:
+        family_module(workload.op, "carver")
+    except ModuleNotFoundError:
+        return f"no Carver template adapter for {workload.op}"
+    return None
 
 
 def carver_rank(workload, device, configs, top_k):
     reason = carver_support_reason(workload, device)
     if reason:
         raise ValueError(reason)
-    from experiments.families import FAMILIES
+    from experiments.families import family_module
 
-    family = FAMILIES[workload.op]
-    return import_module(f"experiments.{family}.carver").carver_rank(workload, device, configs, top_k)
+    return family_module(workload.op, "carver").carver_rank(workload, device, configs, top_k)
 
 
 def exhaustive_selection(configs):

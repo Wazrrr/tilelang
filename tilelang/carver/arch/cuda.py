@@ -6,7 +6,7 @@ from .driver import cuda_driver
 
 
 def check_sm_version(arch: str) -> int:
-    sm_version = arch.replace("sm_", "")
+    sm_version = arch.replace("sm_", "").rstrip("af")
     return int(sm_version) if sm_version.isdigit() else -1
 
 
@@ -41,6 +41,10 @@ def is_hopper_arch(arch: TileDevice) -> bool:
     conditions.append(is_cuda_arch(arch))
     conditions.append(arch.sm_version == 90)
     return all(conditions)
+
+
+def is_blackwell_arch(arch: TileDevice) -> bool:
+    return is_cuda_arch(arch) and arch.sm_version >= 100
 
 
 def has_mma_support(arch: TileDevice) -> bool:
@@ -105,7 +109,7 @@ def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: Til
         return (in_dtype, accum_dtype) in ampere_tensorcore_supported
     elif is_ada_arch(arch):
         return (in_dtype, accum_dtype) in ada_tensorcore_supported
-    elif is_hopper_arch(arch):
+    elif is_hopper_arch(arch) or is_blackwell_arch(arch):
         return (in_dtype, accum_dtype) in hopper_tensorcore_supported
     else:
         raise ValueError(f"Unsupported architecture: {arch}")
@@ -137,12 +141,18 @@ class CUDA(TileDevice):
         self.device: tvm.runtime.Device = device
         self.platform: str = "CUDA"
         # TODO(lei): maybe static shared memory, can be improved in future
-        self.smem_cap = cuda_driver.get_shared_memory_per_block()
+        properties = cuda_driver.get_cuda_device_properties()
+        self.smem_cap = int(
+            getattr(properties, "shared_memory_per_block_optin", 0) or cuda_driver.get_shared_memory_per_block()
+        )
         self.compute_max_core = device.multi_processor_count
         self.warp_size = device.warp_size
         self.compute_capability = device.compute_version.replace(".", "")
         self.reg_cap: int = 65536
-        self.max_smem_usage: int = 2 * self.smem_cap
+        self.max_smem_usage = int(
+            getattr(properties, "shared_memory_per_multiprocessor", 0)
+            or cuda_driver.get_max_dynamic_shared_size_bytes()
+        )
         self.sm_partition: int = 4
         self.l2_cache_size_bytes: int = _get_l2_cache_size_bytes(target)
         # the number of transaction size in bytes
@@ -173,6 +183,7 @@ __all__ = [
     "is_ampere_arch",
     "is_ada_arch",
     "is_hopper_arch",
+    "is_blackwell_arch",
     "is_tensorcore_supported_precision",
     "has_mma_support",
     "CUDA",

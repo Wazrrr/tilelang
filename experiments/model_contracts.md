@@ -44,16 +44,17 @@ exact hardware simulation. Synthetic test profiles are never performance results
 | Family | Template | Retained limitations |
 | --- | --- | --- |
 | FP16/BF16 GEMM | Existing `MatmulTemplate` | Original traffic/wave priority; no rasterization timing |
-| FP8 GEMM | Existing `MatmulTemplate` with actual FP8 types | Same policy; E4M3FN precision spelling added |
-| Attention | Existing `FlashAttentionTemplate` | Existing two-GEMM approximation and shared-memory limit |
-| Grouped GEMM | New `GroupedMatmulTemplate`, reusing per-group matmul templates | Sum of exact-shape group priorities; metadata lookup and interleaved CTA scheduling omitted |
-| KDA chunk output | New `KDAChunkTemplate` | Scaling, casts, exp2, causal mask and two fused GEMMs retained; priority remains memory/occupancy based |
+| FP8 GEMM | `FP8MatmulTemplate` | FP32 accumulation; E4M3FN lowers to Carver's tensorizable E4M3 spelling |
+| Attention | `FlashAttentionTemplate` | Scaling, masking, stable softmax, probability cast and both GEMMs are retained |
+| Grouped GEMM | `GroupedMatmulTemplate` | The padded CTA domain is modeled; metadata lookup and interleaved CTA scheduling are omitted |
+| KDA chunk output | `KDAChunkTemplate` | Scaling, casts, exp2, causal mask and both GEMMs are retained |
 
 Adapters evaluate the complete experiment pool through the existing policy.
 Policy scores and feasibility rules are unchanged. The final attention pools,
 ragged grouped case and 48-row KDA case can have no feasible candidates. These
 save every rejection and report `model_unavailable`; they receive no replacement
-ranking. Carver still does not support Blackwell in this checkout.
+ranking. SM100 uses Carver's SM90 tensorization vocabulary while retaining
+visible-device capacities.
 
 Old baseline bundles remain immutable. To evaluate the newly added templates,
 explicitly collect a new baseline bundle; unchanged oracle tables may be reused
