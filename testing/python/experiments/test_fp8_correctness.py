@@ -1,4 +1,4 @@
-"""FP8 rounding tolerance must reject corrupted outputs and contract changes."""
+"""The FP8 adapter exposes explicit scales and a BF16 output contract."""
 
 import pytest
 import torch
@@ -6,22 +6,18 @@ from experiments.gemm_fp8.cases import cases
 from experiments.gemm_fp8.kernel import make_case
 
 
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
-def test_fp8_check_accepts_one_sparse_rounding_step_and_rejects_corruption(dtype):
+def test_fp8_inputs_have_fixed_scale_layout_and_bf16_reference():
     case = make_case(cases()[0])
-    expected = torch.ones(256).to(dtype)
-    actual = expected.float()
-    actual[0] += 0.125 if dtype == torch.float8_e4m3fn else 0.25
-    case.check([actual.to(dtype)], [expected])
-    for wrong in (torch.zeros(256).to(dtype), (actual + 1).to(dtype), actual, expected[:128]):
+    inputs = case.inputs("cpu", torch.Generator().manual_seed(123))
+    a, b, scale_a, scale_b = inputs
+    assert a.dtype == b.dtype == torch.float8_e4m3fn
+    assert scale_a.shape == (a.shape[0], a.shape[1] // 128)
+    assert scale_b.shape == (b.shape[0] // 128, b.shape[1] // 128)
+    expected = case.reference(*inputs)
+    assert expected.dtype == torch.bfloat16
+    case.check([expected], [expected])
+    with pytest.raises(AssertionError):
+        case.check([torch.zeros_like(expected)], [expected])
+    for wrong in (expected.float(), expected[:, : expected.shape[1] // 2]):
         with pytest.raises(AssertionError):
             case.check([wrong], [expected])
-    actual[0] = float("nan")
-    with pytest.raises(AssertionError):
-        case.check([actual.to(dtype)], [expected])
-    # Two steps below a power-of-two boundary are smaller than one upward
-    # spacing; compare representable codes, not a maximum-magnitude ULP.
-    actual = expected.float()
-    actual[0] = 0.875 if dtype == torch.float8_e4m3fn else 0.75
-    with pytest.raises(AssertionError):
-        case.check([actual.to(dtype)], [expected])

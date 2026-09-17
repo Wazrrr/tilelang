@@ -51,14 +51,13 @@ def test_smoke_records_alternative_native_matrix_instructions(instruction):
     assert result["status"] == "verified" and result["observed"][instruction]
 
 
-@pytest.mark.parametrize("op", ["gemm", "attention"])
-def test_unsupported_carver_architecture_is_recorded_before_gpu_or_model_execution(op, tmp_path):
-    workload = family_module(op, "cases").cases(holdout=True)[0]
-    assert carver_support_reason(workload, Device("ampere", TARGETS["ampere"])) is None
-    device = Device("blackwell", TARGETS["blackwell"])
+def test_unsupported_fp8_carver_architecture_is_recorded_before_gpu_or_model_execution(tmp_path):
+    workload = family_module("gemm_fp8", "cases").cases(holdout=True)[0]
+    device = Device("ampere", TARGETS["ampere"])
+    assert "sm_89" in carver_support_reason(workload, device)
     result = run_native(make_request(workload, device, dict(method="carver")), tmp_path)
     assert result["status"] == "unsupported"
-    assert "sm_100a" in result["reason"] and "unchanged Carver" in result["reason"]
+    assert "sm_89" in result["reason"]
     assert not list(tmp_path.iterdir())
 
 

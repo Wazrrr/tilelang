@@ -1,53 +1,28 @@
-"""Use the authoritative FP8 example with FP32 accumulation and FP8 output."""
+"""Explicit block-scaled E4M3 GEMM using the Hopper FP8 example."""
 
 from threading import Lock
-import torch
 
 from experiments.utils.kernel import KernelCase, _random
 from .reference import reference
-from .spaces import support_reason
+from .spaces import BLOCK_K, BLOCK_M, NUM_STAGES, THREADS, support_reason
 
 _BUILD_LOCK = Lock()
 
 
-class FP8KernelCase(KernelCase):
+class BlockScaledFP8KernelCase(KernelCase):
     def check(self, actuals, references):
         if len(actuals) != len(references):
             raise AssertionError("wrong number of kernel outputs")
-        for actual, expected in zip(actuals, references):
-            if (
-                actual.shape != expected.shape
-                or actual.dtype != expected.dtype
-                or expected.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2)
-            ):
-                raise AssertionError("FP8 output shape/dtype differs from the reference")
-            # Independent accumulation can cross an FP8 rounding boundary.
-            # Allow at most one representable step, plus the example's global
-            # relative-energy criterion; zero/NaN outputs cannot pass.
-            x, y = actual.float(), expected.float()
-
-            def ordered_codes(value):
-                bits = value.contiguous().view(torch.uint8).to(torch.int16)
-                magnitude = bits & 127
-                return torch.where(bits & 128 != 0, -magnitude, magnitude)
-
-            if (
-                not torch.isfinite(x).all()
-                or not torch.isfinite(y).all()
-                or not torch.all((ordered_codes(actual) - ordered_codes(expected)).abs() <= 1)
-            ):
-                raise AssertionError("FP8 output differs by more than one representable step")
-            energy = (x.double().square() + y.double().square()).sum()
-            difference = (x.double() - y.double()).square().sum() / energy.clamp_min(1e-30)
-            if not torch.isfinite(difference) or difference >= 1e-3:
-                raise AssertionError(f"FP8 relative energy error {difference.item()} exceeds 1e-3")
+        if any(actual.shape != expected.shape or actual.dtype != expected.dtype for actual, expected in zip(actuals, references)):
+            raise AssertionError("block-scaled FP8 GEMM must return the declared BF16 output")
+        super().check(actuals, references)
 
 
 def _program(**kwargs):
-    from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
+    from examples.deepseek_deepgemm.example_deepgemm_fp8_2xAcc import tl_gemm
 
     with _BUILD_LOCK:
-        return matmul.get_tir(**kwargs)
+        return tl_gemm.get_tir(**kwargs)
 
 
 def make_case(workload):
@@ -55,23 +30,25 @@ def make_case(workload):
     if reason:
         raise ValueError(reason)
     m, n, k = (workload.parameters[key] for key in ("m", "n", "k"))
-    dtype = workload.dtype
 
-    def build(block_M, block_N, block_K, num_stages, threads, enable_rasteration):
+    def build(block_M, block_N, block_K, num_stages, threads):
+        if (block_M, block_K, num_stages, threads) != (BLOCK_M, BLOCK_K, NUM_STAGES, THREADS):
+            raise ValueError("Hopper block-scaled FP8 fixes block_M=64, block_K=128, num_stages=4, and threads=128")
         return _program(
             M=m,
             N=n,
             K=k,
-            dtype=dtype,
-            block_M=block_M,
             block_N=block_N,
-            block_K=block_K,
-            num_stages=num_stages,
-            threads=threads,
-            enable_rasteration=enable_rasteration,
+            in_dtype="float8_e4m3fn",
+            out_dtype="bfloat16",
+            accum_dtype="float32",
         )
 
     def inputs(device, generator):
-        return [_random(shape, dtype, device, generator) for shape in ((m, k), (n, k))]
+        from examples.deepseek_deepgemm.example_deepgemm_fp8_2xAcc import per_block_cast_to_fp8, per_token_cast_to_fp8
 
-    return FP8KernelCase(build, inputs, reference, None)
+        a, scale_a = per_token_cast_to_fp8(_random((m, k), "bfloat16", device, generator))
+        b, scale_b = per_block_cast_to_fp8(_random((n, k), "bfloat16", device, generator))
+        return [a, b, scale_a, scale_b]
+
+    return BlockScaledFP8KernelCase(build, inputs, reference, None, rtol=0.03, atol=0.03)

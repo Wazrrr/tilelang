@@ -40,6 +40,7 @@ SOURCE_ROOTS = (
     "examples/flash_attention",
     "examples/kda",
     "examples/gemm_fp8",
+    "examples/deepseek_deepgemm",
     "tiletune_core",
     "tilelang/tiletune",
     "tilelang/carver",

@@ -56,7 +56,7 @@ def make_context(workload, implementation, target, device_name, backend, source_
         "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
         "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
         "kda": "examples/kda/chunk_o.py",
-        "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
+        "gemm_fp8": "examples/deepseek_deepgemm/example_deepgemm_fp8_2xAcc.py",
     }
     if family in examples:
         paths.append(examples[family])

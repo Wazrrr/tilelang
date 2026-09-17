@@ -4,7 +4,7 @@
 def cases(holdout=False):
     from experiments.common.spec import Workload
 
-    tokens = (128, 1024, 4096) if holdout else (64, 512, 2048)
+    tokens = (256, 1024, 4096) if holdout else (64, 512, 2048)
     shapes = (
         ("decode", tokens[0], 4096, 4096),
         ("prefill", tokens[1], 4096, 4096),
@@ -37,6 +37,6 @@ def training_cases():
         )
         for split, (m, n, k) in zip(
             ("train_a", "train_b", "validation"),
-            ((32, 4096, 4096), (512, 14336, 4096), (2048, 4096, 4096)),
+            ((768, 4096, 4096), (512, 14336, 4096), (3072, 4096, 4096)),
         )
     ]

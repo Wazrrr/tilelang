@@ -6,7 +6,7 @@ and the runner interface. There are no local TileLang kernels or legacy runners.
 
 A has shape (M,K), B has shape (N,K), and the kernel computes C=A@B.T using FP32
 accumulation and the example's shared-memory output. All named-suite workloads
-use FP16 and explicitly record `transpose_b=True`. BF16 is also supported.
+use BF16 and explicitly record `transpose_b=True`.
 B preparation is outside kernel timing. Batched, NN/TN, fused-epilogue and FP8
 requests are unsupported by this experiment.
 
@@ -117,7 +117,7 @@ python -m experiments.gemm.tiletune.run --suite full --device hopper \
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
-on all five final FP16 cases. New TileTune output directories reuse verified baseline
+on all five final BF16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
 Baselines live under `results/<GPU model>/baselines/`, with `current.json` pointing
 to the saved bundle. Only `--run-baselines` collects or refreshes them; ordinary

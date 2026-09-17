@@ -189,9 +189,11 @@ def test_gpu_fp8_boundaries():
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
-    w = Workload("fp8", "gemm_fp8", dict(m=37, n=93, k=160), dtype="float8_e4m3fn")
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("native Hopper FP8 correctness requires an SM90 GPU")
+    w = Workload("fp8", "gemm_fp8", dict(m=64, n=128, k=128, transpose_b=True), dtype="float8_e4m3fn")
     case = make_case(w)
-    program = case.build(block_M=64, block_N=64, block_K=32, num_stages=0, threads=128, enable_rasteration=False)
+    program = case.build(block_M=64, block_N=16, block_K=128, num_stages=4, threads=128)
     kernel = tilelang.compile(program, target=current_target(), execution_backend="tvm_ffi", out_idx=case.out_idx)
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
     result = kernel(*inputs)

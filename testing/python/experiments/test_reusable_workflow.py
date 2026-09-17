@@ -33,12 +33,12 @@ def test_mixed_dtype_profile_preparation_covers_each_supported_dtype_once(tmp_pa
     workloads = [w.to_dict() for w in default_workloads()]
     device = Device("hopper", TARGETS["hopper"])
     prepared = prepare_profiles(device, workloads, tmp_path, {}, profile)
-    assert calls == ["float16", "float8_e4m3fn"]
+    assert calls == ["bfloat16", "float8_e4m3fn"]
     assert set(prepared.profiles) == set(calls)
     assert prepare_profiles(prepared, workloads, tmp_path, {}, profile) is prepared
     calls.clear()
     prepared = prepare_profiles(replace(device, name="ampere", target=TARGETS["ampere"]), workloads, tmp_path, {}, profile)
-    assert calls == ["float16"] and set(prepared.profiles) == {"float16"}
+    assert calls == ["bfloat16"] and set(prepared.profiles) == {"bfloat16"}
 
 
 def write(path, data):
@@ -47,7 +47,7 @@ def write(path, data):
 
 
 @pytest.mark.parametrize(
-    "family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 2304), ("grouped_gemm", 192)]
+    "family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 4), ("grouped_gemm", 192)]
 )
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
@@ -55,7 +55,7 @@ def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count)
     assert len({row["workload"]["name"] for row in plan}) == 5
     assert {row["variant"] for row in plan} == set(VARIANTS)
     assert all(
-        row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "float16")
+        row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "bfloat16")
         for row in plan
     )
     assert system_plan(family, variants=["combined"], indices=[3, 1])[0]["indices"] == [3, 1]

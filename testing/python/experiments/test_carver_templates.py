@@ -72,7 +72,8 @@ def test_fp8_template_preserves_kernel_dtype_and_uses_tensorizable_model_dtype(k
     )
     template = workload_template(workload, arch=_offline_hopper())
     assert template.kernel_dtype == kernel_dtype
-    assert template.in_dtype == template.out_dtype == model_dtype
+    assert template.in_dtype == model_dtype
+    assert template.out_dtype == "bfloat16"
     _, tags = get_tensorized_func_and_tags(
         template.equivalent_function(), template.arch.target, allow_gemv=True
     )

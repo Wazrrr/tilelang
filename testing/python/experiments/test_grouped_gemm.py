@@ -59,11 +59,12 @@ def test_final_grouped_cases_cover_common_moe_serving_shapes():
     final = cases(holdout=True)
     assert [w.parameters["batch_sizes"] for w in final] == [
         [1, 2, 4, 8],
-        [16, 32, 48, 64],
-        [64, 128, 256],
-        [64, 128, 256],
+        [32] * 8,
+        [128] * 4,
+        [256] * 3,
         [63, 77, 111, 280],
     ]
+    assert [w.dtype for w in final] == ["bfloat16"] * 5
     assert [(w.parameters["n"], w.parameters["k"]) for w in final] == [
         (2048, 7168),
         (2048, 7168),

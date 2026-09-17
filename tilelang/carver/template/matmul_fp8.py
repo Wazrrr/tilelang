@@ -16,10 +16,10 @@ _MODEL_DTYPES = {
 
 @dataclass
 class FP8MatmulTemplate(MatmulTemplate):
-    """FP8 inputs/output with FP32 accumulation and explicit dtype lowering."""
+    """Block-scaled FP8 inputs with BF16 output and FP32 accumulation."""
 
     in_dtype: str = field(default="float8_e4m3", init=False)
-    out_dtype: str = field(default="float8_e4m3", init=False)
+    out_dtype: str = field(default="bfloat16", init=False)
     accum_dtype: str = field(default="float32", init=False)
     with_bias: bool = field(default=False, init=False)
     kernel_dtype: str = "float8_e4m3fn"
@@ -28,7 +28,6 @@ class FP8MatmulTemplate(MatmulTemplate):
         if self.kernel_dtype not in _MODEL_DTYPES:
             raise ValueError("FP8 GEMM requires float8_e4m3fn, float8_e4m3, or float8_e5m2")
         self.in_dtype = _MODEL_DTYPES[self.kernel_dtype]
-        self.out_dtype = self.in_dtype
         super().initialize_function()
 
     def params_as_dict(self):

@@ -78,12 +78,12 @@
       "name": "gemm_decode",
       "op": "gemm",
       "parameters": {
-        "m": 128,
+        "m": 256,
         "n": 4096,
         "k": 4096,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -96,7 +96,7 @@
         "k": 4096,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -109,7 +109,7 @@
         "k": 14336,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -122,7 +122,7 @@
         "k": 4096,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -135,7 +135,7 @@
         "k": 4096,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -146,24 +146,24 @@
         "batch": 1,
         "heads": 32,
         "sequence": 512,
-        "dim": 128,
+        "dim": 64,
         "causal": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
     {
-      "name": "attention_medium_causal",
+      "name": "attention_batched_causal",
       "op": "attention",
       "parameters": {
-        "batch": 1,
-        "heads": 32,
+        "batch": 2,
+        "heads": 16,
         "sequence": 2048,
-        "dim": 128,
+        "dim": 64,
         "causal": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -177,7 +177,7 @@
         "dim": 128,
         "causal": false
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -191,7 +191,7 @@
         "dim": 128,
         "causal": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -200,12 +200,12 @@
       "op": "attention",
       "parameters": {
         "batch": 1,
-        "heads": 32,
+        "heads": 16,
         "sequence": 8192,
         "dim": 128,
         "causal": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -214,13 +214,13 @@
       "op": "kda_chunk_o",
       "parameters": {
         "batch": 1,
-        "heads": 64,
+        "heads": 32,
         "sequence": 2048,
         "dim": 128,
         "value_dim": 128,
         "chunk_size": 64
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -235,7 +235,7 @@
         "value_dim": 128,
         "chunk_size": 64
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -244,13 +244,13 @@
       "op": "kda_chunk_o",
       "parameters": {
         "batch": 1,
-        "heads": 64,
+        "heads": 32,
         "sequence": 8192,
         "dim": 128,
         "value_dim": 128,
         "chunk_size": 64
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -259,13 +259,13 @@
       "op": "kda_chunk_o",
       "parameters": {
         "batch": 2,
-        "heads": 64,
+        "heads": 32,
         "sequence": 4096,
         "dim": 128,
         "value_dim": 128,
         "chunk_size": 64
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -280,7 +280,7 @@
         "value_dim": 128,
         "chunk_size": 64
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -288,7 +288,7 @@
       "name": "gemm_fp8_decode",
       "op": "gemm_fp8",
       "parameters": {
-        "m": 128,
+        "m": 256,
         "n": 4096,
         "k": 4096,
         "transpose_b": true
@@ -363,7 +363,7 @@
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -372,16 +372,20 @@
       "op": "grouped_gemm",
       "parameters": {
         "batch_sizes": [
-          16,
           32,
-          48,
-          64
+          32,
+          32,
+          32,
+          32,
+          32,
+          32,
+          32
         ],
         "n": 2048,
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -390,15 +394,16 @@
       "op": "grouped_gemm",
       "parameters": {
         "batch_sizes": [
-          64,
           128,
-          256
+          128,
+          128,
+          128
         ],
         "n": 2048,
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -407,15 +412,15 @@
       "op": "grouped_gemm",
       "parameters": {
         "batch_sizes": [
-          64,
-          128,
+          256,
+          256,
           256
         ],
         "n": 7168,
         "k": 2048,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -433,7 +438,7 @@
         "k": 2048,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     }

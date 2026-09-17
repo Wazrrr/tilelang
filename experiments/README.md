@@ -3,6 +3,9 @@
 Each kernel family owns its cases, implementations, references, configuration
 spaces, and experiment commands.
 
+The active dtype, shape, scale-layout, and architecture-specific kernel rules
+are frozen in [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md).
+
 Saved measurements belong under each kernel's `results/` directory. The
 [result guide](RESULTS.md) identifies the saved GEMM oracle, baseline storage,
 validation records and historical data.
@@ -15,7 +18,7 @@ start in the family folder:
 | GEMM | Five continuous-batch decode/prefill projection and FFN shapes | [gemm/](gemm/README.md) |
 | FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
 | KDA | Five 2K–16K and batched chunk-output shapes at DK=DV=128 | [kda/](kda/README.md) |
-| FP8 GEMM | Five decode/prefill projection and FFN shapes with E4M3 inputs/output | [gemm_fp8/](gemm_fp8/README.md) |
+| FP8 GEMM | Five block-scaled E4M3-input, BF16-output projection and FFN shapes | [gemm_fp8/](gemm_fp8/README.md) |
 | Grouped GEMM | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
 
 The default matrix contains these five families and twenty-five cases. FP8 GEMM
@@ -44,17 +47,18 @@ Planning requires only Python and does not query a GPU, compile kernels, or
 create a result directory. Run commands from the repository root.
 
 ```bash
-python -m experiments.gemm.tiletune.run --suite final --device ampere --plan
-python -m experiments.flash_attention.tiletune.run --suite smoke --device ampere --plan
-python -m experiments.kda.tiletune.run --suite development --device ampere --plan
+python -m experiments.gemm.tiletune.run --suite final --device hopper --plan
+python -m experiments.flash_attention.tiletune.run --suite smoke --device hopper --plan
+python -m experiments.kda.tiletune.run --suite development --device hopper --plan
 python -m experiments.gemm_fp8.tiletune.run --suite development --device hopper --plan
+python -m experiments.grouped_gemm.tiletune.run --suite development --device hopper --plan
 ```
 
 A development run uses five test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
 All five families call their example builders directly; each family README identifies its source.
 Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, FP8 GEMM 2,304 and grouped GEMM 192 configs per case. There is no cap or structural
+KDA 720, FP8 GEMM 4, and grouped GEMM 192 configs per case. There is no cap or structural
 prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 

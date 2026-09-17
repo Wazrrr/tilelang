@@ -10,7 +10,7 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 2304, "grouped_gemm": 192}
+COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 4, "grouped_gemm": 192}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 
@@ -37,7 +37,8 @@ def test_retired_presets_are_rejected(w, preset):
 def test_explicit_native_configs_must_select_from_same_pool(w):
     device = Device("hopper", TARGETS["hopper"])
     pool = family_module(w.op, "spaces").get_configs()
-    assert configuration_space(replace(w, configs=pool[7:10]), device)["configs"] == pool[7:10]
+    selected = pool[: min(3, len(pool))]
+    assert configuration_space(replace(w, configs=selected), device)["configs"] == selected
     with pytest.raises(ValueError, match="subset"):
         configuration_space(replace(w, configs=[dict(pool[0], threads=123)]), device)
     with pytest.raises(ValueError, match="subset"):
@@ -51,15 +52,16 @@ def test_every_example_config_and_explicit_default_is_included():
     fa = family_module("attention", "spaces").get_configs()
     kda = family_module("kda_chunk_o", "spaces").get_configs()
     fp8 = family_module("gemm_fp8", "spaces").get_configs()
-    from examples.gemm_fp8.example_gemm_fp8_tiletune import get_configs as fp8_configs
 
     assert len(fa_configs()) == 1 and all(c in fa for c in fa_configs())
     assert dict(block_M=128, block_N=128, num_stages=1, threads=128) in fa
     assert len(kda_configs()) == 90 and len(kda) == 8 * len(kda_configs())
     assert all(c in kda for c in kda_configs())
     assert dict(block_DK=64, block_DV=64, num_stages=0, threads=256) in kda
-    assert len(fp8_configs()) == 288 and all(c in fp8 for c in fp8_configs())
-    assert len(fp8) == 8 * len(fp8_configs())
+    assert fp8 == [
+        dict(block_M=64, block_N=block_n, block_K=128, num_stages=4, threads=128)
+        for block_n in (16, 32, 64, 128)
+    ]
 
 
 def test_every_case_split_and_frozen_manifest_use_the_single_pool():
@@ -72,7 +74,8 @@ def test_every_case_split_and_frozen_manifest_use_the_single_pool():
     for w in CASES:
         assert len(plan["subsets"]["hopper"][w.name]["indices"]) == COUNTS[w.op]
     smoke = study_plan("smoke", [Device("hopper", TARGETS["hopper"])])
-    assert all(len(s["indices"]) == 16 for s in smoke["subsets"]["hopper"].values())
+    for w in core_cases("smoke"):
+        assert len(smoke["subsets"]["hopper"][w.name]["indices"]) == min(16, COUNTS.get(w.op, 2304))
 
 
 def test_recurrent_kda_is_not_silently_substituted_by_chunk_output():

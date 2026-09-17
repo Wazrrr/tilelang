@@ -11,7 +11,7 @@ EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=64, block_N=64, num_stages=1, threads=128),
     "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
-    "gemm_fp8": dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False),
+    "gemm_fp8": dict(block_M=64, block_N=128, block_K=128, num_stages=4, threads=128),
     "grouped_gemm": dict(block_M=64, block_N=128, block_K=64, num_stages=0, threads=128),
 }
 
@@ -57,9 +57,12 @@ def example_program(w, c):
             num_stages=c["num_stages"],
         )
     if w.op == "gemm_fp8":
-        from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
+        from examples.deepseek_deepgemm.example_deepgemm_fp8_2xAcc import tl_gemm
 
-        return matmul.get_tir(M=p["m"], N=p["n"], K=p["k"], dtype=w.dtype, **c)
+        return tl_gemm.get_tir(
+            M=p["m"], N=p["n"], K=p["k"], block_N=c["block_N"],
+            in_dtype=w.dtype, out_dtype="bfloat16", accum_dtype="float32"
+        )
     from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
 
     return grouped_gemm.get_tir(
@@ -68,12 +71,10 @@ def example_program(w, c):
 
 
 @pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)
-@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
-def test_final_programs_are_structurally_identical_to_examples(w, dtype):
+def test_final_programs_are_structurally_identical_to_examples(w):
     from tilelang import tvm
     from experiments.common.kernels import make_case
 
-    w = replace(w, dtype=({"float16": "float8_e4m3fn", "bfloat16": "float8_e5m2"}[dtype] if w.op == "gemm_fp8" else dtype))
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])
