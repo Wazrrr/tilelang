@@ -13,6 +13,8 @@ def winner_summary(report, winner_config, latency_ms):
         "predicted_rank": entry["rank"] if scored else None,
         "tie_first_rank": entry["tie_first_rank"] if scored else None,
         "tie_last_rank": entry["tie_last_rank"] if scored else None,
+        "uncertainty_first_rank": entry.get("uncertainty_first_rank") if scored else None,
+        "uncertainty_last_rank": entry.get("uncertainty_last_rank") if scored else None,
         "report_position": entry["rank"],
         "tier": entry["tier"],
         "score_cycles": entry["score"],

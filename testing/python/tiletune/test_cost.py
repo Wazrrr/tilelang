@@ -119,3 +119,15 @@ def test_ranking_preserves_unknowns_ties_and_ignores_timings():
     assert rank_records(records) == ranked
     assert analyze_prim_func(gemm())["tile_cost"]["score"] is None  # absent device metadata
     assert TileTuneConfig(device_limits=LIMITS).to_cache_key_dict() != TileTuneConfig().to_cache_key_dict()
+
+
+def test_ranking_uses_profile_uncertainty_before_original_index_tie_break():
+    records = [
+        {"index": 9, "tile_cost": {"score": 100.0, "score_relative_uncertainty": 0.001}},
+        {"index": 2, "tile_cost": {"score": 100.05, "score_relative_uncertainty": 0.001}},
+        {"index": 1, "tile_cost": {"score": 101.0, "score_relative_uncertainty": 0.001}},
+    ]
+    ranked = rank_records(records)
+    assert [row["index"] for row in ranked] == [2, 9, 1]
+    assert (ranked[0]["uncertainty_first_rank"], ranked[0]["uncertainty_last_rank"]) == (1, 2)
+    assert ranked[0]["tie_first_rank"] == ranked[0]["tie_last_rank"] == 1

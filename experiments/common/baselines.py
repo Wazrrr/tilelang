@@ -1,6 +1,30 @@
 """Common-grid baselines with explicit workload support boundaries."""
 
-from experiments.gemm.carver import carver_rank as carver_rank, carver_support_reason as carver_support_reason
+
+def carver_support_reason(workload, device):
+    if device.target["kind"] != "cuda":
+        return "the Carver experiment adapters require CUDA"
+    from .spec import support_reason
+
+    reason = support_reason(workload, device)
+    if reason:
+        return reason
+    from experiments.families import family_module
+
+    try:
+        family_module(workload.op, "carver")
+    except ModuleNotFoundError:
+        return f"no Carver template adapter for {workload.op}"
+    return None
+
+
+def carver_rank(workload, device, configs, top_k):
+    reason = carver_support_reason(workload, device)
+    if reason:
+        raise ValueError(reason)
+    from experiments.families import family_module
+
+    return family_module(workload.op, "carver").carver_rank(workload, device, configs, top_k)
 
 
 def exhaustive_selection(configs):

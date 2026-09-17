@@ -43,6 +43,10 @@ def is_hopper_arch(arch: TileDevice) -> bool:
     return all(conditions)
 
 
+def is_blackwell_arch(arch: TileDevice) -> bool:
+    return is_cuda_arch(arch) and arch.sm_version >= 100
+
+
 def has_mma_support(arch: TileDevice) -> bool:
     conditions = [True]
     conditions.append(is_cuda_arch(arch))
@@ -104,7 +108,7 @@ def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: Til
         return (in_dtype, accum_dtype) in ampere_tensorcore_supported
     elif is_ada_arch(arch):
         return (in_dtype, accum_dtype) in ada_tensorcore_supported
-    elif is_hopper_arch(arch):
+    elif is_hopper_arch(arch) or is_blackwell_arch(arch):
         return (in_dtype, accum_dtype) in hopper_tensorcore_supported
     else:
         raise ValueError(f"Unsupported architecture: {arch}")
@@ -172,6 +176,7 @@ __all__ = [
     "is_ampere_arch",
     "is_ada_arch",
     "is_hopper_arch",
+    "is_blackwell_arch",
     "is_tensorcore_supported_precision",
     "has_mma_support",
     "CUDA",

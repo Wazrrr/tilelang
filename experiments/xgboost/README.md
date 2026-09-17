@@ -121,7 +121,7 @@ receives equal total weight regardless of candidate count.
 `--sample-fraction` (Python: `sample_fraction`) controls both the training and
 separate validation subsets. The budget is `ceil(fraction * pool_size)`, with at
 least one configuration: the default samples 231/2,304 GEMM, 32/320 attention, 72/720
-chunk-KDA and 23/224 softmax configurations per workload. A seeded hash of the
+chunk-KDA and 29/288 FP8 GEMM configurations per workload. A seeded hash of the
 canonical workload and each configuration determines selection, so changing
 candidate order, timings or failure outcomes cannot bias it. Repeated runs of
 one context share a single subset. Failed selections consume the sample budget

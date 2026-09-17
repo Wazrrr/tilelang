@@ -41,10 +41,6 @@ def run_modules(context, pressure):
 
     phase_labels = {op.index: specialization.phase(op) for op in context.collector.operations}
     pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=specialization.loop)
-    if hasattr(context.collector, "ampere_plan"):
-        from .ampere import operand_registers
-
-        pressure["ampere_mma_operand_registers"] = operand_registers(context.collector, context.target)
     for phase in pressure["tile_liveness"]["phases"]:
         phase["phase"] = phase_labels[phase["operation"]]
     trace.record("pressure.tile_liveness", lambda: pressure["tile_liveness"])
@@ -54,6 +50,19 @@ def run_modules(context, pressure):
     )
     pressure["warp_specialization"] = ws
     trace.record("pressure.warp_specialization", lambda: ws)
+    from .targets import resolve_target
+
+    target_model = resolve_target(context.target)
+    if (
+        ws.get("status") != "predicted"
+        and target_model.kind == "cuda"
+        and target_model.architecture in ("ampere", "blackwell")
+    ):
+        from .ampere import operand_registers
+
+        pressure["mma_operand_registers"] = operand_registers(context.collector, context.target)
+        if target_model.architecture == "ampere":
+            pressure["ampere_mma_operand_registers"] = pressure["mma_operand_registers"]
     pressure.update(
         analyze_register_policy(
             pressure, context.config, context.device_limits, spill_allowance=specialization.register_spill_allowance(context.config)
@@ -105,8 +114,25 @@ def run_modules(context, pressure):
 
         modules["pipeline_overlap"] = pipeline_result
         trace.record("pipeline", lambda: pipeline_result)
-        target_kind = (pressure.get("target_model") or {}).get("kind")
-        if target_kind == "cuda":
+        from .semantic import analyze_semantic_workload
+
+        semantic = analyze_semantic_workload(
+            context.func,
+            context.collector,
+            context.config,
+            context.config.performance_model,
+            context.device_limits,
+            pressure,
+        )
+        if semantic is not None:
+            memory = semantic["memory"]
+            waves = semantic["waves"]
+            pipeline_result = semantic["pipeline"]
+            ranking = semantic["ranking"]
+            tile_cost = semantic["tile_cost"]
+            modules.update(memory_traffic=memory, waves=waves, pipeline_overlap=pipeline_result)
+            trace.record("semantic_workload", lambda: semantic)
+        elif (pressure.get("target_model") or {}).get("kind") == "cuda":
             from .facts import cuda_facts
             from tiletune_core.cuda import evaluate_cuda_facts
 
@@ -125,7 +151,12 @@ def run_modules(context, pressure):
             ranking = apply_ranking_metric(tile_cost, waves, pipeline_result, context.config, specialization, pressure["register_demand"])
         modules["ranking"] = ranking
         trace.record("ranking", lambda: ranking)
-        tile_cost.update(score=ranking["score"], score_formula=ranking["formula"], ranking_metric=ranking["metric"])
+        tile_cost.update(
+            score=ranking["score"],
+            score_formula=ranking["formula"],
+            ranking_metric=ranking["metric"],
+            score_relative_uncertainty=ranking.get("score_relative_uncertainty", 0),
+        )
         if ranking["score"] is None:
             tile_cost["precision"] = "unknown"
             tile_cost["unknown"] = sorted(set(tile_cost["unknown"] + ranking["unknown"]))

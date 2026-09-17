@@ -28,3 +28,25 @@ def test_original_carver_ranks_common_grid(dtype):
         record = result["configs"][index]
         assert record["model"]["valid"]
         assert record["tile_cost"]["score"] == (record["model"]["traffic_bytes"] + 1) * record["model"]["waves"]
+
+
+@pytest.mark.parametrize("op", ["gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"])
+def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from experiments.common.baselines import carver_rank, carver_support_reason
+    from experiments.common.spec import Device, configurations
+    from experiments.families import family_module
+    from tilelang.tiletune.profiling.device_profile import current_target
+
+    workload = family_module(op, "cases").cases(holdout=False)[0]
+    device = Device("visible", current_target())
+    all_configs = configurations(workload, device)
+    configs = all_configs[:8] + all_configs[64:72] if op == "attention" else all_configs[:8]
+    assert carver_support_reason(workload, device) is None
+    result = carver_rank(workload, device, configs, top_k=2)
+    assert len(result["configs"]) == len(configs)
+    assert result["selection"]["selected_count"] == 2
+    assert all(result["configs"][index]["model"]["valid"] for index in result["selection"]["selected_indices"])
+    if op == "attention":
+        assert all(not record["model"]["valid"] for record in result["configs"][:8])

@@ -123,6 +123,41 @@ def test_cached_profile_requires_no_gpu_or_benchmark(tmp_path, monkeypatch):
     TileTuneConfig(performance_model=loaded)
 
 
+def test_streaming_profile_retains_l2_rate_and_fixed_probe_slope_uncertainty(tmp_path):
+    path = tmp_path / "device.json"
+    signature = device_profile._signature("float8_e5m2", "float32", "cuda.mma")
+    model = {
+        "rates": {"gemm_flops_per_cycle": 4096},
+        "evidence": {
+            "gemm_flops_per_cycle": {
+                "measurements": [
+                    {"latency_samples_ms": [1.0, 1.001, 1.002]},
+                    {"latency_samples_ms": [2.0, 2.002, 2.004]},
+                ]
+            }
+        },
+    }
+    data = {
+        "identity": {
+            "profile_version": device_profile.PROFILE_VERSION,
+            "target_arch": "sm_100a",
+            "device_name": "test",
+            "l2_cache_bytes": 1024,
+        },
+        "common": {"rates": dict(PROFILE, global_bytes_per_cycle=128, dram_bytes_per_cycle=64), "clock_mhz": 1800},
+        "gemm_models": {json.dumps(signature, sort_keys=True): model},
+    }
+    path.write_text(json.dumps(data))
+    loaded = load_device_profile(path, input_dtype="float8_e5m2", memory_regime="streaming")
+    slopes = [1 / (right - left) for left in (1.0, 1.001, 1.002) for right in (2.0, 2.002, 2.004)]
+    expected = (max(slopes) - min(slopes)) / __import__("statistics").median(slopes)
+    assert loaded["global_bytes_per_cycle"] == 64
+    assert loaded["cached_global_bytes_per_cycle"] == 128
+    assert loaded["l2_cache_bytes"] == 1024
+    assert loaded["score_relative_uncertainty"] == pytest.approx(expected)
+    TileTuneConfig(performance_model=loaded)
+
+
 def test_missing_dtype_only_measures_dtype_primitives(tmp_path, monkeypatch):
     path = tmp_path / "device.json"
     identity = dict(profile_version=device_profile.PROFILE_VERSION, target_arch="sm_90a")

@@ -116,7 +116,17 @@ class FlashAttentionTemplate(BaseTemplate):
         self.set_function([MMA0_prim_func, MMA1_prim_func])
 
         def create_node_from_function(func, name):
-            tensorized_func, tags = get_tensorized_func_and_tags(func, self.arch.target)
+            # The legacy tensorization recognizer predates SM100. Carver models
+            # the equivalent MMA graph as SM90 while retaining the actual
+            # device capacities in ``self.arch``.
+            target = self.arch.target
+            if str(target.attrs.get("arch", "")).startswith("sm_10"):
+                from tvm.target import Target
+
+                values = dict(target.export())
+                values["arch"] = "sm_90"
+                target = Target(values)
+            tensorized_func, tags = get_tensorized_func_and_tags(func, target)
             assert tags is not None
             return PrimFuncNode(tensorized_func, name=name, tags=tags)
 

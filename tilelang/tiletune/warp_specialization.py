@@ -1,4 +1,4 @@
-"""Pre-lowering Hopper scheduling policy for simple tile pipelines.
+"""Pre-lowering CUDA TMA scheduling policy for simple tile pipelines.
 
 The native copy query is the same read-only classifier used by the WS pass.
 This model deliberately requires a straight-line, pure-TMA producer pipeline;
@@ -35,8 +35,9 @@ def predict_warp_specialization(func, col, pressure, pass_configs, *, policy):
         result["evidence"].append(reason)
         return result
 
-    if pressure["target_arch"] not in ("sm_90", "sm_90a"):
-        result["evidence"].append("Hopper policy model does not apply to this target")
+    architecture = (pressure.get("target_model") or {}).get("architecture")
+    if architecture not in ("hopper", "blackwell"):
+        result["evidence"].append("automatic TMA warp-specialization policy does not apply to this target")
         return result
     if bool(effective.get("tl.disable_warp_specialized", False)):
         result.update(status="disabled")
@@ -54,8 +55,8 @@ def predict_warp_specialization(func, col, pressure, pass_configs, *, policy):
     if not loops:
         result["evidence"].append("no positive-stage pipeline: automatic WS pass does not apply")
         return result
-    if len(loops) != 1 or col.unknown or any(op.unknown or op.predicates for op in col.operations):
-        return unknown("multiple pipelines, opaque operations, aliases or predicates")
+    if len(loops) != 1:
+        return unknown("multiple positive-stage pipelines require explicit partition analysis")
     if col.layouts:
         return unknown("explicit layouts require checking compatibility with multi-version buffering")
     loop = loops[0]
@@ -66,6 +67,8 @@ def predict_warp_specialization(func, col, pressure, pass_configs, *, policy):
     if policy.require_tile_calls and not all(isinstance(s, tir.Evaluate) and isinstance(s.value, tir.Call) for s in statements):
         return unknown("pipeline body is not a straight-line sequence of tile operations")
     pipeline = [op for op in col.operations if any(v.same_as(loop.loop_var) for v, _, _ in op.loops)]
+    if any(op.unknown or op.predicates for op in pipeline):
+        return unknown("pipeline contains opaque operations, aliases or predicates")
     if (policy.require_tile_calls and len(pipeline) != len(statements)) or not any(hasattr(op.metadata, "cRegion") for op in pipeline):
         return unknown("unresolved pipeline structure or consumer tile")
     domains = {tuple(sorted((k, str(v)) for k, v in op.launch_threads.items())) for op in col.operations}

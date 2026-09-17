@@ -51,17 +51,26 @@ def test_example_attention_masks_and_tail_rows(gpu_target, causal, stages):
     _check(w, dict(block_M=64, block_N=64, num_stages=stages, threads=128), gpu_target)
 
 
-@pytest.mark.parametrize("rows,columns,block_rows,block_cols", [(5, 1537, 2, 512), (7, 93, 4, 128), (5, 2053, 1, 8192)])
-def test_example_online_softmax_column_tails(gpu_target, rows, columns, block_rows, block_cols):
-    w = Workload("softmax", "softmax", dict(rows=rows, columns=columns))
-    _check(w, dict(BLOCK_M=block_rows, BLOCK_N=block_cols, threads=128), gpu_target, stress=True)
+@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"])
+def test_example_fp8_gemm_tails(gpu_target, dtype):
+    if gpu_target["kind"] != "cuda" or int(gpu_target["arch"].split("_")[1].rstrip("af")) < 90:
+        pytest.skip("FP8 tensor cores require Hopper or newer")
+    w = Workload("fp8", "gemm_fp8", dict(m=97, n=113, k=96, transpose_b=True), dtype=dtype)
+    _check(
+        w,
+        dict(block_M=64, block_N=64, block_K=32, num_stages=1, threads=128, enable_rasteration=False),
+        gpu_target,
+    )
 
 
 def test_retired_rewrite_knobs_are_not_silently_ignored():
     from experiments.common.kernels import make_case
 
     cases = [
-        (Workload("softmax", "softmax", dict(rows=4, columns=128)), dict(BLOCK_M=1, BLOCK_N=128, threads=128, vector=8)),
+        (
+            Workload("fp8", "gemm_fp8", dict(m=64, n=64, k=64, transpose_b=True), dtype="float8_e4m3fn"),
+            dict(block_M=64, block_N=64, block_K=32, num_stages=1, threads=128, enable_rasteration=False, vector=8),
+        ),
         (
             Workload("attention", "attention", dict(batch=1, heads=1, sequence=128, dim=64)),
             dict(block_M=64, block_N=64, num_stages=1, threads=128, qk_policy="square"),

@@ -1,4 +1,9 @@
-# Example-kernel alignment (2026-09-16)
+# Archived example-kernel alignment (2026-09-16)
+
+This document records the earlier four-family checkpoint. The current study has
+removed the standalone softmax family and replaced it with native FP8 GEMM; see
+the [current family contracts](README.md). Historical softmax measurements below
+are retained only to explain that checkpoint and are not discoverable workloads.
 
 The opt-in [grouped GEMM family](grouped_gemm/README.md) was added after this
 checkpoint. It directly elaborates `example_grouped_gemm_fwd.py::grouped_gemm`,
@@ -7,11 +12,11 @@ output attribute. Its 192-config pool fixes `block_M=64` so the same padded grou
 offsets remain valid for every candidate. It has a separate holdout manifest and
 does not change the historical matrix or measurements below.
 
-This records the initial alignment checkpoint. All four families now have one
+This records the initial alignment checkpoint. All four families then had one
 complete expanded pool and no local/legacy experiment kernels: GEMM 2,304,
 FlashAttention 320, KDA 720 and softmax 224 configs per case. See the
 [current family contracts](README.md). Pool counts and measured results below
-describe the earlier checkpoint, not the new space-version-5 pools.
+describe the earlier checkpoint, not the current space-version-6 pools.
 
 The final eight cases now build their TileLang programs by calling the example
 builders directly. This replaces the separate implementations selected by the

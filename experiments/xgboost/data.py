@@ -18,6 +18,7 @@ def canonical_workload(workload):
     w = workload if isinstance(workload, Workload) else Workload(**workload)
     defaults = {
         "gemm": dict(batch=1, transpose_a=False, transpose_b=False, epilogue="none"),
+        "gemm_fp8": dict(batch=1, transpose_a=False, transpose_b=False, epilogue="none"),
         "grouped_gemm": dict(transpose_b=False),
         "attention": dict(causal=False),
     }
@@ -52,10 +53,10 @@ def make_context(workload, implementation, target, device_name, backend, source_
     paths.append(f"experiments/{family}/reference.py")
     examples = {
         "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
+        "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
         "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
         "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
         "kda": "examples/kda/chunk_o.py",
-        "softmax": "examples/online_softmax/online_softmax.py",
     }
     if family in examples:
         paths.append(examples[family])

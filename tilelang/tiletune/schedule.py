@@ -56,6 +56,18 @@ def collect_producer_buffers(col, loop):
         if any(x is None or x <= 0 for x in dims):
             raise ValueError("symbolic producer tile size")
         dtype = tvm.DataType(buffer.dtype)
+        sources = []
+        for read in op.reads:
+            if read.buffer.scope() == "global" and not any(read.buffer.same_as(item) for item in sources):
+                sources.append(read.buffer)
+        source = sources[0] if len(sources) == 1 else None
+        source_shape = [_int(value) for value in source.shape] if source is not None else []
+        source_dtype = tvm.DataType(source.dtype) if source is not None else None
+        source_bytes = (
+            (prod(source_shape) * source_dtype.bits * source_dtype.lanes + 7) // 8
+            if source is not None and all(value is not None and value > 0 for value in source_shape)
+            else None
+        )
         copies.append(
             dict(
                 operation=op.index,
@@ -64,6 +76,9 @@ def collect_producer_buffers(col, loop):
                 region=region.to_dict(),
                 dtype=str(buffer.dtype),
                 bytes=(prod(dims) * dtype.bits * dtype.lanes + 7) // 8,
+                source_buffer=source.name if source is not None else None,
+                source_buffer_id=str(hash(source)) if source is not None else None,
+                source_bytes=source_bytes,
                 first_consumer=min(uses),
                 last_consumer=max(uses),
             )

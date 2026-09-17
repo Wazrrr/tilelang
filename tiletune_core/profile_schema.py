@@ -9,6 +9,7 @@ from math import isfinite
 
 RATE_FIELDS = {
     "async_copy_issue_bytes_per_cycle",
+    "cached_global_bytes_per_cycle",
     "global_bytes_per_cycle",
     "shared_bytes_per_cycle",
     "gemm_flops_per_cycle",
@@ -25,6 +26,8 @@ RATE_FIELDS = {
     "reduction_shuffle_max_per_cycle",
 }
 LATENCY_FIELDS = {"copy_latency_cycles", "barrier_cycles", "async_copy_latency_cycles"}
+CAPACITY_FIELDS = {"l2_cache_bytes"}
+UNCERTAINTY_FIELDS = {"score_relative_uncertainty"}
 CONSUMER_RATE_FIELDS = {
     "elementwise_ops_per_cycle",
     "exp_ops_per_cycle",
@@ -38,7 +41,10 @@ PROFILE_METADATA_FIELDS = {"gemm_signature", "profile_target", "profile_backend"
 
 
 def validate_performance_model(profile):
-    if not isinstance(profile, dict) or set(profile) - RATE_FIELDS - LATENCY_FIELDS - PROFILE_METADATA_FIELDS - {"consumer_rates"}:
+    if (
+        not isinstance(profile, dict)
+        or set(profile) - RATE_FIELDS - LATENCY_FIELDS - CAPACITY_FIELDS - UNCERTAINTY_FIELDS - PROFILE_METADATA_FIELDS - {"consumer_rates"}
+    ):
         raise ValueError("performance_model contains unsupported fields")
     for key, value in profile.items():
         if key == "consumer_rates":
@@ -63,6 +69,16 @@ def validate_performance_model(profile):
                 raise ValueError("memory_regime must be cached or streaming")
             elif not isinstance(value, str) or not value:
                 raise ValueError(f"{key} must be a nonempty string")
+            continue
+        if key in CAPACITY_FIELDS and (type(value) is not int or value <= 0):
+            raise ValueError("performance_model capacities must be positive integers")
+        if key in CAPACITY_FIELDS:
+            continue
+        if key in UNCERTAINTY_FIELDS and (
+            isinstance(value, bool) or not isinstance(value, float | int) or not isfinite(value) or not 0 <= value < 1
+        ):
+            raise ValueError("performance_model uncertainties must be finite fractions in [0, 1)")
+        if key in UNCERTAINTY_FIELDS:
             continue
         if (
             isinstance(value, bool)

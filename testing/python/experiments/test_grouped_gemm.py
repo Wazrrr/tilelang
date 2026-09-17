@@ -95,7 +95,7 @@ def test_dtype_layout_and_carver_support():
         replace(w, parameters=dict(w.parameters, transpose_b=1))
     implicit = replace(w, parameters={k: v for k, v in w.parameters.items() if k != "transpose_b"})
     assert canonical_workload(implicit) == canonical_workload(w)
-    assert carver_support_reason(w, Device("hopper", TARGETS["hopper"])) is not None
+    assert carver_support_reason(w, Device("hopper", TARGETS["hopper"])) is None
 
 
 def test_example_and_adapter_sources_invalidate_baselines_and_models():
@@ -140,6 +140,13 @@ def test_inputs_reference_and_fixed_offsets(transpose_b):
         case.check([torch.zeros_like(expected)], [expected])
     with pytest.raises(ValueError, match="block_M=64"):
         case.build(**dict(CONFIG, block_M=32))
+
+
+def test_autotuner_builder_closure_is_scalar_serializable():
+    from experiments.grouped_gemm.kernel import make_case
+
+    build = make_case(cases(holdout=True)[0]).build
+    assert all(isinstance(cell.cell_contents, int | float | str | bool | type(None)) for cell in build.__closure__ or ())
 
 
 @pytest.mark.parametrize("w", cases(holdout=True), ids=lambda w: w.name)

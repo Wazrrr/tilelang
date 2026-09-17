@@ -22,13 +22,13 @@ TARGETS = {
 
 _PARAMETERS = {
     "gemm": ({"m", "n", "k"}, {"batch", "transpose_a", "transpose_b", "epilogue"}),
+    "gemm_fp8": ({"m", "n", "k"}, {"batch", "transpose_a", "transpose_b", "epilogue"}),
     "grouped_gemm": ({"batch_sizes", "n", "k"}, {"transpose_b"}),
     "attention": ({"batch", "heads", "sequence", "dim"}, {"causal"}),
     "kda_chunk_o": ({"batch", "heads", "sequence", "dim", "value_dim", "chunk_size"}, set()),
-    "softmax": ({"rows", "columns"}, set()),
 }
 
-_DTYPES = ("float16", "bfloat16", "float32")
+_DTYPES = ("float16", "bfloat16", "float32", "float8_e4m3fn", "float8_e5m2")
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,8 @@ class Workload:
             raise ValueError(f"Unsupported workload dtype {self.dtype}")
         if self.op in ("attention", "kda_chunk_o", "grouped_gemm") and self.dtype not in ("float16", "bfloat16"):
             raise ValueError(f"{self.op} supports float16 and bfloat16")
+        if self.op == "gemm_fp8" and self.dtype not in ("float8_e4m3fn", "float8_e5m2"):
+            raise ValueError("gemm_fp8 supports float8_e4m3fn and float8_e5m2")
         if self.op == "kda_chunk_o" and self.parameters["sequence"] % self.parameters["chunk_size"]:
             raise ValueError("kda_chunk_o requires complete chunks")
         if self.configs is not None and (not self.configs or any(not isinstance(c, dict) or not c for c in self.configs)):
@@ -189,13 +191,17 @@ def load_manifest(data):
 
 
 def support_reason(workload, device):
-    if workload.op in ("gemm", "grouped_gemm"):
+    if workload.op in ("gemm", "gemm_fp8", "grouped_gemm"):
         from experiments.families import family_module
 
         reason = family_module(workload.op, "spaces").support_reason(workload)
         if reason:
             return reason
     kind = device.target["kind"]
+    if workload.op == "gemm_fp8":
+        match = re.fullmatch(r"sm_(\d+)[a-z]*", device.target.get("arch", "")) if kind == "cuda" else None
+        if match is None or int(match.group(1)) < 90:
+            return "the FP8 tensor-core example requires Hopper or newer CUDA hardware"
     if kind not in ("cuda", "hip"):
         return (
             None

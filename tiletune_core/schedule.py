@@ -54,7 +54,7 @@ def buffer_transition(copies, consumers, depth, bandwidth, latency, barrier):
     ready = []
     for index, copy in enumerate(copies):
         issue = _maximum(issue, basis[3 + index * depth])
-        service = _delay(_maximum(issue, service), copy["bytes"] / bandwidth)
+        service = _delay(_maximum(issue, service), copy.get("service_bytes", copy["bytes"]) / bandwidth)
         ready.append(_delay(service, latency))
     releases = {}
     for op, cycles in consumers:

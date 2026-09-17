@@ -51,14 +51,18 @@ def execute(plan, output, settings, *, baseline_root, baseline_seed=123):
             )
         write_json(output / "baselines.json", references)
         if not device.profiles and not device.performance_model:
-            preparation = output / "preparation" / device.name
-            request = make_request(
-                Workload(**plan["splits"]["test"][0]), device, dict(settings, method="profile", memory_regime="streaming")
-            )
-            result = _existing_or_run(request, preparation)
-            if result["status"] != "profiled":
-                raise RuntimeError(f"TileTune profile preparation failed: {result}")
-            device = replace(device, profiles=result["profiles"])
+            profiles = {}
+            for item in plan["splits"]["test"]:
+                workload = Workload(**item)
+                if workload.dtype in profiles:
+                    continue
+                preparation = output / "preparation" / device.name / workload.dtype
+                request = make_request(workload, device, dict(settings, method="profile", memory_regime="streaming"))
+                result = _existing_or_run(request, preparation)
+                if result["status"] != "profiled":
+                    raise RuntimeError(f"TileTune profile preparation failed for {workload.dtype}: {result}")
+                profiles.update(result["profiles"])
+            device = replace(device, profiles=profiles)
         for seed in plan["budget"]["seeds"]:
             root = output / str(seed) / device.name
             root.mkdir(parents=True, exist_ok=True)

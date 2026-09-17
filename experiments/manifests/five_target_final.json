@@ -159,24 +159,28 @@
       "config_space": "expanded"
     },
     {
-      "name": "softmax_aligned",
-      "op": "softmax",
+      "name": "gemm_fp8_e4m3",
+      "op": "gemm_fp8",
       "parameters": {
-        "rows": 1536,
-        "columns": 4096
+        "m": 4096,
+        "n": 4096,
+        "k": 4096,
+        "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     },
     {
-      "name": "softmax_irregular",
-      "op": "softmax",
+      "name": "gemm_fp8_e5m2",
+      "op": "gemm_fp8",
       "parameters": {
-        "rows": 1031,
-        "columns": 1537
+        "m": 8192,
+        "n": 8192,
+        "k": 8192,
+        "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "float8_e5m2",
       "configs": null,
       "config_space": "expanded"
     }

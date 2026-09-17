@@ -8,12 +8,12 @@ def model_target(target):
     Target = tvm.target.Target
 
     target = dict(Target(target).export())
-    if target.get("arch") == "sm_90a":
+    if target.get("arch") in ("sm_90a", "sm_100a"):
         target["arch"] = "sm_90"
     return Target(target)
 
 
-def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True):
+def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True, template=None):
     from tilelang import tvm
 
     Target = tvm.target.Target
@@ -24,7 +24,7 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
     from tilelang.tiletune.ranking import rank_records, select_top_k
 
     arch = CUDA(model_target(target))
-    template = MatmulTemplate(
+    template = template or MatmulTemplate(
         M=m, N=n, K=k, trans_A=transpose_a, trans_B=transpose_b, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32"
     )
     func, tags = get_tensorized_func_and_tags(template.equivalent_function(), arch.target, allow_gemv=True)

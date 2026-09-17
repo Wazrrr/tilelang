@@ -26,6 +26,10 @@ def make_case(workload):
         raise ValueError(reason)
     p, dtype = workload.parameters, workload.dtype
     sizes = tuple(p["batch_sizes"])
+    # AutoTuner fingerprints closure values before compiling in worker
+    # processes. Keep the builder closure scalar-only and reconstruct the
+    # immutable group sizes at elaboration time.
+    serialized_sizes = ",".join(str(size) for size in sizes)
     n, k, transpose_b = p["n"], p["k"], p.get("transpose_b", False)
 
     def build(block_M, block_N, block_K, num_stages, threads):
@@ -34,7 +38,7 @@ def make_case(workload):
         return _grouped_program(
             K=k,
             N=n,
-            batch_sizes_list=sizes,
+            batch_sizes_list=tuple(int(size) for size in serialized_sizes.split(",")),
             trans_b=transpose_b,
             dtype=dtype,
             block_M=block_M,

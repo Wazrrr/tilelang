@@ -237,7 +237,11 @@ class TileTuneSession:
             "selected_indices": indices,
             "selected_count": len(indices),
             "shortfall": max(0, self.config.top_k - len(indices)),
-            "tie_break": "original configuration index",
+            "tie_break": (
+                "fixed-primitive uncertainty group, then original configuration index"
+                if any(row.get("score_relative_uncertainty", 0) for row in self.ranking)
+                else "original configuration index"
+            ),
             "unknown_policy": "exclude unscored and pressure-rejected candidates",
             "failure_policy": "no replacement after compilation or benchmark failure",
             "wall_time_ms": (time.perf_counter() - started) * 1000,

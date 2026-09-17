@@ -73,7 +73,7 @@ def good_comparison(case):
 
 
 def test_family_acceptance_has_local_costs_and_cannot_certify_the_matrix(tmp_path):
-    cases = [w.to_dict() for w in core_cases("final", ["softmax"])]
+    cases = [w.to_dict() for w in core_cases("final", ["gemm_fp8"])]
     plan = dict(suite="final", devices=[dict(name="ampere")], budget=dict(seeds=[123]), splits=dict(test=cases), unavailable={})
     result = tmp_path / "123/ampere/comparison.json"
     result.parent.mkdir(parents=True)

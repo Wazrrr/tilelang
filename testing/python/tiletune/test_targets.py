@@ -216,8 +216,11 @@ def test_hip_compile_reuses_frozen_ir_and_preserves_flag_ownership(monkeypatch):
     from experiments.common.kernels import make_case
 
     target = {"kind": "hip", "mcpu": "gfx942", "thread_warp_size": 64}
-    configs = [{"BLOCK_M": 1, "BLOCK_N": 128, "threads": 128}, {"BLOCK_M": 2, "BLOCK_N": 128, "threads": 128}]
-    case = make_case(Workload("softmax", "softmax", dict(rows=32, columns=128)))
+    configs = [
+        dict(block_M=32, block_N=32, block_K=16, num_stages=0, thread_num=128, enable_rasteration=False),
+        dict(block_M=64, block_N=32, block_K=16, num_stages=0, thread_num=128, enable_rasteration=False),
+    ]
+    case = make_case(Workload("gemm", "gemm", dict(m=64, n=32, k=32, transpose_b=True)))
     built = []
 
     def elaborate(**kwargs):

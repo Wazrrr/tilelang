@@ -82,11 +82,18 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
         raise ValueError(f"device profile has no measurements for {signature}")
     model = data["gemm_models"][key]
     rates = {**data["common"]["rates"], **model["rates"]}
+    cached_rate = rates["global_bytes_per_cycle"]
     streaming_rate = rates.pop("dram_bytes_per_cycle", None)
     if memory_regime == "streaming":
         if streaming_rate is None:
             raise ValueError("device profile has no streaming memory measurement")
+        rates["cached_global_bytes_per_cycle"] = cached_rate
         rates["global_bytes_per_cycle"] = streaming_rate
+        if data["identity"].get("l2_cache_bytes"):
+            rates["l2_cache_bytes"] = data["identity"]["l2_cache_bytes"]
+    uncertainty = _gemm_score_uncertainty(model)
+    if uncertainty is not None:
+        rates["score_relative_uncertainty"] = uncertainty
     if data["common"].get("consumer_rates"):
         rates["consumer_rates"] = data["common"]["consumer_rates"]
     result = {
@@ -104,6 +111,21 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
 
     validate_performance_model(result)
     return result
+
+
+def _gemm_score_uncertainty(model):
+    """Bound fixed-probe slope variation without consulting candidate timings."""
+    evidence = (model.get("evidence") or {}).get("gemm_flops_per_cycle") or {}
+    measurements = evidence.get("measurements") or []
+    if len(measurements) != 2:
+        return None
+    first, second = (item.get("latency_samples_ms") or [] for item in measurements)
+    slopes = [1 / (right - left) for left in first for right in second if right > left]
+    if not slopes:
+        return None
+    center = statistics.median(slopes)
+    uncertainty = (max(slopes) - min(slopes)) / center
+    return uncertainty if math.isfinite(uncertainty) and 0 <= uncertainty < 1 else None
 
 
 def anchor_latency(performance_model, analysis, measured_latency_ms):

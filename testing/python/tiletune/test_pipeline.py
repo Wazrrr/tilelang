@@ -41,6 +41,94 @@ def test_stage_zero_serial_loop_is_scored_without_overlap():
     assert result["producer_copies_per_iteration"] == 2
     timing = result["timing"]
     assert timing["steady_state_interval_cycles"] == timing["input_ready_latency_cycles"] + timing["consumer_cycles_per_iteration"]
+    assert timing["input_ready_latency_cycles"] == timing["copy_service_cycles_per_iteration"]
+    phase_cycles = sum(
+        item["cycles"]
+        for item, phase in zip(timing["phase_cycles"], result["phases"])
+        if phase["inside_loop"]
+    )
+    assert timing["consumer_cycles_per_iteration"] == phase_cycles + 2 * PROFILE["barrier_cycles"]
+
+
+def test_stage_zero_direct_copy_ranking_does_not_use_async_readiness_latency():
+    first = pipeline(stages=0)
+    second = pipeline(stages=0, profile=dict(PROFILE, copy_latency_cycles=800))
+    without_latency = dict(PROFILE)
+    without_latency.pop("copy_latency_cycles")
+    assert first["timing"] == second["timing"]
+    assert pipeline(stages=0, profile=without_latency)["timing"] == first["timing"]
+
+
+def test_dense_gemm_uses_profiled_l2_rate_only_for_a_resident_k_slice():
+    resident = pipeline(profile=dict(PROFILE, cached_global_bytes_per_cycle=128, l2_cache_bytes=8192))
+    cache = resident["inter_cta_cache"]
+    assert cache["status"] == "applied"
+    assert cache["slice_working_set_bytes"] == 8192
+    assert cache["logical_input_bytes_per_iteration"] == 8192
+    assert cache["dram_unique_bytes_per_cta_iteration"] == 1024
+    assert cache["dram_equivalent_service_bytes_per_iteration"] == 4608
+    assert resident["timing"]["copy_service_cycles_per_iteration"] == 4608 / PROFILE["global_bytes_per_cycle"]
+    streaming = pipeline(profile=dict(PROFILE, cached_global_bytes_per_cycle=128, l2_cache_bytes=8191))
+    assert streaming["inter_cta_cache"] is None
+    assert streaming["timing"]["copy_service_cycles_per_iteration"] == 8192 / PROFILE["global_bytes_per_cycle"]
+
+
+def test_blackwell_tma_pipeline_uses_native_warp_specialization_policy():
+    result = analyze_prim_func(
+        matrix_pipeline(threads=256, stages=3),
+        {"performance_model": PROFILE},
+        target={"kind": "cuda", "arch": "sm_100a"},
+        device_limits=LIMITS,
+    )
+    policy = result["modules"]["warp_specialization"]
+    assert policy["status"] == "predicted"
+    assert policy["producer_threads"] == 128
+    assert policy["consumer_threads"] == 256
+    assert policy["launch_threads"] == 384
+    assert policy["register_reservation_per_block"] == 128 * 24 + 256 * 240
+    assert result["modules"]["waves"]["launch_threads"] == 384
+    assert result["modules"]["pipeline_overlap"]["overlap_eligible"]
+    assert result["tile_cost"]["score"] is not None
+
+
+def test_blackwell_serial_mma_occupancy_includes_native_operand_fragments():
+    result = analyze_prim_func(
+        matrix_pipeline(threads=256, stages=0),
+        {"performance_model": PROFILE},
+        target={"kind": "cuda", "arch": "sm_100a"},
+        device_limits=LIMITS,
+    )
+    waves = result["modules"]["waves"]
+    assert result["pressure"]["mma_operand_registers"]
+    assert waves["registers_per_block_estimate"] > waves["logical_tile_registers_per_block_estimate"]
+    assert "native MMA operand fragments" in waves["register_estimate_basis"]
+
+
+def test_grouped_gemm_outer_dispatch_does_not_hide_inner_blackwell_pipeline():
+    from experiments.grouped_gemm.cases import cases
+    from experiments.grouped_gemm.kernel import make_case
+
+    case = make_case(cases(holdout=True)[0])
+    results = []
+    for stages in (1, 2, 3):
+        func = case.build(block_M=64, block_N=128, block_K=64, num_stages=stages, threads=256)
+        results.append(
+            analyze_prim_func(
+                func,
+                {"performance_model": PROFILE},
+                target={"kind": "cuda", "arch": "sm_100a"},
+                device_limits=LIMITS,
+            )
+        )
+    assert all(r["modules"]["warp_specialization"]["status"] == "predicted" for r in results)
+    assert all(r["modules"]["waves"]["launch_threads"] == 384 for r in results)
+    assert all(
+        r["modules"]["pipeline_overlap"]["timing"]["schedule_model"] == "grouped GEMM per-buffer max-plus recurrence"
+        for r in results
+    )
+    assert [r["tile_cost"]["score"] for r in results] == sorted(
+        (r["tile_cost"]["score"] for r in results), reverse=True
+    )
 
 
 def test_wgmma_participants_use_consumers_and_honor_pass_overrides():

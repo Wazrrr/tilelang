@@ -17,21 +17,26 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
     global_rate = profile.get("global_bytes_per_cycle")
     latency = profile.get("copy_latency_cycles")
     barrier = profile.get("barrier_cycles")
-    if not global_rate or latency is None or barrier is None or n is None or stages is None:
+    if not global_rate or barrier is None or n is None or stages is None:
         return None
 
     times = [estimate_phase_cycles(p, profile, concurrent_ctas) for p in pipeline["phases"]]
     if any(t is None for t in times):
         return None
     if pipeline.get("ampere_schedule") is not None:
+        if latency is None:
+            return None
         return _estimate_ampere(pipeline, times, n, profile, concurrent_ctas)
     consumer = sum(t for t, p in zip(times, pipeline["phases"]) if p["inside_loop"])
     outside = sum(t for t, p in zip(times, pipeline["phases"]) if not p["inside_loop"])
-    service = pipeline["input_bytes_per_iteration"] * concurrent_ctas / global_rate
-    ready = service + pipeline["producer_copies_per_iteration"] * latency
-    consumer += barrier * pipeline["producer_copies_per_iteration"]
-    model = "serial consumer loop"
+    service_bytes = pipeline.get("input_service_bytes_per_iteration") or pipeline["input_bytes_per_iteration"]
+    service = service_bytes * concurrent_ctas / global_rate
+    copies_per_iteration = pipeline["producer_copies_per_iteration"]
+    ready = service
+    model = "synchronous copy/consumer loop"
     if pipeline["overlap_eligible"]:
+        if latency is None:
+            return None
         from .schedule import buffer_transition, repeat_transition
 
         copies = pipeline.get("producer_buffers")
@@ -48,14 +53,28 @@ def estimate_pipeline_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
         step = loop_cycles - repeat_transition(transition, n - 1)[0] if n else 0
         model = "per-buffer max-plus recurrence"
     else:
+        # Stage-zero lowering emits direct cooperative loads, then one CTA
+        # barrier before shared-memory consumption and one before the next
+        # iteration reuses the buffers. Logical source buffers share those
+        # synchronization points; they are not independent TMA transactions.
+        consumer += (2 * barrier) if copies_per_iteration else 0
         step = ready + consumer
         first = step
         loop_cycles = n * step
-    outside += pipeline["outside_loop_bytes"] * concurrent_ctas / global_rate + pipeline["outside_loop_input_copies"] * latency
+    outside += pipeline["outside_loop_bytes"] * concurrent_ctas / global_rate
+    if pipeline["outside_loop_input_copies"]:
+        if pipeline["overlap_eligible"]:
+            outside += pipeline["outside_loop_input_copies"] * latency
+        else:
+            # Direct outside-loop copies likewise become visible through CTA
+            # synchronization, not the asynchronous-copy readiness latency.
+            outside += 2 * barrier
     return {
         "cycles": outside + loop_cycles,
         "consumer_cycles_per_iteration": consumer,
         "copy_service_cycles_per_iteration": service,
+        "logical_input_bytes_per_iteration": pipeline["input_bytes_per_iteration"],
+        "service_bytes_per_iteration": service_bytes,
         "input_ready_latency_cycles": ready,
         "steady_state_interval_cycles": step,
         "fill_and_first_consumer_cycles": first,

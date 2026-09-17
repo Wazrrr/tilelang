@@ -25,7 +25,12 @@ def evaluate_cuda_facts(facts):
         SimpleNamespace(matched=p["specialization_matched"]),
         p["register_demand"],
     )
-    cost.update(score=ranking["score"], score_formula=ranking["formula"], ranking_metric=ranking["metric"])
+    cost.update(
+        score=ranking["score"],
+        score_formula=ranking["formula"],
+        ranking_metric=ranking["metric"],
+        score_relative_uncertainty=ranking.get("score_relative_uncertainty", 0),
+    )
     if ranking["score"] is None:
         cost["precision"] = "unknown"
         cost["unknown"] = sorted(set(cost["unknown"] + ranking["unknown"]))

@@ -49,6 +49,10 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
             result["unknown"].append("pipeline_time requires a supported schedule, complete effective cost profile, and occupancy inputs")
     if result["score"] is not None:
         result["precision"] = "estimate"
+        uncertainty = (config.performance_model or {}).get("score_relative_uncertainty")
+        if pipeline.get("specialization") == "gemm" and uncertainty:
+            result["score_relative_uncertainty"] = uncertainty
+            result["uncertainty_basis"] = "fixed GEMM primitive slope envelope"
         if demand.get("status") == "within_allowance":
             result["conditional_on_spill_allowance"] = True
             result["spill_traffic_modeled"] = False
@@ -131,9 +135,30 @@ def rank_records(records):
         if score is not None and (type(score) not in (float, int) or not math.isfinite(score)):
             score = None
         tier = "pressure_rejected" if decision.get("would_reject") else "unknown" if score is None else "eligible"
-        entries.append({"index": record["index"], "tier": tier, "score": score})
+        uncertainty = (record.get("tile_cost") or {}).get("score_relative_uncertainty", 0)
+        if isinstance(uncertainty, bool) or not isinstance(uncertainty, int | float) or not math.isfinite(uncertainty) or not 0 <= uncertainty < 1:
+            uncertainty = 0
+        entries.append({"index": record["index"], "tier": tier, "score": score, "score_relative_uncertainty": uncertainty})
     order = {"eligible": 0, "unknown": 1, "pressure_rejected": 2}
     entries.sort(key=lambda e: (order[e["tier"]], e["score"] if e["score"] is not None else float("inf"), e["index"]))
+    eligible = [entry for entry in entries if entry["tier"] == "eligible"]
+    grouped, group_id, cursor = [], 0, 0
+    while cursor < len(eligible):
+        first = eligible[cursor]
+        end = cursor + 1
+        while end < len(eligible):
+            candidate = eligible[end]
+            tolerance = max(first["score_relative_uncertainty"], candidate["score_relative_uncertainty"])
+            if candidate["score"] > first["score"] * (1 + tolerance):
+                break
+            end += 1
+        group = sorted(eligible[cursor:end], key=lambda entry: entry["index"])
+        for entry in group:
+            entry["uncertainty_group"] = group_id
+        grouped.extend(group)
+        group_id += 1
+        cursor = end
+    entries = grouped + [entry for entry in entries if entry["tier"] != "eligible"]
     for i, entry in enumerate(entries):
         entry["rank"] = i + 1
     groups = {}
@@ -142,6 +167,14 @@ def rank_records(records):
     for entry in entries:
         ranks = groups[entry["tier"], entry["score"]]
         entry.update(tie_first_rank=min(ranks), tie_last_rank=max(ranks))
+    uncertainty_groups = {}
+    for entry in entries:
+        if entry["tier"] == "eligible":
+            uncertainty_groups.setdefault(entry["uncertainty_group"], []).append(entry["rank"])
+    for entry in entries:
+        if entry["tier"] == "eligible":
+            ranks = uncertainty_groups[entry.pop("uncertainty_group")]
+            entry.update(uncertainty_first_rank=min(ranks), uncertainty_last_rank=max(ranks))
     return entries
 
 

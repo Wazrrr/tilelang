@@ -39,13 +39,13 @@ def test_default_workloads_match_the_family_suites():
     assert default_workloads(smoke=True) == core_cases("development")
 
 
-@pytest.mark.parametrize("op", ["rmsnorm", "reduce_sum", "elementwise", "gemm_fp8"])
+@pytest.mark.parametrize("op", ["rmsnorm", "reduce_sum", "elementwise", "softmax"])
 def test_retired_operations_are_rejected(op):
     with pytest.raises(ValueError, match="Unknown operation"):
         Workload("retired", op, {})
 
 
-@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+@pytest.mark.parametrize("dtype", ["float8_e4m3fnuz", "float8_e5m2fnuz"])
 def test_retired_fp8_dtypes_are_rejected(dtype):
     with pytest.raises(ValueError, match="Unsupported workload dtype"):
         replace(default_workloads()[0], dtype=dtype)
@@ -136,10 +136,13 @@ def test_small_signal_corruption_fails_correctness():
     import torch
     from experiments.common.kernels import make_case
 
-    case = make_case(Workload("softmax", "softmax", dict(rows=2, columns=4096)))
+    case = make_case(
+        Workload("fp8", "gemm_fp8", dict(m=16, n=16, k=16, transpose_b=True), dtype="float8_e4m3fn")
+    )
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("PyTorch FP8 required")
     inputs = case.inputs("cpu", torch.Generator().manual_seed(123))
     expected = case.reference(*inputs)
-    assert expected.max() < 0.02
     with pytest.raises(AssertionError):
         case.check([torch.zeros_like(expected)], [expected])
     case.check([expected], [expected])
@@ -153,7 +156,7 @@ def test_kernel_build_closures_obey_autotuner_contract(name):
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])
 
 
-def test_gpu_softmax_boundaries():
+def test_gpu_fp8_boundaries():
     import torch
     import tilelang
     from experiments.common.kernels import make_case
@@ -161,10 +164,13 @@ def test_gpu_softmax_boundaries():
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
-    w = Workload("softmax", "softmax", dict(rows=7, columns=93))
+    target = current_target()
+    if target["kind"] != "cuda" or int(target["arch"].split("_")[1].rstrip("af")) < 90:
+        pytest.skip("FP8 tensor cores require Hopper or newer")
+    w = Workload("fp8", "gemm_fp8", dict(m=64, n=96, k=64, transpose_b=True), dtype="float8_e4m3fn")
     case = make_case(w)
-    program = case.build(BLOCK_M=2, BLOCK_N=128, threads=128)
-    kernel = tilelang.compile(program, target=current_target(), execution_backend="tvm_ffi", out_idx=case.out_idx)
+    program = case.build(block_M=64, block_N=64, block_K=32, num_stages=1, threads=128, enable_rasteration=False)
+    kernel = tilelang.compile(program, target=target, execution_backend="tvm_ffi", out_idx=case.out_idx)
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
     result = kernel(*inputs)
     case.check([result], [case.reference(*inputs)])

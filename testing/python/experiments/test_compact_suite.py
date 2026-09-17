@@ -15,7 +15,7 @@ from experiments.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
 def test_smoke_uses_same_cases_and_three_fixed_budgets():
     assert core_cases("smoke") == core_cases("development")[::2]
     assert len(core_cases("final")) == len(core_cases("development")) == 8
-    assert {w.dtype for w in core_cases("final")} == {"float16"}
+    assert {w.dtype for w in core_cases("final")} == {"float16", "float8_e4m3fn", "float8_e5m2"}
     for w in core_cases("final"):
         if w.op == "kda_chunk_o":
             assert w.parameters["sequence"] % w.parameters["chunk_size"] == 0
@@ -27,7 +27,7 @@ def test_smoke_uses_same_cases_and_three_fixed_budgets():
 
 
 def test_pairwise_is_deterministic_and_preserves_indices():
-    w = Workload("softmax", "softmax", dict(rows=7, columns=93))
+    w = Workload("fp8", "gemm_fp8", dict(m=64, n=96, k=128, transpose_b=True), dtype="float8_e4m3fn")
     d = Device("ampere", TARGETS["ampere"])
     configs = [dict(BLOCK_M=r, BLOCK_N=8192, threads=t) for r in [1, 2, 4] for t in [64, 128, 256]]
     first = pairwise_subset(w, d, configs, 5)
@@ -39,7 +39,7 @@ def test_pairwise_is_deterministic_and_preserves_indices():
 
 
 def test_duplicate_configurations_never_fill_a_budget():
-    w = Workload("softmax", "softmax", dict(rows=128, columns=128))
+    w = Workload("fp8", "gemm_fp8", dict(m=128, n=128, k=128, transpose_b=True), dtype="float8_e4m3fn")
     d = Device("ampere", TARGETS["ampere"])
     c = dict(BLOCK_M=1, BLOCK_N=8192, threads=128)
     subset = pairwise_subset(w, d, [c, dict(c)], 16)
@@ -49,7 +49,7 @@ def test_duplicate_configurations_never_fill_a_budget():
 
 
 def test_required_subset_members_use_the_budget_and_seed_coverage():
-    w = Workload("softmax", "softmax", dict(rows=7, columns=93))
+    w = Workload("fp8", "gemm_fp8", dict(m=64, n=96, k=128, transpose_b=True), dtype="float8_e4m3fn")
     d = Device("ampere", TARGETS["ampere"])
     configs = [dict(BLOCK_M=r, BLOCK_N=8192, threads=t) for r in (1, 2, 4) for t in (64, 128, 256)]
     subset = pairwise_subset(w, d, configs, 5, required_indices=[0, 8])

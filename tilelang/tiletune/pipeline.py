@@ -15,6 +15,54 @@ from tiletune_core.pipeline import estimate_pipeline_cycles as estimate_pipeline
 from tiletune_core.pipeline import _estimate_ampere as _estimate_ampere
 
 
+def _apply_dense_gemm_cache_model(copies, distribution, iterations, performance_model):
+    """Convert exact inter-CTA L2 reuse into DRAM-equivalent service bytes."""
+    if not performance_model or iterations.get("precision") != "exact" or iterations.get("min") != iterations.get("max"):
+        return None
+    count = iterations.get("max")
+    grid = distribution.get("grid_blocks")
+    l2_bytes = performance_model.get("l2_cache_bytes")
+    dram_rate = performance_model.get("global_bytes_per_cycle")
+    cached_rate = performance_model.get("cached_global_bytes_per_cycle")
+    if not count or not grid or not l2_bytes or not dram_rate or not cached_rate or any(copy.get("source_bytes") is None for copy in copies):
+        return None
+    sources = {}
+    for copy in copies:
+        source_id = copy.get("source_buffer_id")
+        if not source_id or (source_id in sources and sources[source_id] != copy["source_bytes"]):
+            return None
+        sources[source_id] = copy["source_bytes"]
+    slice_bytes = sum(sources.values()) / count
+    if slice_bytes > l2_bytes:
+        return None
+    logical, service, unique = 0, 0.0, 0.0
+    for copy in copies:
+        unique_bytes = min(copy["bytes"], copy["source_bytes"] / count / grid)
+        reused_bytes = copy["bytes"] - unique_bytes
+        copy["dram_unique_bytes"] = unique_bytes
+        copy["l2_reused_bytes"] = reused_bytes
+        copy["service_bytes"] = unique_bytes + reused_bytes * dram_rate / cached_rate
+        logical += copy["bytes"]
+        service += copy["service_bytes"]
+        unique += unique_bytes
+    return {
+        "status": "applied",
+        "method": "exact dense-GEMM K-slice footprint with ideal resident L2 reuse",
+        "l2_cache_bytes": l2_bytes,
+        "slice_working_set_bytes": slice_bytes,
+        "logical_input_bytes_per_iteration": logical,
+        "dram_unique_bytes_per_cta_iteration": unique,
+        "dram_equivalent_service_bytes_per_iteration": service,
+        "cached_global_bytes_per_cycle": cached_rate,
+        "dram_bytes_per_cycle": dram_rate,
+        "assumptions": [
+            "all CTAs consuming one exact K slice can reuse resident operand lines while the slice footprint fits L2",
+            "unique operand bytes use the streaming rate and repeated bytes use the cached-copy rate",
+            "no candidate latency or compiler counter calibrates the cache estimate",
+        ],
+    }
+
+
 def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass_configs=None, *, loop, family_name, phase_labels):
     from .src.ir_utils import _int
     from .src.ir_utils import loop_visits
@@ -121,6 +169,11 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
         iterations = loop_visits(domains)
         if iterations["max"] is None or stages is None:
             add_unknown("unresolved_loop", "unresolved loop count or buffer depth")
+    cache_model = (
+        _apply_dense_gemm_cache_model(producer_buffers, distribution, iterations, performance_model)
+        if family_name == "gemm"
+        else None
+    )
     if any(
         kind not in ("4", "1") and (loop is None or not var.same_as(loop.loop_var)) for op in col.operations for var, _, kind in op.loops
     ):
@@ -163,10 +216,14 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
         "overlap_eligible": eligible,
         "producer_copies_per_iteration": len(repeating),
         "input_bytes_per_iteration": known_sum([t["tile_bytes"] for t in repeating]),
+        "input_service_bytes_per_iteration": (
+            cache_model["dram_equivalent_service_bytes_per_iteration"] if cache_model is not None else None
+        ),
         "outside_loop_input_copies": len(once),
         "outside_loop_bytes": known_sum([t["bytes_per_block"] for t in once] + [memory["output_bytes_per_block"]]),
         "loop_carried_buffers": (pressure.get("tile_liveness") or {}).get("loop_carried_buffers", []),
         "performance_model": performance_model,
+        "inter_cta_cache": cache_model,
         "unknown": sorted(set(unknown)),
         "diagnostics": diagnostics,
         "precision": "unknown" if unknown else "conservative" if iterations["precision"] != "exact" else "estimate",
@@ -182,6 +239,8 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
             "consumer probes use eight independent chains; actual instruction dependencies and phase occupancy can differ",
         ],
     }
+    if cache_model is not None:
+        result["assumptions"].extend(cache_model["assumptions"])
     result["timing"] = estimate_pipeline_cycles(result)
     result["timing_status"] = "estimate" if result["timing"] is not None else "unknown"
     return result
