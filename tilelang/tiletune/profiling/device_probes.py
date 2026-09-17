@@ -168,6 +168,32 @@ def tensor_core(input_dtype, accum_dtype, iterations, blocks, threads):
     return main
 
 
+def tcgen05_tensor_core(input_dtype, accum_dtype, iterations, blocks, threads):
+    """Fixed Blackwell TCGen05 probe, independent of candidate tile choices."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((128, 128), input_dtype),
+        B: T.Tensor((128, 128), input_dtype),
+        Out: T.Tensor((blocks, 128, 128), accum_dtype),
+    ):
+        with T.Kernel(blocks, threads=threads) as bx:
+            a = T.alloc_shared((128, 128), input_dtype)
+            b = T.alloc_shared((128, 128), input_dtype)
+            c = T.alloc_tmem((128, 128), accum_dtype)
+            local = T.alloc_fragment((128, 128), accum_dtype)
+            mbar = T.alloc_barrier(1)
+            T.copy(A, a)
+            T.copy(B, b)
+            for k in T.serial(iterations):
+                T.tcgen05_gemm(a, b, c, transpose_B=True, mbar=mbar, clear_accum=k == 0)
+                T.mbarrier_wait_parity(mbar, k % 2)
+            T.copy(c, local)
+            T.copy(local, Out[bx, :, :])
+
+    return main
+
+
 REDUCTION_PRIMITIVES = r"""
 template <int Kind, int Iterations>
 __device__ __noinline__ float TileTuneReductionPrimitive(int tid) {

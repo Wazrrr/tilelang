@@ -62,6 +62,8 @@ def _bound(region, domains):
         high = ana.int_set(r.min + r.extent - 1, domains)
         if low.is_everything() or high.is_everything():
             return Region(region.buffer, region.ranges, "unknown")
+        if not str(low.min_value.dtype).startswith(("int", "uint")) or not str(high.max_value.dtype).startswith(("int", "uint")):
+            return Region(region.buffer, region.ranges, "unknown")
         ranges.append(Range.from_min_extent(ana.simplify(low.min_value), ana.simplify(high.max_value - low.min_value + 1)))
     return Region(region.buffer, ranges, "conservative")
 

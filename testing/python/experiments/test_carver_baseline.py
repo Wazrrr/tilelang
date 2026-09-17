@@ -30,6 +30,26 @@ def test_original_carver_ranks_common_grid(dtype):
         assert record["tile_cost"]["score"] == (record["model"]["traffic_bytes"] + 1) * record["model"]["waves"]
 
 
+def test_blackwell_carver_rejects_native_tcgen05_illegal_tiles():
+    configs = [
+        dict(block_M=32, block_N=32, block_K=32, num_stages=2, thread_num=128, enable_rasteration=False),
+        dict(block_M=32, block_N=64, block_K=32, num_stages=2, thread_num=128, enable_rasteration=False),
+    ]
+    result = rank_configs(
+        configs,
+        m=128,
+        n=128,
+        k=128,
+        dtype="float16",
+        target={"kind": "cuda", "arch": "sm_100a"},
+        top_k=2,
+    )
+    assert not result["configs"][0]["model"]["native_lowering_legal"]
+    assert result["configs"][0]["status"] == "model_rejected"
+    assert result["configs"][1]["model"]["native_lowering_legal"]
+    assert result["selection"]["selected_indices"] == [1]
+
+
 @pytest.mark.parametrize("op", ["gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"])
 def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     if not torch.cuda.is_available():
@@ -49,7 +69,7 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     }[op]
     for workload in family_module(op, "cases").cases(holdout=True):
         all_configs = configurations(workload, device)
-        configs = all_configs[:8] + all_configs[64:72] if op == "attention" else all_configs[:8]
+        configs = all_configs[:8] + all_configs[64:72] if op in ("gemm", "gemm_fp8", "attention") else all_configs[:8]
         if op == "grouped_gemm":
             assert "no block-scaled 2-CTA grouped-MXFP8 model" in carver_support_reason(workload, device)
             with pytest.raises(ValueError, match="no block-scaled"):

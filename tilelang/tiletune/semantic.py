@@ -13,7 +13,9 @@ def _grouped_gemm_metadata(func, collector):
     from .src.ir_utils import _int, dense_gemms, main_loops
 
     names = {buffer.name for buffer in func.buffer_map.values()}
-    if not {"batch_sizes", "batch_offsets", "batch_padded_offsets"} <= names:
+    legacy_dispatch = {"batch_sizes", "batch_offsets", "batch_padded_offsets"} <= names
+    native_dispatch = {"offsets", "storage_offsets"} <= names
+    if not (legacy_dispatch or native_dispatch):
         return None
     gemms = dense_gemms(collector)
     loops = main_loops(collector, gemms)
@@ -23,19 +25,35 @@ def _grouped_gemm_metadata(func, collector):
     buffers = {buffer.name: buffer for buffer in func.buffer_map.values()}
     a = next(buffer for name, buffer in buffers.items() if name.startswith("A"))
     c = next(buffer for name, buffer in buffers.items() if name.startswith("C"))
-    sizes = next(buffer for name, buffer in buffers.items() if name.startswith("batch_sizes"))
+    dispatch = buffers["batch_sizes"] if legacy_dispatch else buffers["offsets"]
+    block_m = _int(gemm.metadata.cRegion.region[0].extent)
+    stages = _int(loops[0].annotations.get("num_stages", 0))
+    if not stages and len(gemm.metadata.aRegion.buffer.shape) == 3:
+        stages = _int(gemm.metadata.aRegion.buffer.shape[0])
+    operand_bytes = 0
+    for region in (gemm.metadata.aRegion, gemm.metadata.bRegion):
+        dtype = str(region.buffer.dtype)
+        element_bytes = {"float8_e4m3fn": 1, "float8_e5m2": 1, "float16": 2, "bfloat16": 2}.get(dtype, 4)
+        operand_bytes += math.prod(_int(axis.extent) for axis in region.region) * element_bytes
+    blockscaled = {"SFA", "SFB"} <= names
+    if blockscaled:
+        operand_bytes += block_m + _int(gemm.metadata.cRegion.region[1].extent)
     return dict(
         kind="grouped_gemm",
-        group_count=_int(sizes.shape[0]),
-        m_blocks=_int(collector.threads["blockIdx.x"]),
+        group_count=_int(dispatch.shape[0]) - (0 if legacy_dispatch else 1),
+        m_blocks=math.ceil(_int(a.shape[0]) / block_m),
         n=_int(c.shape[1]),
         k=_int(a.shape[1]),
         dtype=str(a.dtype),
-        block_m=_int(gemm.metadata.cRegion.region[0].extent),
+        output_dtype=str(c.dtype),
+        block_m=block_m,
         block_n=_int(gemm.metadata.cRegion.region[1].extent),
-        block_k=_int(gemm.metadata.aRegion.region[1].extent),
-        num_stages=_int(loops[0].annotations.get("num_stages", 0)),
+        block_k=_int(gemm.metadata.aRegion.region[-1].extent),
+        num_stages=stages,
         threads=_int(collector.threads["threadIdx.x"]),
+        tcgen05=bool(getattr(gemm.metadata, "isTcgen05", False)) or gemm.metadata.c.scope() == "shared.tmem",
+        blockscaled=blockscaled,
+        input_bytes_per_iteration=operand_bytes,
     )
 
 
@@ -73,19 +91,26 @@ def _grouped_gemm(metadata, config, performance_model, device_limits, pressure):
     n, k, original_threads = metadata["n"], metadata["k"], metadata["threads"]
     stages = metadata["num_stages"]
     group_count = metadata["group_count"]
-    element_bytes = 2 if metadata["dtype"] in ("float16", "bfloat16") else 4
+    element_bytes = {"float8_e4m3fn": 1, "float8_e5m2": 1, "float16": 2, "bfloat16": 2}.get(metadata["dtype"], 4)
+    output_element_bytes = {"float8_e4m3fn": 1, "float8_e5m2": 1, "float16": 2, "bfloat16": 2}.get(
+        metadata["output_dtype"], 4
+    )
     n_tiles = math.ceil(n / bn)
     grid = metadata["m_blocks"] * n_tiles
     iterations = math.ceil(k / bk)
     depth = max(1, stages)
-    input_bytes = (bm * bk + bn * bk) * element_bytes
-    output_bytes = bm * bn * element_bytes
+    input_bytes = metadata["input_bytes_per_iteration"]
+    output_bytes = bm * bn * output_element_bytes
     metadata_bytes = (group_count + 3) * 4
     shared_bytes = input_bytes * depth
     threads = original_threads
-    logical_register_words = bm * bn
+    logical_register_words = 0 if metadata["tcgen05"] else bm * bn
     register_words = logical_register_words
-    register_basis = "exact FP32 accumulator tile plus native MMA operand fragments; compiler scratch remains unknown"
+    register_basis = (
+        "tensor-memory accumulator excluded; native operand and live fragment estimates only"
+        if metadata["tcgen05"]
+        else "exact FP32 accumulator tile plus native MMA operand fragments; compiler scratch remains unknown"
+    )
     operands = pressure.get("mma_operand_registers", {})
     operand_unknown = []
     operand_estimates = []
@@ -180,10 +205,13 @@ def _grouped_gemm(metadata, config, performance_model, device_limits, pressure):
         ranking["unknown"].append("pipeline_time requires an explicit device profile")
     elif unknown:
         ranking["unknown"].extend(unknown)
+    elif metadata["tcgen05"] and not performance_model.get("tcgen05_gemm_flops_per_cycle"):
+        ranking["unknown"].append("device profile is missing tcgen05_gemm_flops_per_cycle")
     else:
         active = min(resident, math.ceil(grid / limits["sm_count"]))
         global_rate = performance_model["global_bytes_per_cycle"] / active
-        gemm_rate = performance_model["gemm_flops_per_cycle"] / active
+        gemm_rate_key = "tcgen05_gemm_flops_per_cycle" if metadata["tcgen05"] else "gemm_flops_per_cycle"
+        gemm_rate = performance_model[gemm_rate_key] / active
         shared_rate = performance_model["shared_bytes_per_cycle"] / active
         copy_service = input_bytes / global_rate
         copy_ready = copy_service

@@ -196,6 +196,13 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
 
         if config.ranking and config.ranking_metric == "pipeline_time" and is_ampere(target):
             prepare_analysis(func, col, target, pass_configs)
+        elif config.ranking and config.ranking_metric == "pipeline_time":
+            from .targets import resolve_target
+
+            if resolve_target(target).architecture == "blackwell" and any(op.kind == "reduce" for op in col.operations):
+                from .ampere import prepare_ownership_analysis
+
+                prepare_ownership_analysis(func, col, target, pass_configs)
         tile_propagation = _propagate_tiles(col, _kernel_outputs(col))
         trace.record("tile_propagation", lambda: propagation_snapshot(tile_propagation))
         buffer_facts = collect_buffer_facts(col)

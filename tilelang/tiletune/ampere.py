@@ -17,6 +17,7 @@ from .src.structural_key import StructuralKey, context_key
 from .src.ir_utils import _int, in_loop
 
 _PREPARATION_CACHE = OrderedDict()
+_OWNERSHIP_CACHE = OrderedDict()
 
 
 def is_ampere(target):
@@ -42,6 +43,7 @@ def prepare_analysis(func, col, target, pass_configs):
         col.ampere_plan = deepcopy(plan)
         col.ampere_plans = {loop.loop_var: deepcopy(value) for loop, value in zip(col.pipeline_loops, plans) if value is not None}
         col.inferred_layouts = {col.buffers[i].data: layout for i, layout in layouts}
+        col.inferred_layouts_verified = not error
         if error:
             col.ampere_layout_unknown = error
         _PREPARATION_CACHE.move_to_end(key)
@@ -55,6 +57,32 @@ def prepare_analysis(func, col, target, pass_configs):
     )
     if len(_PREPARATION_CACHE) > 64:
         _PREPARATION_CACHE.popitem(last=False)
+
+
+def prepare_ownership_analysis(func, col, target, pass_configs):
+    """Cache graph-wide fragment ownership for non-Ampere native layouts."""
+    from .config import ANALYSIS_VERSION
+
+    key = (ANALYSIS_VERSION, StructuralKey(func), str(Target(target)), context_key(pass_configs))
+    cached = _OWNERSHIP_CACHE.get(key)
+    if cached is not None:
+        layouts, error = cached
+        col.inferred_layouts = {col.buffers[i].data: layout for i, layout in layouts}
+        col.inferred_layouts_verified = not error
+        if error:
+            col.ampere_layout_unknown = error
+        _OWNERSHIP_CACHE.move_to_end(key)
+        return
+    col.inferred_layouts = {}
+    registered = transform.PassContext.list_configs()
+    with Target(target), transform.PassContext(config={k: v for k, v in pass_configs.items() if k in registered}):
+        _infer_ownership(func, col, target, pass_configs, force=True)
+    _OWNERSHIP_CACHE[key] = (
+        [(i, col.inferred_layouts[b.data]) for i, b in enumerate(col.buffers) if b.data in col.inferred_layouts],
+        getattr(col, "ampere_layout_unknown", None),
+    )
+    if len(_OWNERSHIP_CACHE) > 64:
+        _OWNERSHIP_CACHE.popitem(last=False)
 
 
 def _prepare_analysis(func, col, target, pass_configs):
@@ -71,47 +99,53 @@ def _prepare_analysis(func, col, target, pass_configs):
                     col.ampere_plan = next(iter(col.ampere_plans.values()))
             except Exception as error:
                 col.ampere_plan.update(status="unknown", unknown=[f"Ampere compiler pipeline plan: {error}"])
-        # MMA layout helpers already cover dense producers. Generic reductions
-        # need the compiler's graph-wide layout constraints, including broadcasts
-        # and loop-carried state. These serial/single-pass graphs are inexpensive
-        # to infer and require no software-pipeline rewrite.
-        if any(op.kind == "reduce" for op in col.operations) and (
-            not any(hasattr(op.metadata, "cRegion") for op in col.operations) or col.layouts
+        _infer_ownership(func, col, target, pass_configs, force=False)
+
+
+def _infer_ownership(func, col, target, pass_configs, *, force):
+    # MMA/WGMMA helpers cover ordinary dense producers. TCGen05 tensor-memory
+    # copies require graph-wide LayoutInference to recover the register
+    # fragment consumed by softmax reductions.
+    if not any(op.kind == "reduce" for op in col.operations) or (
+        not force and any(hasattr(op.metadata, "cRegion") for op in col.operations) and not col.layouts
+    ):
+        return
+    try:
+        from .ownership import verified_explicit_layouts
+
+        explicit = verified_explicit_layouts(col, target, pass_configs)
+        if explicit is not None:
+            col.inferred_layouts = explicit
+            col.inferred_layouts_verified = True
+            return
+        mod = tvm.IRModule({"main": func})
+        mod = tir.transform.BindTarget(Target(target))(mod)
+        for make_pass in (
+            transform.MaterializeKernelLaunch,
+            transform.AddWrapperForSingleBufStore,
+            transform.Simplify,
+            transform.LayoutReducer,
+            transform.LayoutInference,
         ):
-            try:
-                from .ownership import verified_explicit_layouts
+            mod = make_pass()(mod)
 
-                explicit = verified_explicit_layouts(col, target, pass_configs)
-                if explicit is not None:
-                    col.inferred_layouts = explicit
-                    return
-                mod = tvm.IRModule({"main": func})
-                mod = tir.transform.BindTarget(Target(target))(mod)
-                for make_pass in (
-                    transform.MaterializeKernelLaunch,
-                    transform.AddWrapperForSingleBufStore,
-                    transform.Simplify,
-                    transform.LayoutReducer,
-                    transform.LayoutInference,
-                ):
-                    mod = make_pass()(mod)
+        def visit(node):
+            if isinstance(node, tir.SBlock):
+                for buffer, layout in node.annotations.get("layout_map", {}).items():
+                    data = buffer.data if hasattr(buffer, "data") else buffer
+                    if hasattr(layout, "replicate_size"):
+                        col.inferred_layouts[data] = layout
 
-                def visit(node):
-                    if isinstance(node, tir.SBlock):
-                        for buffer, layout in node.annotations.get("layout_map", {}).items():
-                            data = buffer.data if hasattr(buffer, "data") else buffer
-                            if hasattr(layout, "replicate_size"):
-                                col.inferred_layouts[data] = layout
+        tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+        from .ownership import _verify_collective
+        from .compute import consumer_threads
 
-                tir.stmt_functor.post_order_visit(mod["main"].body, visit)
-                from .ownership import _verify_collective
-                from .compute import consumer_threads
-
-                for op in col.operations:
-                    if op.kind == "reduce":
-                        _verify_collective(op, col.inferred_layouts, consumer_threads(op), target, pass_configs)
-            except Exception as error:
-                col.ampere_layout_unknown = str(error)
+        for op in col.operations:
+            if op.kind == "reduce":
+                _verify_collective(op, col.inferred_layouts, consumer_threads(op), target, pass_configs)
+        col.inferred_layouts_verified = True
+    except Exception as error:
+        col.ampere_layout_unknown = str(error)
 
 
 def pipeline_plan(func, col, target):

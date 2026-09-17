@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from ..targets import current_target, resolve_target
 
-PROFILE_VERSION = 5
+PROFILE_VERSION = 6
 
 
 def _signature(input_dtype, accum_dtype, instruction="cuda.wgmma"):
@@ -72,7 +72,7 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
     data = json.loads(Path(path).read_text())
     if memory_regime not in ("cached", "streaming"):
         raise ValueError("memory_regime must be cached or streaming")
-    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, PROFILE_VERSION):
+    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, 5, PROFILE_VERSION):
         raise ValueError("unsupported device profile version; regenerate the profile")
     if expected_identity is not None and data["identity"] != expected_identity:
         raise ValueError("device/profile fingerprint mismatch; use a separate cache path or refresh explicitly")
@@ -115,17 +115,20 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
 
 def _gemm_score_uncertainty(model):
     """Bound fixed-probe slope variation without consulting candidate timings."""
-    evidence = (model.get("evidence") or {}).get("gemm_flops_per_cycle") or {}
-    measurements = evidence.get("measurements") or []
-    if len(measurements) != 2:
-        return None
-    first, second = (item.get("latency_samples_ms") or [] for item in measurements)
-    slopes = [1 / (right - left) for left in first for right in second if right > left]
-    if not slopes:
-        return None
-    center = statistics.median(slopes)
-    uncertainty = (max(slopes) - min(slopes)) / center
-    return uncertainty if math.isfinite(uncertainty) and 0 <= uncertainty < 1 else None
+    uncertainties = []
+    for name in ("gemm_flops_per_cycle", "tcgen05_gemm_flops_per_cycle"):
+        measurements = ((model.get("evidence") or {}).get(name) or {}).get("measurements") or []
+        if len(measurements) != 2:
+            continue
+        first, second = (item.get("latency_samples_ms") or [] for item in measurements)
+        slopes = [1 / (right - left) for left in first for right in second if right > left]
+        if not slopes:
+            continue
+        center = statistics.median(slopes)
+        uncertainty = (max(slopes) - min(slopes)) / center
+        if math.isfinite(uncertainty) and 0 <= uncertainty < 1:
+            uncertainties.append(uncertainty)
+    return max(uncertainties) if uncertainties else None
 
 
 def anchor_latency(performance_model, analysis, measured_latency_ms):
@@ -350,7 +353,7 @@ def _measure_common(identity):
 def _measure_gemm(identity, clock, input_dtype, accum_dtype):
     import torch
     import tilelang.language as T
-    from .device_probes import tensor_core
+    from .device_probes import tcgen05_tensor_core, tensor_core
 
     dtype = T.dtype(input_dtype).as_torch()
     a = torch.full((64, 128), 0.125, dtype=torch.float32, device="cuda").to(dtype)
@@ -382,6 +385,31 @@ def _measure_gemm(identity, clock, input_dtype, accum_dtype):
             "method": "shared-resident "
             + _instruction(identity)
             + " loop with bounded accumulator dependency (negation each iteration); no global transfers inside measured loop",
+        }
+    if resolve_target({"kind": "cuda", "arch": identity["target_arch"]}).architecture == "blackwell":
+        blocks, threads = identity["sm_count"] * 4, 128
+        tcgen_a = torch.full((128, 128), 0.125, dtype=torch.float32, device="cuda").to(dtype)
+        tcgen_b = torch.full((128, 128), 0.125, dtype=torch.float32, device="cuda").to(dtype)
+        measurements = [
+            _benchmark(
+                tcgen05_tensor_core(input_dtype, accum_dtype, n, blocks, threads),
+                [tcgen_a, tcgen_b],
+                [2],
+                lambda out, n=n: torch.testing.assert_close(out, torch.full_like(out, 2 * n)),
+                required_source="tl::tcgen05mma_",
+            )
+            for n in (128, 256)
+        ]
+        cycles = _slope(measurements[0][0], measurements[1][0], 128, clock)
+        name = "tcgen05_gemm_flops_per_cycle"
+        rates[name] = 2 * 128 * 128 * 128 * blocks / (cycles * identity["sm_count"])
+        evidence[name] = {
+            "tile": [128, 128, 128],
+            "blocks": blocks,
+            "threads": threads,
+            "iterations": [128, 256],
+            "measurements": [m[1] for m in measurements],
+            "method": "shared-resident cuda.tcgen05 loop with explicit completion barriers; no global transfers inside measured loop",
         }
     return {"rates": rates, "evidence": evidence}
 

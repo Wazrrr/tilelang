@@ -149,9 +149,16 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
         producer_buffers, producer_unknown = [], [str(error)]
     if performance_model and performance_model.get("gemm_signature"):
         signature = performance_model["gemm_signature"]
-        if any(
-            p["work"]["gemm_flops"] and any((p["compute_participants"] or {}).get(k) != v for k, v in signature.items()) for p in phases
-        ):
+        def compatible_gemm(phase):
+            participants = phase["compute_participants"] or {}
+            dtype_match = all(participants.get(k) == signature[k] for k in ("a_dtype", "b_dtype", "accum_dtype"))
+            instruction = participants.get("instruction", "")
+            instruction_match = instruction == signature["instruction"] or (
+                instruction.startswith("cuda.tcgen05") and performance_model.get("tcgen05_gemm_flops_per_cycle")
+            )
+            return dtype_match and instruction_match
+
+        if any(p["work"]["gemm_flops"] and not compatible_gemm(p) for p in phases):
             add_unknown("profile_mismatch", "device profile GEMM instruction/dtype signature does not match the kernel")
     iterations = {"min": None, "max": None, "precision": "unknown"}
     stages = None

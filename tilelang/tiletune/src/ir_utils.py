@@ -64,7 +64,7 @@ def rectangular_scalar_access(region, loops):
 
 
 def dense_gemms(col):
-    return [op for op in col.operations if hasattr(op.metadata, "cRegion") and not bool(getattr(op.metadata, "isTcgen05", False))]
+    return [op for op in col.operations if hasattr(op.metadata, "cRegion")]
 
 
 def main_loops(col, operations):

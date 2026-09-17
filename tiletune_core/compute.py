@@ -29,7 +29,11 @@ def estimate_phase_cycles(phase, profile, concurrent_ctas):
         if amount is None:
             return None
         rate_key = {
-            "gemm_flops": "gemm_flops_per_cycle",
+            "gemm_flops": (
+                "tcgen05_gemm_flops_per_cycle"
+                if (phase.get("compute_participants") or {}).get("instruction", "").startswith("cuda.tcgen05")
+                else "gemm_flops_per_cycle"
+            ),
             "shared_bytes": "shared_bytes_per_cycle",
             "elementwise_ops": "elementwise_ops_per_cycle",
             "exp_ops": "exp_ops_per_cycle",

@@ -144,6 +144,44 @@ def test_tensor_memory_accumulator_is_not_register_storage():
     assert result["pressure"]["decision"]["keep"]
 
 
+def test_tcgen05_pipeline_is_recognized_and_scored_with_native_profile():
+    @T.prim_func
+    def main(A: T.Tensor((128, 128), "float16"), B: T.Tensor((128, 128), "float16"), C: T.Tensor((128, 128), "float32")):
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((128, 128), "float16")
+            b = T.alloc_shared((128, 128), "float16")
+            c = T.alloc_tmem((128, 128), "float32")
+            mbar = T.alloc_barrier(1)
+            for k in T.Pipelined(4, num_stages=2):
+                T.copy(A, a)
+                T.copy(B, b)
+                T.tcgen05_gemm(a, b, c, clear_accum=k == 0, mbar=mbar)
+                T.mbarrier_wait_parity(mbar, k % 2)
+            T.copy(c, C)
+
+    from test_cost import LIMITS
+    from test_modules import PROFILE
+
+    profile = dict(
+        PROFILE,
+        tcgen05_gemm_flops_per_cycle=4096,
+        profile_target="sm_100a",
+        gemm_signature=dict(instruction="cuda.mma", a_dtype="float16", b_dtype="float16", accum_dtype="float32"),
+    )
+    result = analyze_prim_func(
+        main,
+        {"performance_model": profile},
+        target={"kind": "cuda", "arch": "sm_100a"},
+        device_limits=LIMITS,
+    )
+    pipeline = result["modules"]["pipeline_overlap"]
+    gemm = next(phase for phase in pipeline["phases"] if phase["work"]["gemm_flops"])
+    assert result["specialization"]["name"] == "gemm"
+    assert gemm["compute_participants"]["instruction"] == "cuda.tcgen05"
+    assert not pipeline["unknown"]
+    assert result["tile_cost"]["score"] is not None
+
+
 def test_explicit_layout_pressure():
     pressure = analyze_prim_func(gemm(explicit=True), {"register_cap": 1})["pressure"]
     c = next(x for x in pressure["logical_storage"] if x["buffer"] == "c")

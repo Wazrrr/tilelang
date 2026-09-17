@@ -36,6 +36,7 @@ def rank_configs(
     from tilelang.carver.template import MatmulTemplate
     from tilelang.tiletune.ranking import rank_records, select_top_k
 
+    compile_target = Target(target)
     arch = CUDA(model_target(target))
     template = template or MatmulTemplate(
         M=m,
@@ -55,12 +56,29 @@ def rank_configs(
         stages: TensorCorePolicy.from_prim_func(func, arch, {**tags, "pipeline_stage": max(1, stages)})
         for stages in sorted({cfg["num_stages"] for cfg in configs})
     }
+    target_arch = str(compile_target.attrs.get("arch", ""))
+    tcgen05_meta = tvm.get_global_func("tl.get_tcgen5_mma_meta") if target_arch.startswith("sm_100") else None
     records = []
     for index, config in enumerate(configs):
         policy = policies[config["num_stages"]]
         steps = {node: {axis.var.name: config["block_K"] for axis in node.raxis} for node in policy.ordered_nodes}
         td = policy.compute_tile_dict([config["block_M"], config["block_N"]], steps)
-        valid = td.valid and policy.check_tile_shape_isvalid(td)
+        native_legal = (
+            bool(
+                tcgen05_meta(
+                    config["block_M"],
+                    config["block_N"],
+                    config["block_K"],
+                    dtype,
+                    "float32",
+                    True,
+                    False,
+                )
+            )
+            if tcgen05_meta is not None
+            else True
+        )
+        valid = native_legal and td.valid and policy.check_tile_shape_isvalid(td)
         if valid:
             valid = all(policy._assign_block_size(node, td, config[thread_key]) is not None for node in policy.ordered_nodes)
         # Exactly DefaultPolicy.dfs_smem_tile's priority, evaluated at the supplied
@@ -78,6 +96,7 @@ def rank_configs(
                     shared_bytes=int(td.smem_cost),
                     waves=int(td.num_wave) if td.valid else None,
                     blocks_per_sm=int(td.block_per_SM) if td.valid else None,
+                    native_lowering_legal=bool(native_legal),
                 ),
             )
         )
@@ -103,6 +122,7 @@ def rank_configs(
             "Thread count is checked for policy feasibility; the cost retains Carver's original occupancy estimate.",
             "Rasterization is not distinguished by this score; equal scores retain original grid order.",
             "Candidate generation and reduction-step expansion are disabled for this common-grid comparison.",
+            "On SM100, candidates unsupported by the native one-CTA TCGen05 lowering are rejected before ranking.",
         ],
     )
 

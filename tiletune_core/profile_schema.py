@@ -13,6 +13,7 @@ RATE_FIELDS = {
     "global_bytes_per_cycle",
     "shared_bytes_per_cycle",
     "gemm_flops_per_cycle",
+    "tcgen05_gemm_flops_per_cycle",
     "wgmma_flops_per_cycle_per_warpgroup",
     "latency_scale",
     "reference_clock_mhz",

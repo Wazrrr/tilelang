@@ -60,6 +60,10 @@ def operation_work(op, col=None):
                 work["elementwise_ops"] = None
                 col.scalar_work_unknown = getattr(col, "scalar_work_unknown", {})
                 col.scalar_work_unknown[op.index] = str(error)
+    elif op.kind == "barrier":
+        # An explicit completion wait carries ordering, not arithmetic or byte
+        # service. Its synchronization cost is charged by the pipeline model.
+        pass
     elif op.kind in ("copy", "async_copy", "fill") and op.writes:
         # Register casts, initialization and epilogue stores are consumer work.
         # External read copies are charged to the producer separately.
@@ -404,7 +408,7 @@ def reduction_work(op, col, pressure, participants, layout_cache):
         if layout is None:
             layout = getattr(col, "inferred_layouts", {}).get(meta.src.data)
             if layout is not None:
-                source, inferred = "compiler LayoutInference on an isolated Ampere IRModule", True
+                source, inferred = "compiler LayoutInference on an isolated CUDA IRModule", True
         if layout is None:
             if meta.src not in layout_cache:
                 producers = [p for p in col.operations[: op.index] if hasattr(p.metadata, "cRegion") and p.metadata.c.same_as(meta.src)]
@@ -431,8 +435,8 @@ def reduction_work(op, col, pressure, participants, layout_cache):
             layout = layout_cache[meta.src]
             source = "compiler MMA/WGMMA fragment layout prediction"
         if inferred:
-            if pressure.get("target_arch") not in ("sm_80", "sm_86", "sm_89"):
-                raise ValueError("inter-warp collective verification requires the Ampere CUDA lowering")
+            if not getattr(col, "inferred_layouts_verified", False):
+                raise ValueError("inter-warp collective ownership was not verified by the CUDA lowering")
             if _int(layout.get_thread_size()) != consumer_threads(op):
                 raise ValueError("partial thread-domain collective is not modeled")
         subgroup = pressure.get("target_model", {}).get("subgroup_size", 32)

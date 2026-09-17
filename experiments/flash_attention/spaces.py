@@ -5,7 +5,10 @@ from experiments.utils.grid import grid
 
 def get_configs():
     return grid(
-        block_M=[32, 64, 128, 192, 256],
+        # The single-CTA SM100 attention kernel uses one TMEM datapath row per
+        # query row. Larger M tiles can compile but deadlock for longer causal
+        # sequences, so they are not meaningful members of the common pool.
+        block_M=[32, 64, 128],
         block_N=[16, 32, 48, 64, 96, 128, 192, 256],
         num_stages=[0, 1, 2, 3],
         threads=[128, 256],

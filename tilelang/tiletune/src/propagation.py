@@ -68,7 +68,12 @@ def _map_inputs(op, demand):
                     demand.precision,
                 )
             ]
-    if meta is not None and hasattr(meta, "aRegion") and hasattr(meta, "transA") and not bool(getattr(meta, "isTcgen05", False)):
+    if (
+        meta is not None
+        and hasattr(meta, "aRegion")
+        and hasattr(meta, "transA")
+        and (not bool(getattr(meta, "isTcgen05", False)) or op.kind == "tcgen05_gemm")
+    ):
         c = Region.from_ir(meta.cRegion)
         if len(demand.ranges) == 2 and len(c.ranges) == 2:
             m, n = [Range.from_min_extent(ana.simplify(q.min - base.min), q.extent) for q, base in zip(demand.ranges, c.ranges)]

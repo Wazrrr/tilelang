@@ -165,6 +165,18 @@ def test_blackwell_mma_probe_cross_compiles():
     assert "tl::mma_sync" in artifact.kernel_source
 
 
+def test_blackwell_tcgen05_probe_cross_compiles():
+    import tilelang
+    from tilelang.tiletune.profiling.device_probes import tcgen05_tensor_core
+    from tvm.target import Target
+
+    with Target({"kind": "cuda", "arch": "sm_100a"}) as target:
+        artifact = tilelang.lower(
+            tcgen05_tensor_core("float8_e4m3fn", "float32", 3, 1, 128), target=target, enable_device_compile=True
+        )
+    assert "tl::tcgen05mma_" in artifact.kernel_source
+
+
 def test_recurrent_kda_traffic_and_timing_boundary():
     from regression_kernels import recurrent_program
     from experiments.common.spec import TARGETS

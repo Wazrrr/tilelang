@@ -175,7 +175,14 @@ class _Collector:
             call = resolve(node.value)
             op = self.parse(call, annotations)
             if op is None:
-                self.add(str(call.op), [], [], None, loops, predicates, branches, True)
+                name = call.op.name if isinstance(call.op, tvm.ir.Op) else str(call.op)
+                # TCGen05 completion is represented by an explicit mbarrier
+                # wait. Keep it in program order without making the kernel
+                # opaque; synchronization cost is modeled by the pipeline.
+                if name == "tl.mbarrier_wait_parity":
+                    self.add("barrier", [], [], None, loops, predicates, branches)
+                else:
+                    self.add(name, [], [], None, loops, predicates, branches, True)
             else:
                 reads, writes = self.access(op)
                 self.add(

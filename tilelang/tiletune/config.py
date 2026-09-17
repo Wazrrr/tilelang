@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 26
+ANALYSIS_VERSION = 27
 
 
 @dataclass(frozen=True)

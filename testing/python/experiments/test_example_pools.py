@@ -10,7 +10,7 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 2304, "grouped_gemm": 2}
+COUNTS = {"attention": 192, "kda_chunk_o": 720, "gemm_fp8": 2304, "grouped_gemm": 2}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 

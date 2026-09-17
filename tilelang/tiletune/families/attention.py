@@ -13,7 +13,7 @@ from .base import KernelSpecialization, WarpSpecializationPolicy
 
 def _accepts_consumer(op, loop):
     return (
-        op.kind in ("gemm", "reduce", "fill", "copy", "elementwise")
+        (hasattr(op.metadata, "cRegion") or op.kind in ("reduce", "fill", "copy", "elementwise", "barrier"))
         and all(r.buffer.scope() != "global" for r in op.reads + op.writes)
         and not (op.kind == "elementwise" and any(r.buffer.scope().startswith("shared") for r in op.writes))
         and all(kind in ("4", "1") or var.same_as(loop.loop_var) for var, _, kind in op.loops)

@@ -11,7 +11,7 @@ from .base import KernelSpecialization, WarpSpecializationPolicy
 
 
 def _accepts_consumer(op, loop):
-    return hasattr(op.metadata, "cRegion")
+    return hasattr(op.metadata, "cRegion") or op.kind == "barrier"
 
 
 GEMM_WARP_SPECIALIZATION = WarpSpecializationPolicy(
