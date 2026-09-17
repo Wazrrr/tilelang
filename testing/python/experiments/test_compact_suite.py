@@ -18,7 +18,7 @@ def test_smoke_uses_same_cases_and_three_fixed_budgets():
     assert all(w in core_cases("development") for w in core_cases("smoke"))
     assert len(core_cases("final")) == len(core_cases("development")) == 25
     assert all(sum(w.op == op for w in core_cases("final")) == 5 for op in {w.op for w in core_cases("final")})
-    assert {w.dtype for w in core_cases("final")} == {"float16", "float8_e4m3fn"}
+    assert {w.dtype for w in core_cases("final")} == {"bfloat16", "float8_e4m3fn"}
     for w in core_cases("final"):
         if w.op == "kda_chunk_o":
             assert w.parameters["sequence"] % w.parameters["chunk_size"] == 0
@@ -35,7 +35,7 @@ def test_final_cases_use_five_common_serving_shapes_per_family():
         for op in ("gemm", "gemm_fp8", "attention", "kda_chunk_o")
     }
     dense_shapes = [
-        (128, 4096, 4096),
+        (256, 4096, 4096),
         (1024, 4096, 4096),
         (1024, 4096, 14336),
         (4096, 4096, 4096),
@@ -43,24 +43,25 @@ def test_final_cases_use_five_common_serving_shapes_per_family():
     ]
     for op in ("gemm", "gemm_fp8"):
         assert [(w.parameters["m"], w.parameters["n"], w.parameters["k"]) for w in by_op[op]] == dense_shapes
-    assert [(w.parameters["sequence"], w.parameters["causal"]) for w in by_op["attention"]] == [
-        (512, True),
-        (2048, True),
-        (4096, False),
-        (4096, True),
-        (8192, True),
+    assert [
+        (w.parameters["batch"], w.parameters["heads"], w.parameters["sequence"], w.parameters["dim"], w.parameters["causal"])
+        for w in by_op["attention"]
+    ] == [
+        (1, 32, 512, 64, True),
+        (2, 16, 2048, 64, True),
+        (1, 32, 4096, 128, False),
+        (1, 32, 4096, 128, True),
+        (1, 16, 8192, 128, True),
     ]
-    assert all((w.parameters["heads"], w.parameters["dim"]) == (32, 128) for w in by_op["attention"])
-    assert [(w.parameters["batch"], w.parameters["sequence"]) for w in by_op["kda_chunk_o"]] == [
-        (1, 2048),
-        (1, 4096),
-        (1, 8192),
-        (2, 4096),
-        (1, 16384),
+    assert [(w.parameters["batch"], w.parameters["heads"], w.parameters["sequence"]) for w in by_op["kda_chunk_o"]] == [
+        (1, 32, 2048),
+        (1, 64, 4096),
+        (1, 32, 8192),
+        (2, 32, 4096),
+        (1, 64, 16384),
     ]
     assert all(
-        (w.parameters["heads"], w.parameters["dim"], w.parameters["value_dim"], w.parameters["chunk_size"])
-        == (64, 128, 128, 64)
+        (w.parameters["dim"], w.parameters["value_dim"], w.parameters["chunk_size"]) == (128, 128, 64)
         for w in by_op["kda_chunk_o"]
     )
 

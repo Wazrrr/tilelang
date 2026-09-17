@@ -65,16 +65,17 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
         "attention": "FlashAttentionTemplate",
         "kda_chunk_o": "KDAChunkTemplate",
         "gemm_fp8": "FP8MatmulTemplate",
-        "grouped_gemm": "GroupedMXFP8MatmulTemplate",
+        "grouped_gemm": "GroupedMatmulTemplate",
     }[op]
     for workload in family_module(op, "cases").cases(holdout=True):
         all_configs = configurations(workload, device)
-        configs = all_configs[:8] + all_configs[64:72] if op in ("gemm", "gemm_fp8", "attention") else all_configs[:8]
-        if op == "grouped_gemm" and not str(device.target["arch"]).startswith("sm_100"):
-            assert "requires a Blackwell CUDA target" in carver_support_reason(workload, device)
-            with pytest.raises(ValueError, match="Blackwell"):
-                carver_rank(workload, device, configs, top_k=2)
-            continue
+        configs = (
+            all_configs[96:104]
+            if op == "grouped_gemm"
+            else all_configs[:8] + all_configs[64:72]
+            if op in ("gemm", "gemm_fp8", "attention")
+            else all_configs[:8]
+        )
         assert carver_support_reason(workload, device) is None
         result = carver_rank(workload, device, configs, top_k=2)
         assert result["template"] == expected_template

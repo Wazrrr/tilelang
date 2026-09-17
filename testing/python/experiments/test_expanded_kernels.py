@@ -51,14 +51,16 @@ def test_example_attention_masks_and_tail_rows(gpu_target, causal, stages):
     _check(w, dict(block_M=64, block_N=64, num_stages=stages, threads=128), gpu_target)
 
 
-@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"])
-def test_example_fp8_gemm_tails(gpu_target, dtype):
-    if gpu_target["kind"] != "cuda" or int(gpu_target["arch"].split("_")[1].rstrip("af")) < 90:
-        pytest.skip("FP8 tensor cores require Hopper or newer")
-    w = Workload("fp8", "gemm_fp8", dict(m=97, n=113, k=96, transpose_b=True), dtype=dtype)
+def test_example_fp8_gemm_native_schedule(gpu_target):
+    if gpu_target["kind"] != "cuda" or int(gpu_target["arch"].split("_")[1].rstrip("af")) < 100:
+        pytest.skip("TCGen05 requires Blackwell")
+    w = Workload("fp8", "gemm_fp8", dict(m=256, n=256, k=256, transpose_b=True), dtype="float8_e4m3fn")
     _check(
         w,
-        dict(block_M=64, block_N=64, block_K=32, num_stages=1, threads=128, enable_rasteration=False),
+        dict(
+            block_M=128, block_N=256, block_K=128, num_stages=6, threads=128,
+            implementation="tcgen05_2cta", group_size=1, use_tma_store=True, store_block_N=64
+        ),
         gpu_target,
     )
 
@@ -68,8 +70,11 @@ def test_retired_rewrite_knobs_are_not_silently_ignored():
 
     cases = [
         (
-            Workload("fp8", "gemm_fp8", dict(m=64, n=64, k=64, transpose_b=True), dtype="float8_e4m3fn"),
-            dict(block_M=64, block_N=64, block_K=32, num_stages=1, threads=128, enable_rasteration=False, vector=8),
+            Workload("fp8", "gemm_fp8", dict(m=256, n=256, k=256, transpose_b=True), dtype="float8_e4m3fn"),
+            dict(
+                block_M=128, block_N=256, block_K=128, num_stages=6, threads=128,
+                implementation="tcgen05_2cta", group_size=1, use_tma_store=True, store_block_N=64, vector=8
+            ),
         ),
         (
             Workload("attention", "attention", dict(batch=1, heads=1, sequence=128, dim=64)),

@@ -11,10 +11,18 @@ EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=128, block_N=128, num_stages=1, threads=128),
     "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
-    "gemm_fp8": dict(block_M=64, block_N=256, block_K=32, num_stages=2, threads=256, enable_rasteration=False),
-    "grouped_gemm": dict(
-        block_M=128, block_N=256, block_K=128, num_stages=6, threads=128, persistent=False
+    "gemm_fp8": dict(
+        block_M=128,
+        block_N=256,
+        block_K=128,
+        num_stages=6,
+        threads=128,
+        implementation="tcgen05_2cta",
+        group_size=1,
+        use_tma_store=True,
+        store_block_N=64,
     ),
+    "grouped_gemm": dict(block_M=64, block_N=128, block_K=64, num_stages=0, threads=128),
 }
 
 
@@ -77,51 +85,40 @@ def example_program(w, c):
             num_stages=c["num_stages"],
         )
     if w.op == "grouped_gemm":
-        from examples.blockscaled_gemm_sm100.grouped_gemm_mxfp8_blockscaled_1d1d import (
-            grouped_mxfp8_blockscaled_gemm_2cta,
-        )
+        from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
 
-        return grouped_mxfp8_blockscaled_gemm_2cta.get_tir(
-            M_storage=sum(((size + 127) // 128) * 128 for size in p["batch_sizes"]),
-            N=p["n"],
+        return grouped_gemm.get_tir(
             K=p["k"],
-            E=len(p["batch_sizes"]),
-            E1=len(p["batch_sizes"]) + 1,
-            logical_M_total=sum(p["batch_sizes"]),
-            block_M=c["block_M"],
-            block_N=c["block_N"],
-            block_K=c["block_K"],
-            in_dtype=w.dtype,
-            out_dtype="bfloat16",
-            accum_dtype="float32",
-            num_stages=c["num_stages"],
-            max_M_per_E=max(p["batch_sizes"]),
-            transpose_B=p["transpose_b"],
-            sf_granularity_k=128,
+            N=p["n"],
+            batch_sizes_list=tuple(p["batch_sizes"]),
+            trans_b=p["transpose_b"],
+            dtype=w.dtype,
+            **c,
         )
 
-    from examples.gemm_fp8.example_tilelang_gemm_fp8_sm100 import matmul
+    from examples.blockscaled_gemm_sm100.gemm_mxfp8_blockscaled_1d1d import mxfp8_blockscaled_gemm_2cta
 
-    return matmul.get_tir(
+    return mxfp8_blockscaled_gemm_2cta.get_tir(
         M=p["m"],
         N=p["n"],
         K=p["k"],
-        trans_A=False,
-        trans_B=True,
         in_dtype=w.dtype,
-        out_dtype=w.dtype,
+        out_dtype="bfloat16",
         accum_dtype="float32",
-        **c,
-    ).without_attr("tilelang_out_idx")
+        block_M=c["block_M"],
+        block_N=c["block_N"],
+        block_K=c["block_K"],
+        num_stages=c["num_stages"],
+        sf_granularity_k=128,
+        transpose_B=True,
+    )
 
 
 @pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)
-@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
-def test_final_programs_are_structurally_identical_to_examples(w, dtype):
+def test_final_programs_are_structurally_identical_to_examples(w):
     from tilelang import tvm
     from experiments.common.kernels import make_case
 
-    w = w if w.op in ("gemm_fp8", "grouped_gemm") else replace(w, dtype=dtype)
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])

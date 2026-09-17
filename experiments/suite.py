@@ -94,7 +94,7 @@ def study_plan(suite, devices=None, *, families=None, config_space=None):
         budget=budget,
         metric="pipeline_time",
         top_k=20,
-        dtype="float16",
+        dtypes=sorted({w.dtype for w in tests}),
         devices=[d.to_dict() for d in planned],
         splits={k: [w.to_dict() for w in v] for k, v in splits.items()},
         subsets=audits,

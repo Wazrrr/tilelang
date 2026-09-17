@@ -1,48 +1,69 @@
-"""Adapter for the SM100 TCGen05 FP8 GEMM example."""
+"""Native SM100 E4M3 block-scaled GEMM with TCGen05 and BF16 output."""
 
 from threading import Lock
 
 from experiments.utils.kernel import KernelCase, _random
 from .reference import reference
-from .spaces import support_reason
+from .spaces import BLOCK_K, BLOCK_M, support_reason
 
-_FP8_GEMM_LOCK = Lock()
+_BUILD_LOCK = Lock()
 
 
-def _fp8_gemm_program(**kwargs):
-    from examples.gemm_fp8.example_tilelang_gemm_fp8_sm100 import matmul
+class BlockScaledFP8KernelCase(KernelCase):
+    def check(self, actuals, references):
+        if len(actuals) != len(references):
+            raise AssertionError("wrong number of kernel outputs")
+        if any(actual.shape != expected.shape or actual.dtype != expected.dtype for actual, expected in zip(actuals, references)):
+            raise AssertionError("block-scaled FP8 GEMM must return the declared BF16 output")
+        super().check(actuals, references)
 
-    with _FP8_GEMM_LOCK:
-        return matmul.get_tir(**kwargs)
+
+def _program(implementation, **kwargs):
+    from examples.blockscaled_gemm_sm100.gemm_mxfp8_blockscaled_1d1d import (
+        mxfp8_blockscaled_gemm_2cta,
+        mxfp8_blockscaled_gemm_2cta_persistent,
+    )
+
+    program = mxfp8_blockscaled_gemm_2cta_persistent if implementation.endswith("persistent") else mxfp8_blockscaled_gemm_2cta
+    with _BUILD_LOCK:
+        return program.get_tir(**kwargs)
 
 
 def make_case(workload):
     reason = support_reason(workload)
     if reason:
         raise ValueError(reason)
-    p, dtype = workload.parameters, workload.dtype
-    m, n, k = p["m"], p["n"], p["k"]
+    m, n, k = (workload.parameters[key] for key in ("m", "n", "k"))
 
-    def build(block_M, block_N, block_K, num_stages, threads, enable_rasteration):
-        func = _fp8_gemm_program(
+    def build(block_M, block_N, block_K, num_stages, threads, implementation, group_size, use_tma_store, store_block_N):
+        if block_M != BLOCK_M or block_N != 256 or block_K != BLOCK_K or num_stages != 6:
+            raise ValueError("SM100 block-scaled FP8 fixes the 128x256x128 two-CTA tile and six stages")
+        valid = (implementation, threads) in (("tcgen05_2cta", 128), ("tcgen05_2cta_persistent", 256))
+        if not valid:
+            raise ValueError("invalid native SM100 FP8 implementation/configuration pair")
+        kwargs = dict(
             M=m,
             N=n,
             K=k,
             block_M=block_M,
             block_N=block_N,
             block_K=block_K,
-            trans_A=False,
-            trans_B=True,
-            in_dtype=dtype,
-            out_dtype=dtype,
+            in_dtype="float8_e4m3fn",
+            out_dtype="bfloat16",
             accum_dtype="float32",
             num_stages=num_stages,
-            threads=threads,
-            enable_rasteration=enable_rasteration,
+            sf_granularity_k=128,
+            transpose_B=True,
         )
-        return func.without_attr("tilelang_out_idx")
+        if implementation.endswith("persistent"):
+            kwargs.update(use_tma_store=use_tma_store, store_block_N=store_block_N, group_size=group_size)
+        return _program(implementation, **kwargs)
 
     def inputs(device, generator):
-        return [_random(shape, dtype, device, generator) for shape in ((m, k), (n, k))]
+        from examples.blockscaled_gemm_sm100.gemm_mxfp8_blockscaled_1d1d import quantize_fp8_with_packed_ue8m0
 
-    return KernelCase(build, inputs, reference, [2], rtol=0.2, atol=0.125)
+        a, scale_a, _ = quantize_fp8_with_packed_ue8m0(_random((m, k), "bfloat16", device, generator), gran_k=128)
+        b, scale_b, _ = quantize_fp8_with_packed_ue8m0(_random((n, k), "bfloat16", device, generator), gran_k=128)
+        return [a, b, scale_a, scale_b]
+
+    return BlockScaledFP8KernelCase(build, inputs, reference, None, rtol=0.03, atol=0.03)

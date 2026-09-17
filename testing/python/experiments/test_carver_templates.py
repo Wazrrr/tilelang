@@ -37,10 +37,9 @@ def _offline_hopper():
             _workload(
                 "grouped",
                 "grouped_gemm",
-                {"batch_sizes": [31, 65], "n": 256, "k": 128, "transpose_b": True},
-                dtype="float8_e4m3fn",
+                {"batch_sizes": [31, 65], "n": 128, "k": 64, "transpose_b": True},
             ),
-            "GroupedMXFP8MatmulTemplate",
+            "GroupedMatmulTemplate",
         ),
         (
             _workload(
@@ -53,7 +52,7 @@ def _offline_hopper():
     ],
 )
 def test_each_experiment_family_selects_its_canonical_template(workload, expected):
-    configs = [{"block_M": 128}] if workload.op == "grouped_gemm" else None
+    configs = [{"block_M": 64}] if workload.op == "grouped_gemm" else None
     template = workload_template(workload, configs, arch=_offline_hopper())
     assert type(template).__name__ == expected
 
@@ -73,7 +72,8 @@ def test_fp8_template_preserves_kernel_dtype_and_uses_tensorizable_model_dtype(k
     )
     template = workload_template(workload, arch=_offline_hopper())
     assert template.kernel_dtype == kernel_dtype
-    assert template.in_dtype == template.out_dtype == model_dtype
+    assert template.in_dtype == model_dtype
+    assert template.out_dtype == "bfloat16"
     _, tags = get_tensorized_func_and_tags(
         template.equivalent_function(), template.arch.target, allow_gemv=True
     )
@@ -110,15 +110,10 @@ def test_grouped_template_preserves_padded_cta_domain():
     workload = _workload(
         "grouped",
         "grouped_gemm",
-        {"batch_sizes": [31, 65], "n": 256, "k": 128, "transpose_b": True},
-        dtype="float8_e4m3fn",
+        {"batch_sizes": [31, 65], "n": 128, "k": 64, "transpose_b": True},
     )
-    template = workload_template(workload, [{"block_M": 128}], arch=_offline_hopper())
-    assert template.M == 2 * 128
-    assert template.block_m == 128
-    assert template.kernel_dtype == "float8_e4m3fn"
-    assert template.in_dtype == "float8_e4m3"
-    assert template.out_dtype == "bfloat16"
+    template = workload_template(workload, [{"block_M": 64}], arch=_offline_hopper())
+    assert template.M == 3 * 64
+    assert template.block_m == 64
+    assert template.in_dtype == template.out_dtype == "float16"
     assert template.accum_dtype == "float32"
-    assert template.scale_granularity_k == 128
-    assert template.cluster_size == 2

@@ -1,4 +1,4 @@
-"""Grouped MXFP8 GEMMs for common MoE decode, prefill, and projections."""
+"""Grouped BF16 GEMMs for common MoE decode, prefill, and projections."""
 
 
 def cases(holdout=False):
@@ -6,9 +6,9 @@ def cases(holdout=False):
 
     shapes = (
         ("decode", [1, 2, 4, 8] if holdout else [1, 1, 2, 4], 2048, 7168, False),
-        ("prefill", [16, 32, 48, 64] if holdout else [8, 16, 24, 32], 2048, 7168, False),
-        ("aligned", [64, 128, 256] if holdout else [32, 64, 128], 2048, 7168, False),
-        ("down_aligned", [64, 128, 256] if holdout else [32, 64, 128], 7168, 2048, True),
+        ("prefill", [32] * 8 if holdout else [16] * 8, 2048, 7168, False),
+        ("aligned", [128] * 4 if holdout else [64] * 4, 2048, 7168, False),
+        ("down_aligned", [256] * 3 if holdout else [128] * 3, 7168, 2048, True),
         ("ragged", [63, 77, 111, 280] if holdout else [31, 47, 81, 129], 7168, 2048, True),
     )
     return [
@@ -16,7 +16,7 @@ def cases(holdout=False):
             "grouped_gemm_" + role,
             "grouped_gemm",
             dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b),
-            dtype="float8_e4m3fn",
+            dtype="bfloat16",
             config_space="expanded",
         )
         for role, sizes, n, k, transpose_b in shapes
@@ -31,12 +31,12 @@ def training_cases():
             "grouped_gemm_" + split,
             "grouped_gemm",
             dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b),
-            dtype="float8_e4m3fn",
+            dtype="bfloat16",
             config_space="expanded",
         )
         for split, sizes, n, k, transpose_b in (
-            ("train_a", [16, 32, 64], 2048, 7168, False),
+            ("train_a", [16] * 6, 2048, 7168, False),
             ("train_b", [15, 31, 65], 7168, 2048, True),
-            ("validation", [24, 40, 72], 2048, 7168, False),
+            ("validation", [24, 40, 72, 104, 136], 2048, 7168, False),
         )
     ]

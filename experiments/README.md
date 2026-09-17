@@ -3,6 +3,9 @@
 Each kernel family owns its cases, implementations, references, configuration
 spaces, and experiment commands.
 
+The active dtype, shape, scale-layout, and architecture-specific kernel rules
+are frozen in [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md).
+
 For a new kernel family, follow the [agent guide](.agent). For existing kernels,
 start in the family folder:
 
@@ -41,17 +44,18 @@ Planning requires only Python and does not query a GPU, compile kernels, or
 create a result directory. Run commands from the repository root.
 
 ```bash
-python -m experiments.gemm.tiletune.run --suite final --device ampere --plan
-python -m experiments.flash_attention.tiletune.run --suite smoke --device ampere --plan
-python -m experiments.kda.tiletune.run --suite development --device ampere --plan
+python -m experiments.gemm.tiletune.run --suite final --device blackwell --plan
+python -m experiments.flash_attention.tiletune.run --suite smoke --device blackwell --plan
+python -m experiments.kda.tiletune.run --suite development --device blackwell --plan
 python -m experiments.gemm_fp8.tiletune.run --suite development --device blackwell --plan
+python -m experiments.grouped_gemm.tiletune.run --suite development --device blackwell --plan
 ```
 
 A development run uses five test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
-The four final kernels call their [example builders directly](example_alignment.md).
+The five final kernels call their architecture-selected example builders directly.
 Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, FP8 GEMM 2,304, and grouped GEMM 192 configs per case. There is no cap or structural
+KDA 720, FP8 GEMM 8, and grouped GEMM 192 configs per case. There is no cap or structural
 prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
@@ -79,7 +83,7 @@ the kernel format while lowering `float8_e4m3fn` to Carver's tensorizable
 `float8_e4m3` spelling internally.
 
 The family command checks acceptance for its requested cases and targets. Its
-report identifies the scope; full five-target final acceptance requires all four
+report identifies the scope; full five-target final acceptance requires all five
 families, all five targets, and all three seeds. Final execution requires a
 passing development report covering the requested cases and targets.
 
@@ -139,7 +143,7 @@ cost. Original baseline costs are labeled as coming from the baseline bundle.
 
 ## System optimization ablations
 
-All four default-family `system/run.py` entry points use the shared
+All five default-family `system/run.py` entry points use the shared
 [system runner](common/system.py) and the same five final cases/pools:
 
 ```bash
@@ -148,7 +152,7 @@ python -m experiments.kda.system.run --variant all \
   --output experiments/results/kda/system-v1
 ```
 
-Replace `kda` with `gemm`, `flash_attention` or `gemm_fp8`. `--variant all` runs
+Replace `kda` with `gemm`, `flash_attention`, `gemm_fp8`, or `grouped_gemm`. `--variant all` runs
 `baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined` in fresh processes
 with cold caches, identical inputs and numerical checks. Pipeline overlaps
 compilation/benchmarking; grouped combines compilation; multi_gpu distributes
@@ -215,7 +219,7 @@ in `spaces.py`. Each family owns its structural legality and equivalence rules;
 `common/spaces.py` handles deterministic enumeration and audit records. Counts
 are declared candidates before compilation and correctness validation.
 
-All four final families use only `expanded`, with the example's native parameter
+All five final families use only `expanded`, with the example's native parameter
 names. Their full grids include the original example configs/defaults. Explicit
 CUDA/HIP configs must be members of these grids. Separate vector workloads
 retain their existing presets. The
@@ -240,9 +244,9 @@ See [common/README.md](common/README.md) for worker and diagnostic details,
 Family `system/run.py` commands benchmark compiler execution strategies using
 the same example builders; they are separate from tuner quality.
 
-The retired FP8/vector experiments, compatibility modules, and repair-study
-runner have been removed. The shared runner also uses the twenty family-owned
-cases; `--smoke` chooses their development shapes.
+Retired compatibility modules and the repair-study runner have been removed.
+The shared runner uses the twenty-five family-owned cases; `--smoke` chooses one
+development shape per family.
 Use the canonical `experiments.common.*` commands and `experiments.suite`.
 Source fingerprints cover active code roots and exclude `results/`; historical
 measurements retain their original hashes. Begin a new run after code changes.

@@ -337,6 +337,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     transpose_B=False,
     use_tma_store=True,
     store_block_N=64,
+    group_size=16,
 ):
     M, N, K = T.const("M, N, K")
 
@@ -356,7 +357,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     n_blocks = T.ceildiv(N, block_N)
     assert K % (2 * block_K) == 0  # for simplicity
     cluster_size = 2
-    group_size = 16
+    assert group_size > 0
     assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
     with T.ClusterKernel(sm_num, threads=256, cluster_dims=cluster_size) as (block_id):

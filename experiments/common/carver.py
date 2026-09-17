@@ -8,7 +8,7 @@ def workload_template(workload, configs=None, *, arch=None):
     from tilelang.carver.template import (
         FP8MatmulTemplate,
         FlashAttentionTemplate,
-        GroupedMXFP8MatmulTemplate,
+        GroupedMatmulTemplate,
         KDAChunkTemplate,
         MatmulTemplate,
     )
@@ -59,15 +59,15 @@ def workload_template(workload, configs=None, *, arch=None):
             block_sizes = {BLOCK_M}
         if len(block_sizes) != 1:
             raise ValueError("one grouped-GEMM Carver template requires one fixed block_M")
-        return GroupedMXFP8MatmulTemplate(
+        return GroupedMatmulTemplate(
             batch_sizes=list(p["batch_sizes"]),
             block_m=block_sizes.pop(),
             N=p["n"],
             K=p["k"],
             trans_B=p.get("transpose_b", False),
-            kernel_dtype=workload.dtype,
-            scale_granularity_k=128,
-            cluster_size=2,
+            in_dtype=workload.dtype,
+            out_dtype=workload.dtype,
+            accum_dtype="float32",
             **common,
         )
     if workload.op == "kda_chunk_o":

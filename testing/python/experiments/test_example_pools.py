@@ -10,7 +10,7 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 192, "kda_chunk_o": 720, "gemm_fp8": 2304, "grouped_gemm": 2}
+COUNTS = {"attention": 192, "kda_chunk_o": 720, "gemm_fp8": 8, "grouped_gemm": 192}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 
@@ -55,14 +55,13 @@ def test_every_example_config_and_explicit_default_is_included():
     assert len(kda_configs()) == 90 and len(kda) == 8 * len(kda_configs())
     assert all(c in kda for c in kda_configs())
     assert dict(block_DK=64, block_DV=64, num_stages=0, threads=256) in kda
-    assert len(fp8) == 2304
-    assert dict(block_M=32, block_N=192, block_K=128, num_stages=2, threads=256, enable_rasteration=True) in fp8
-    assert dict(block_M=64, block_N=256, block_K=32, num_stages=2, threads=256, enable_rasteration=False) in fp8
+    assert len(fp8) == 8
+    assert fp8[0]["implementation"] == "tcgen05_2cta" and fp8[0]["threads"] == 128
+    assert all(c["block_M"] == 128 and c["block_N"] == 256 and c["block_K"] == 128 for c in fp8)
+    assert {c["group_size"] for c in fp8[1:]} == {1, 2, 4}
     grouped = family_module("grouped_gemm", "spaces").get_configs()
-    assert grouped == [
-        dict(block_M=128, block_N=256, block_K=128, num_stages=6, threads=128, persistent=False),
-        dict(block_M=128, block_N=256, block_K=128, num_stages=6, threads=256, persistent=True),
-    ]
+    assert len(grouped) == 192
+    assert dict(block_M=64, block_N=128, block_K=64, num_stages=2, threads=256) in grouped
 
 
 def test_every_case_split_and_frozen_manifest_use_the_single_pool():

@@ -141,7 +141,7 @@ def test_small_signal_corruption_fails_correctness():
     from experiments.common.kernels import make_case
 
     case = make_case(
-        Workload("fp8", "gemm_fp8", dict(m=16, n=16, k=16, transpose_b=True), dtype="float8_e4m3fn")
+        Workload("fp8", "gemm_fp8", dict(m=256, n=256, k=256, transpose_b=True), dtype="float8_e4m3fn")
     )
     if not hasattr(torch, "float8_e4m3fn"):
         pytest.skip("PyTorch FP8 required")
@@ -169,11 +169,21 @@ def test_gpu_fp8_boundaries():
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
     target = current_target()
-    if target["kind"] != "cuda" or int(target["arch"].split("_")[1].rstrip("af")) < 90:
-        pytest.skip("FP8 tensor cores require Hopper or newer")
-    w = Workload("fp8", "gemm_fp8", dict(m=64, n=96, k=64, transpose_b=True), dtype="float8_e4m3fn")
+    if target["kind"] != "cuda" or int(target["arch"].split("_")[1].rstrip("af")) < 100:
+        pytest.skip("TCGen05 requires Blackwell")
+    w = Workload("fp8", "gemm_fp8", dict(m=256, n=256, k=256, transpose_b=True), dtype="float8_e4m3fn")
     case = make_case(w)
-    program = case.build(block_M=64, block_N=64, block_K=32, num_stages=1, threads=128, enable_rasteration=False)
+    program = case.build(
+        block_M=128,
+        block_N=256,
+        block_K=128,
+        num_stages=6,
+        threads=128,
+        implementation="tcgen05_2cta",
+        group_size=1,
+        use_tma_store=True,
+        store_block_N=64,
+    )
     kernel = tilelang.compile(program, target=target, execution_backend="tvm_ffi", out_idx=case.out_idx)
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
     result = kernel(*inputs)

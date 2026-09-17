@@ -88,7 +88,7 @@
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float8_e4m3fn",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -97,16 +97,20 @@
       "op": "grouped_gemm",
       "parameters": {
         "batch_sizes": [
-          16,
           32,
-          48,
-          64
+          32,
+          32,
+          32,
+          32,
+          32,
+          32,
+          32
         ],
         "n": 2048,
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float8_e4m3fn",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -115,15 +119,16 @@
       "op": "grouped_gemm",
       "parameters": {
         "batch_sizes": [
-          64,
           128,
-          256
+          128,
+          128,
+          128
         ],
         "n": 2048,
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float8_e4m3fn",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -132,15 +137,15 @@
       "op": "grouped_gemm",
       "parameters": {
         "batch_sizes": [
-          64,
-          128,
+          256,
+          256,
           256
         ],
         "n": 7168,
         "k": 2048,
         "transpose_b": true
       },
-      "dtype": "float8_e4m3fn",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
@@ -158,7 +163,7 @@
         "k": 2048,
         "transpose_b": true
       },
-      "dtype": "float8_e4m3fn",
+      "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     }
