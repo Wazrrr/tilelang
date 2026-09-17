@@ -12,6 +12,7 @@ from experiments.suite import core_cases, study_plan
 
 COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 2304}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
+REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 
 
 @pytest.mark.parametrize("target", ["ampere", "hopper", "blackwell", "mi355x"])
@@ -26,13 +27,13 @@ def test_complete_pool_has_stable_ids_without_cap_or_prefilter(w, target):
 
 
 @pytest.mark.parametrize("preset", ["current", "large", "exhaustive"])
-@pytest.mark.parametrize("w", CASES[::2], ids=lambda w: w.op)
+@pytest.mark.parametrize("w", REPRESENTATIVES, ids=lambda w: w.op)
 def test_retired_presets_are_rejected(w, preset):
     with pytest.raises(ValueError, match="one configuration space"):
         configuration_space(replace(w, config_space=preset), Device("hopper", TARGETS["hopper"]))
 
 
-@pytest.mark.parametrize("w", CASES[::2], ids=lambda w: w.op)
+@pytest.mark.parametrize("w", REPRESENTATIVES, ids=lambda w: w.op)
 def test_explicit_native_configs_must_select_from_same_pool(w):
     device = Device("hopper", TARGETS["hopper"])
     pool = family_module(w.op, "spaces").get_configs()

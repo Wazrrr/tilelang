@@ -23,11 +23,11 @@ CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
 CORE_TARGETS = ("ampere", "hopper", "blackwell", "mi355x", "ascend910b")
 BUDGETS = {
     "smoke": dict(cases=4, configurations=16, seeds=[123], compare=False),
-    "development": dict(cases=8, configurations=256, seeds=[123], compare=True),
-    "final": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
+    "development": dict(cases=20, configurations=256, seeds=[123], compare=True),
+    "final": dict(cases=20, configurations=None, seeds=[123, 456, 789], compare=True),
     # A complete expanded-pool benchmark can precede the development gates.
     # It uses the final shapes/protocol without claiming final acceptance.
-    "full": dict(cases=8, configurations=None, seeds=[123, 456, 789], compare=True),
+    "full": dict(cases=20, configurations=None, seeds=[123, 456, 789], compare=True),
 }
 DEVICE_PATTERNS = dict(ampere="A100", hopper="H200", blackwell="B200|GB200", mi355x="MI355X", ascend910b="910B|A2")
 
@@ -45,7 +45,15 @@ def core_cases(suite, families=None):
         frozen = [w for w in frozen if w["op"] in ops]
         if [w.to_dict() for w in cases] != frozen:
             raise ValueError("final family definitions differ from the frozen holdout manifest")
-    return cases[::2] if suite == "smoke" else cases
+    if suite == "smoke":
+        seen = set()
+        smoke = []
+        for workload in cases:
+            if workload.op not in seen:
+                seen.add(workload.op)
+                smoke.append(workload)
+        return smoke
+    return cases
 
 
 def study_plan(suite, devices=None, *, families=None, config_space=None):

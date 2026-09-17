@@ -1,13 +1,25 @@
-"""Noncausal and causal attention cases with distinct sequence/head dimensions."""
+"""Noncausal and causal prefill attention at common LLM dimensions."""
 
 
 def cases(holdout=False):
     from experiments.common.spec import Workload
 
-    sequence = (768, 1152) if holdout else (512, 640)
+    sequences = (512, 2048, 4096, 8192) if holdout else (256, 1024, 2048, 4096)
+    shapes = (
+        ("short_causal", sequences[0], True),
+        ("medium_causal", sequences[1], True),
+        ("noncausal", sequences[2], False),
+        ("causal", sequences[2], True),
+        ("long_causal", sequences[3], True),
+    )
     return [
-        Workload("attention_" + role, "attention", dict(batch=1, heads=4, sequence=n, dim=d, causal=causal), config_space="expanded")
-        for role, n, d, causal in (("noncausal", sequence[0], 64, False), ("causal", sequence[1], 128, True))
+        Workload(
+            "attention_" + role,
+            "attention",
+            dict(batch=1, heads=32, sequence=n, dim=128, causal=causal),
+            config_space="expanded",
+        )
+        for role, n, causal in shapes
     ]
 
 
@@ -15,6 +27,14 @@ def training_cases():
     from experiments.common.spec import Workload
 
     return [
-        Workload("attention_" + split, "attention", dict(batch=1, heads=2, sequence=n, dim=d, causal=c), config_space="expanded")
-        for split, (n, d, c) in zip(("train_a", "train_b", "validation"), ((256, 64, False), (384, 128, True), (448, 64, True)))
+        Workload(
+            "attention_" + split,
+            "attention",
+            dict(batch=1, heads=16, sequence=n, dim=128, causal=causal),
+            config_space="expanded",
+        )
+        for split, (n, causal) in zip(
+            ("train_a", "train_b", "validation"),
+            ((512, False), (1024, True), (2048, True)),
+        )
     ]

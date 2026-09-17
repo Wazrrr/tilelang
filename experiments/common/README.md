@@ -7,7 +7,7 @@ Reusable helpers live in [`../utils/`](../utils/README.md). The `comparison.py`
 commands below describe the lower-level collector; invoke named suites for
 automatic reuse across revisions.
 
-To collect only the eight final brute-force baselines on all idle H200 GPUs:
+To collect only the twenty final brute-force baselines on all idle H200 GPUs:
 
 ```bash
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
@@ -149,7 +149,7 @@ requests, source hashes and native build before reusing completed cases; use a
 new output directory after code changes. The earlier single-method runner below
 remains available.
 
-By default, the comparison uses the same eight final cases and the family-owned
+By default, the comparison uses the same twenty final cases and the family-owned
 two-training/one-validation shape splits as the named suites. A custom
 `--manifest` or explicit `--train-scales` / `--validation-scales` / `--test-scales`
 selects a scaled-shape study. Missing scale lists then default to training at
@@ -237,7 +237,7 @@ Run top-K selection over each workload's full default grid:
 python -m experiments.common.run --devices hopper --method top_k --top-k 20
 ```
 
-`--smoke` selects the eight family-owned development cases, preserving the grid. `--config-indices` explicitly
+`--smoke` selects the twenty family-owned development cases, preserving the grid. `--config-indices` explicitly
 selects a subset and retains original indices. Remove that argument for full-grid
 experiments. The default method is `analyze`; it performs no compilation,
 benchmarking, or device-limit query. Supply device limits in a manifest to obtain
@@ -251,16 +251,16 @@ Compilation/benchmark timing excludes process startup and reference generation;
 
 ## Workloads
 
-The standalone shared runner uses the same eight final cases (six FP16 and two FP8) as the family
+The standalone shared runner uses the same twenty final cases as the family
 suites. BF16 and supported boundary shapes can be supplied explicitly for
 correctness checks; they do not add default experiment cases:
 
 | Workload | Covered behavior |
 | --- | --- |
-| `gemm_square`, `gemm_square_large` | 4096³ and 8192³, pretransposed B, FP32 accumulation |
-| `attention_noncausal`, `attention_causal` | BSHD online attention with the example causal bounds |
-| `kda_chunk_regular`, `kda_chunk_tails` | Chunk output with equal and unequal head dimensions |
-| `gemm_fp8_square`, `gemm_fp8_square_large` | Native FP8 GEMM with FP32 accumulation and FP8 output |
+| `gemm_*` | Decode/prefill hidden projections and both FFN directions, pretransposed B |
+| `attention_*` | BSHD prefill attention from 512 to 8192 tokens, including matched causal/noncausal 4K cases |
+| `kda_chunk_*` | Chunk output from 2K to 16K context plus a batched case, DK=DV=128 |
+| `gemm_fp8_*` | FP8 decode/prefill projections and both FFN directions with FP32 accumulation |
 
 Each family's `kernel.py` and `reference.py` supply its builder,
 input generator, reference, output indices, and correctness contract.
@@ -494,19 +494,23 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 
 ## Compact five-target suites
 
-`python -m experiments.suite --suite smoke --plan` plans four families
-with deterministic subsets. Development uses eight cases and up to 256
+`python -m experiments.suite --suite smoke --plan` plans one representative
+shape from each of four families with deterministic subsets. Development uses
+twenty cases and up to 256
 configurations; final uses the complete `expanded` pools (GEMM 2,304,
 FlashAttention 320, KDA 720 and FP8 GEMM 2,304 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 
-GEMM uses regular square matrices with M=N=K and pretransposed B=(N,K):
+GEMM uses serving projection/FFN matrices with pretransposed B=(N,K):
 
-| Case | Development | Final |
-| --- | ---: | ---: |
-| `gemm_square` | 1024 | 4096 |
-| `gemm_square_large` | 2048 | 8192 |
+| Case | Development M,N,K | Final M,N,K |
+| --- | --- | --- |
+| `gemm_decode` | 64,4096,4096 | 128,4096,4096 |
+| `gemm_prefill` | 512,4096,4096 | 1024,4096,4096 |
+| `gemm_ffn_down` | 512,4096,14336 | 1024,4096,14336 |
+| `gemm_square` | 2048,4096,4096 | 4096,4096,4096 |
+| `gemm_square_large` | 2048,14336,4096 | 4096,14336,4096 |
 
-Smoke uses the 1024-square case. The final dimensions are recorded in
+Smoke uses the 64-token continuous-batch decode case. The final dimensions are recorded in
 [`five_target_final.json`](../manifests/five_target_final.json).

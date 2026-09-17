@@ -75,6 +75,45 @@
   ],
   "workloads": [
     {
+      "name": "gemm_decode",
+      "op": "gemm",
+      "parameters": {
+        "m": 128,
+        "n": 4096,
+        "k": 4096,
+        "transpose_b": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "gemm_prefill",
+      "op": "gemm",
+      "parameters": {
+        "m": 1024,
+        "n": 4096,
+        "k": 4096,
+        "transpose_b": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "gemm_ffn_down",
+      "op": "gemm",
+      "parameters": {
+        "m": 1024,
+        "n": 4096,
+        "k": 14336,
+        "transpose_b": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
       "name": "gemm_square",
       "op": "gemm",
       "parameters": {
@@ -91,10 +130,38 @@
       "name": "gemm_square_large",
       "op": "gemm",
       "parameters": {
-        "m": 8192,
-        "n": 8192,
-        "k": 8192,
+        "m": 4096,
+        "n": 14336,
+        "k": 4096,
         "transpose_b": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "attention_short_causal",
+      "op": "attention",
+      "parameters": {
+        "batch": 1,
+        "heads": 32,
+        "sequence": 512,
+        "dim": 128,
+        "causal": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "attention_medium_causal",
+      "op": "attention",
+      "parameters": {
+        "batch": 1,
+        "heads": 32,
+        "sequence": 2048,
+        "dim": 128,
+        "causal": true
       },
       "dtype": "float16",
       "configs": null,
@@ -105,9 +172,9 @@
       "op": "attention",
       "parameters": {
         "batch": 1,
-        "heads": 4,
-        "sequence": 768,
-        "dim": 64,
+        "heads": 32,
+        "sequence": 4096,
+        "dim": 128,
         "causal": false
       },
       "dtype": "float16",
@@ -119,10 +186,54 @@
       "op": "attention",
       "parameters": {
         "batch": 1,
-        "heads": 4,
-        "sequence": 1152,
+        "heads": 32,
+        "sequence": 4096,
         "dim": 128,
         "causal": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "attention_long_causal",
+      "op": "attention",
+      "parameters": {
+        "batch": 1,
+        "heads": 32,
+        "sequence": 8192,
+        "dim": 128,
+        "causal": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "kda_chunk_short",
+      "op": "kda_chunk_o",
+      "parameters": {
+        "batch": 1,
+        "heads": 64,
+        "sequence": 2048,
+        "dim": 128,
+        "value_dim": 128,
+        "chunk_size": 64
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "kda_chunk_medium",
+      "op": "kda_chunk_o",
+      "parameters": {
+        "batch": 1,
+        "heads": 64,
+        "sequence": 4096,
+        "dim": 128,
+        "value_dim": 128,
+        "chunk_size": 64
       },
       "dtype": "float16",
       "configs": null,
@@ -133,10 +244,10 @@
       "op": "kda_chunk_o",
       "parameters": {
         "batch": 1,
-        "heads": 4,
-        "sequence": 1024,
-        "dim": 64,
-        "value_dim": 64,
+        "heads": 64,
+        "sequence": 8192,
+        "dim": 128,
+        "value_dim": 128,
         "chunk_size": 64
       },
       "dtype": "float16",
@@ -144,17 +255,71 @@
       "config_space": "expanded"
     },
     {
-      "name": "kda_chunk_tails",
+      "name": "kda_chunk_batched",
+      "op": "kda_chunk_o",
+      "parameters": {
+        "batch": 2,
+        "heads": 64,
+        "sequence": 4096,
+        "dim": 128,
+        "value_dim": 128,
+        "chunk_size": 64
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "kda_chunk_long",
       "op": "kda_chunk_o",
       "parameters": {
         "batch": 1,
-        "heads": 4,
-        "sequence": 768,
-        "dim": 96,
-        "value_dim": 80,
-        "chunk_size": 48
+        "heads": 64,
+        "sequence": 16384,
+        "dim": 128,
+        "value_dim": 128,
+        "chunk_size": 64
       },
       "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "gemm_fp8_decode",
+      "op": "gemm_fp8",
+      "parameters": {
+        "m": 128,
+        "n": 4096,
+        "k": 4096,
+        "transpose_b": true
+      },
+      "dtype": "float8_e4m3fn",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "gemm_fp8_prefill",
+      "op": "gemm_fp8",
+      "parameters": {
+        "m": 1024,
+        "n": 4096,
+        "k": 4096,
+        "transpose_b": true
+      },
+      "dtype": "float8_e4m3fn",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "gemm_fp8_ffn_down",
+      "op": "gemm_fp8",
+      "parameters": {
+        "m": 1024,
+        "n": 4096,
+        "k": 14336,
+        "transpose_b": true
+      },
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     },
@@ -175,9 +340,9 @@
       "name": "gemm_fp8_square_large",
       "op": "gemm_fp8",
       "parameters": {
-        "m": 8192,
-        "n": 8192,
-        "k": 8192,
+        "m": 4096,
+        "n": 14336,
+        "k": 4096,
         "transpose_b": true
       },
       "dtype": "float8_e4m3fn",

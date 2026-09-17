@@ -13,8 +13,11 @@ from experiments.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
 
 
 def test_smoke_uses_same_cases_and_three_fixed_budgets():
-    assert core_cases("smoke") == core_cases("development")[::2]
-    assert len(core_cases("final")) == len(core_cases("development")) == 8
+    assert len(core_cases("smoke")) == 4
+    assert {w.op for w in core_cases("smoke")} == {"gemm", "attention", "kda_chunk_o", "gemm_fp8"}
+    assert all(w in core_cases("development") for w in core_cases("smoke"))
+    assert len(core_cases("final")) == len(core_cases("development")) == 20
+    assert all(sum(w.op == op for w in core_cases("final")) == 5 for op in {w.op for w in core_cases("final")})
     assert {w.dtype for w in core_cases("final")} == {"float16", "float8_e4m3fn"}
     for w in core_cases("final"):
         if w.op == "kda_chunk_o":
@@ -24,6 +27,42 @@ def test_smoke_uses_same_cases_and_three_fixed_budgets():
     assert BUDGETS["full"]["configurations"] is None
     assert "mi355x" in CORE_TARGETS and "mi308" not in CORE_TARGETS
     assert TARGETS["mi355x"]["mcpu"] == "gfx950"
+
+
+def test_final_cases_use_five_common_serving_shapes_per_family():
+    by_op = {
+        op: [w for w in core_cases("final") if w.op == op]
+        for op in ("gemm", "gemm_fp8", "attention", "kda_chunk_o")
+    }
+    dense_shapes = [
+        (128, 4096, 4096),
+        (1024, 4096, 4096),
+        (1024, 4096, 14336),
+        (4096, 4096, 4096),
+        (4096, 14336, 4096),
+    ]
+    for op in ("gemm", "gemm_fp8"):
+        assert [(w.parameters["m"], w.parameters["n"], w.parameters["k"]) for w in by_op[op]] == dense_shapes
+    assert [(w.parameters["sequence"], w.parameters["causal"]) for w in by_op["attention"]] == [
+        (512, True),
+        (2048, True),
+        (4096, False),
+        (4096, True),
+        (8192, True),
+    ]
+    assert all((w.parameters["heads"], w.parameters["dim"]) == (32, 128) for w in by_op["attention"])
+    assert [(w.parameters["batch"], w.parameters["sequence"]) for w in by_op["kda_chunk_o"]] == [
+        (1, 2048),
+        (1, 4096),
+        (1, 8192),
+        (2, 4096),
+        (1, 16384),
+    ]
+    assert all(
+        (w.parameters["heads"], w.parameters["dim"], w.parameters["value_dim"], w.parameters["chunk_size"])
+        == (64, 128, 128, 64)
+        for w in by_op["kda_chunk_o"]
+    )
 
 
 def test_pairwise_is_deterministic_and_preserves_indices():
@@ -91,7 +130,11 @@ def test_missing_case_fails_even_if_other_seven_are_good():
 
 def test_planning_has_no_compiler_runtime_imports():
     root = str(Path(__file__).resolve().parents[3])
-    code = f"import sys; sys.path.insert(0, {root!r}); from experiments.suite import core_cases; assert len(core_cases('final')) == 8; assert not any(k.split('.')[0] in ('tilelang', 'tvm', 'torch') for k in sys.modules)"
+    code = (
+        f"import sys; sys.path.insert(0, {root!r}); from experiments.suite import core_cases; "
+        "assert len(core_cases('final')) == 20; "
+        "assert not any(k.split('.')[0] in ('tilelang', 'tvm', 'torch') for k in sys.modules)"
+    )
     subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)
 
 

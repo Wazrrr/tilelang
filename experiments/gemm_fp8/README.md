@@ -6,13 +6,12 @@ accumulation, transposed B, and the example’s direct fragment-to-global epilog
 There is no scaling or FP16 fallback. Named cases use `float8_e4m3fn`; explicit
 workloads also support `float8_e5m2`.
 
-| Split | M, N, K |
-| --- | --- |
-| Training A | 512, 512, 512 |
-| Training B | 1024, 256, 768 |
-| Validation | 384, 768, 512 |
-| Development | 1024³ and 2048³ |
-| Final | 4096³ and 8192³ |
+The five final cases cover 128-token continuous-batch decode, 1024-token prefill, FFN contraction,
+a 4096-token projection, and a 4096-token FFN expansion. All five use E4M3 on
+this branch. Training and validation
+use the same serving dimensions at smaller token counts. Ampere is rejected
+because it has no native FP8 tensor-core path; Hopper and Blackwell use the same
+source kernel and configuration pool.
 
 The 2,304 configurations retain all 288 schedules from
 [`example_gemm_fp8_tiletune.py`](../../examples/gemm_fp8/example_gemm_fp8_tiletune.py):

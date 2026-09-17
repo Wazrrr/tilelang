@@ -23,8 +23,8 @@ def write(path, data):
 @pytest.mark.parametrize("family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 2304)])
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
-    assert len(plan) == 10
-    assert len({row["workload"]["name"] for row in plan}) == 2
+    assert len(plan) == 25
+    assert len({row["workload"]["name"] for row in plan}) == 5
     assert {row["variant"] for row in plan} == set(VARIANTS)
     assert all(
         row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "float16")
@@ -91,13 +91,13 @@ def test_unsupported_fp8_study_retains_every_case_and_seed(tmp_path, monkeypatch
     assert references["ampere"]["gemm_fp8"]["status"] == "unsupported"
     for seed in plan["budget"]["seeds"]:
         rows = json.loads((tmp_path / str(seed) / "ampere/comparison.json").read_text())["results"]
-        assert len(rows) == 2
+        assert len(rows) == 5
         for row in rows:
             assert set(row["methods"]) == set(plan["methods"])
             assert all(method["status"] == "unsupported" and "FP8" in method["reason"] for method in row["methods"].values())
     acceptance = json.loads((tmp_path / "acceptance.json").read_text())
     assert not acceptance["accepted"]
-    assert all(len(seed["cases"]) == 2 for seed in acceptance["targets"]["ampere"]["seeds"].values())
+    assert all(len(seed["cases"]) == 5 for seed in acceptance["targets"]["ampere"]["seeds"].values())
 
 
 def test_baseline_identity_ignores_tiletune_seed_and_k_but_includes_baseline_seed(monkeypatch):
