@@ -285,7 +285,7 @@
       "config_space": "expanded"
     },
     {
-      "name": "gemm_fp8_decode_e4m3",
+      "name": "gemm_fp8_decode",
       "op": "gemm_fp8",
       "parameters": {
         "m": 128,
@@ -298,7 +298,7 @@
       "config_space": "expanded"
     },
     {
-      "name": "gemm_fp8_prefill_e4m3",
+      "name": "gemm_fp8_prefill",
       "op": "gemm_fp8",
       "parameters": {
         "m": 1024,
@@ -311,7 +311,7 @@
       "config_space": "expanded"
     },
     {
-      "name": "gemm_fp8_ffn_down_e4m3",
+      "name": "gemm_fp8_ffn_down",
       "op": "gemm_fp8",
       "parameters": {
         "m": 1024,
@@ -324,7 +324,7 @@
       "config_space": "expanded"
     },
     {
-      "name": "gemm_fp8_e4m3",
+      "name": "gemm_fp8_square",
       "op": "gemm_fp8",
       "parameters": {
         "m": 4096,
@@ -337,7 +337,7 @@
       "config_space": "expanded"
     },
     {
-      "name": "gemm_fp8_e5m2",
+      "name": "gemm_fp8_square_large",
       "op": "gemm_fp8",
       "parameters": {
         "m": 4096,
@@ -345,7 +345,7 @@
         "k": 4096,
         "transpose_b": true
       },
-      "dtype": "float8_e5m2",
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     },

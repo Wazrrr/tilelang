@@ -11,7 +11,7 @@ start in the family folder:
 | GEMM | Five continuous-batch decode/prefill projection and FFN shapes | [gemm/](gemm/README.md) |
 | FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
 | KDA | Five 2K–16K and batched chunk-output shapes at DK=DV=128 | [kda/](kda/README.md) |
-| FP8 GEMM | Five decode/prefill projection and FFN shapes across E4M3/E5M2 | [gemm_fp8/](gemm_fp8/README.md) |
+| FP8 GEMM | Five E4M3 decode/prefill projection and FFN shapes | [gemm_fp8/](gemm_fp8/README.md) |
 | Grouped GEMM | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
 
 Grouped GEMM follows the same family structure with a 192-config pool. The
@@ -23,7 +23,7 @@ separate frozen manifest, and `--families` can still select any subset.
 ```text
 experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
-├── gemm_fp8/                Native E4M3/E5M2 GEMM study
+├── gemm_fp8/                Native E4M3 GEMM study
 ├── grouped_gemm/            Opt-in concatenated grouped forward GEMM study
 ├── flash_attention/         Same family conventions
 ├── kda/                     Direct chunk-output example study

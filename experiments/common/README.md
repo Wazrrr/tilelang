@@ -67,7 +67,7 @@ Inspect a space without loading TileLang or querying hardware:
 
 ```bash
 python -m experiments.common.run --plan --devices blackwell \
-  --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_e4m3 \
+  --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square \
   --config-space expanded
 ```
 
@@ -93,7 +93,7 @@ Run the sampled baseline comparison on the full expanded pools:
 ```bash
 bash experiments/common/run_accelerator.sh \
   --device blackwell \
-  --workloads gemm_square attention_causal kda_chunk_regular gemm_fp8_e4m3 \
+  --workloads gemm_square attention_causal kda_chunk_regular gemm_fp8_square \
   --methods tiletune xgboost --top-k 20 --xgb-sample-fraction 0.1 \
   --wait-idle --output experiments/results/expanded-comparison
 ```
@@ -228,7 +228,7 @@ Run a small correctness/runner check on a Hopper machine:
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m experiments.common.run \
     --devices hopper --smoke --method exhaustive --config-indices 0 \
-    --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_e4m3
+    --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square
 ```
 
 Run top-K selection over each workload's full default grid:

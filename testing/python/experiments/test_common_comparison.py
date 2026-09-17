@@ -104,7 +104,7 @@ def test_carver_unsupported_semantics_are_explicit_and_exhaustive_has_no_gate():
     workloads = {w.name: w for w in default_workloads()}
     assert carver_support_reason(workloads["gemm_square"], device) is None
     assert carver_support_reason(workloads["attention_noncausal"], device) is None
-    assert carver_support_reason(workloads["gemm_fp8_e4m3"], device)
+    assert carver_support_reason(workloads["gemm_fp8_square"], device)
     for parameters in (dict(batch=2), dict(epilogue="bias_relu"), dict(transpose_b=False)):
         w = workloads["gemm_square"]
         assert carver_support_reason(replace(w, parameters=w.parameters | parameters), device)

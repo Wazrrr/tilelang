@@ -18,7 +18,7 @@ def test_smoke_uses_same_cases_and_three_fixed_budgets():
     assert all(w in core_cases("development") for w in core_cases("smoke"))
     assert len(core_cases("final")) == len(core_cases("development")) == 25
     assert all(sum(w.op == op for w in core_cases("final")) == 5 for op in {w.op for w in core_cases("final")})
-    assert {w.dtype for w in core_cases("final")} == {"float16", "float8_e4m3fn", "float8_e5m2"}
+    assert {w.dtype for w in core_cases("final")} == {"float16", "float8_e4m3fn"}
     for w in core_cases("final"):
         if w.op == "kda_chunk_o":
             assert w.parameters["sequence"] % w.parameters["chunk_size"] == 0
