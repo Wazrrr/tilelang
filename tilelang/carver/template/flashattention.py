@@ -1,8 +1,4 @@
-"""Stable scaled attention, including the mask and probability conversion.
-
-Carver represents the fused tensor graph; TileLang's online loop scheduling is
-an implementation detail and is modeled separately by TileTune.
-"""
+"""Canonical Carver graph for stable scaled attention."""
 
 from dataclasses import dataclass
 
@@ -15,6 +11,8 @@ from ..utils import get_roller_hints_from_output_nodes
 
 @dataclass
 class FlashAttentionTemplate(BaseTemplate):
+    """QK, masking, softmax and PV as one connected Carver graph."""
+
     batch_size: int = 1
     num_heads: int = 1
     head_dim: int = 64
@@ -25,23 +23,30 @@ class FlashAttentionTemplate(BaseTemplate):
     out_dtype: str = "float16"
     accum_dtype: str = "float32"
 
-    def initialize_function(self):
+    def initialize_function(self) -> None:
         if str(self.in_dtype) not in ("float16", "bfloat16") or str(self.accum_dtype) not in ("float16", "float32"):
             raise ValueError("attention requires FP16/BF16 inputs and floating-point accumulation")
-        b, m, n, d = self.batch_size * self.num_heads, self.seq_length, self.seq_kv_length, self.head_dim
-        if min(b, m, n, d) <= 0:
+        batch_heads = self.batch_size * self.num_heads
+        query_length, key_length, head_dim = self.seq_length, self.seq_kv_length, self.head_dim
+        if min(batch_heads, query_length, key_length, head_dim) <= 0:
             raise ValueError("attention dimensions must be positive")
+
         graph = TemplateGraph()
-        q = graph.input("Q", (b, m, d), self.in_dtype)
-        k = graph.input("K", (b, n, d), self.in_dtype)
-        v = graph.input("V", (b, n, d), self.in_dtype)
-        rk = te.reduce_axis((0, d), "head_k")
+        query = graph.input("Q", (batch_heads, query_length, head_dim), self.in_dtype)
+        key = graph.input("K", (batch_heads, key_length, head_dim), self.in_dtype)
+        value = graph.input("V", (batch_heads, key_length, head_dim), self.in_dtype)
+
+        reduction_head = te.reduce_axis((0, head_dim), "head_k")
         scores = graph.stage(
             "qk",
-            [q, k],
+            [query, key],
             lambda q, k: te.compute(
-                (b, m, n),
-                lambda h, i, j: te.sum(q[h, i, rk].astype(self.accum_dtype) * k[h, j, rk].astype(self.accum_dtype), rk),
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: te.sum(
+                    q[b, i, reduction_head].astype(self.accum_dtype)
+                    * k[b, j, reduction_head].astype(self.accum_dtype),
+                    reduction_head,
+                ),
                 name="Scores",
             ),
             tensorcore=True,
@@ -49,39 +54,69 @@ class FlashAttentionTemplate(BaseTemplate):
         scores = graph.stage(
             "scale_mask",
             [scores],
-            lambda s: te.compute(
-                (b, m, n),
-                lambda h, i, j: (
-                    tirx.if_then_else(i >= j, s[h, i, j] * d**-0.5, tirx.const(float("-inf"), self.accum_dtype))
+            lambda source: te.compute(
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: (
+                    tirx.if_then_else(
+                        i >= j,
+                        source[b, i, j] * head_dim**-0.5,
+                        tirx.const(float("-inf"), self.accum_dtype),
+                    )
                     if self.is_causal
-                    else s[h, i, j] * d**-0.5
+                    else source[b, i, j] * head_dim**-0.5
                 ),
                 name="Scaled",
             ),
         )
-        rm = te.reduce_axis((0, n), "max_k")
-        maximum = graph.stage("row_max", [scores], lambda s: te.compute((b, m), lambda h, i: te.max(s[h, i, rm], rm), name="Maximum"))
+        reduction_max = te.reduce_axis((0, key_length), "max_k")
+        maximum = graph.stage(
+            "row_max",
+            [scores],
+            lambda source: te.compute(
+                (batch_heads, query_length),
+                lambda b, i: te.max(source[b, i, reduction_max], reduction_max),
+                name="Maximum",
+            ),
+        )
         exponentials = graph.stage(
             "exp",
             [scores, maximum],
-            lambda s, mx: te.compute((b, m, n), lambda h, i, j: te.exp(s[h, i, j] - mx[h, i]), name="Exponentials"),
+            lambda source, row_max: te.compute(
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: te.exp(source[b, i, j] - row_max[b, i]),
+                name="Exponentials",
+            ),
         )
-        rs = te.reduce_axis((0, n), "sum_k")
+        reduction_sum = te.reduce_axis((0, key_length), "sum_k")
         denominator = graph.stage(
-            "row_sum", [exponentials], lambda e: te.compute((b, m), lambda h, i: te.sum(e[h, i, rs], rs), name="Denominator")
+            "row_sum",
+            [exponentials],
+            lambda source: te.compute(
+                (batch_heads, query_length),
+                lambda b, i: te.sum(source[b, i, reduction_sum], reduction_sum),
+                name="Denominator",
+            ),
         )
         probabilities = graph.stage(
             "probability_cast",
             [exponentials],
-            lambda e: te.compute((b, m, n), lambda h, i, j: e[h, i, j].astype(self.in_dtype), name="Probabilities"),
+            lambda source: te.compute(
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: source[b, i, j].astype(self.in_dtype),
+                name="Probabilities",
+            ),
         )
-        rv = te.reduce_axis((0, n), "sequence_k")
+        reduction_sequence = te.reduce_axis((0, key_length), "sequence_k")
         numerator = graph.stage(
             "pv",
-            [probabilities, v],
-            lambda p, v: te.compute(
-                (b, m, d),
-                lambda h, i, j: te.sum(p[h, i, rv].astype(self.accum_dtype) * v[h, rv, j].astype(self.accum_dtype), rv),
+            [probabilities, value],
+            lambda probability, values: te.compute(
+                (batch_heads, query_length, head_dim),
+                lambda b, i, j: te.sum(
+                    probability[b, i, reduction_sequence].astype(self.accum_dtype)
+                    * values[b, reduction_sequence, j].astype(self.accum_dtype),
+                    reduction_sequence,
+                ),
                 name="Numerator",
             ),
             tensorcore=True,
@@ -89,7 +124,11 @@ class FlashAttentionTemplate(BaseTemplate):
         output = graph.stage(
             "normalize",
             [numerator, denominator],
-            lambda o, l: te.compute((b, m, d), lambda h, i, j: (o[h, i, j] / l[h, i]).astype(self.out_dtype), name="Output"),
+            lambda source, normalizer: te.compute(
+                (batch_heads, query_length, head_dim),
+                lambda b, i, j: (source[b, i, j] / normalizer[b, i]).astype(self.out_dtype),
+                name="Output",
+            ),
         )
         self._graph, self._output = graph, output
         self.set_function(graph.function(output))
@@ -99,8 +138,9 @@ class FlashAttentionTemplate(BaseTemplate):
         return self._graph.output_nodes(self._output, self.arch)
 
     def get_hardware_aware_configs(self, arch=None, topk=10):
+        selected_arch = arch or self.arch
         return get_roller_hints_from_output_nodes(
-            self._graph.output_nodes(self._output, arch or self.arch), arch=arch or self.arch, topk=topk
+            self._graph.output_nodes(self._output, selected_arch), arch=selected_arch, topk=topk
         )
 
     def params_as_dict(self):

@@ -90,5 +90,5 @@ python -m experiments.kda.tiletune.run --suite full --device hopper \
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
 on both final FP16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
-Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `KDAChunkOutputTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
+Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `KDAChunkTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

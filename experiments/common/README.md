@@ -190,14 +190,11 @@ published results are historical and do not measure this sampled protocol.
 `--method brute_force` on the single-method runner measures every supplied
 candidate independently of TileTune analysis. The older `exhaustive` method
 still means exhaustive **report-only TileTune** analysis/measurement. The new
-Carver adapter reuses `MatmulTemplate` for nonbatched FP16/BF16 and native FP8
-GEMMs. Attention uses `FlashAttentionTemplate`, including stable normalization,
-the probability cast and causal masking. KDA uses `KDAChunkOutputTemplate`,
-including gated queries, both rounding points and the causal matrix product.
-Each adapter maps the supplied grid to Carver's traffic-times-waves policy.
-The attention and KDA graph adapters record their coarse scheduling assumptions;
-TileTune separately models the native kernel's loops, ownership and pipeline.
-Unsupported dtypes, schedules and hardware remain explicit outcomes.
+Carver adapters map the exact supplied grids through one canonical template
+selector. Plain FP16/BF16 GEMM uses `MatmulTemplate`, FP8 GEMM uses the dedicated
+`FP8MatmulTemplate`, attention uses `FlashAttentionTemplate`, grouped GEMM uses
+`GroupedMatmulTemplate`, and KDA uses `KDAChunkTemplate`. Unsupported fused or
+batched GEMM forms and unavailable hardware remain explicit outcomes.
 
 Each test case records method outcomes, an independent oracle table, ranking
 diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics

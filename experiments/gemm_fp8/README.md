@@ -26,7 +26,7 @@ The 2,304 configurations retain all 288 schedules from
 | `enable_rasteration` | true, false |
 
 All methods use the full ordered pool. Compiler and correctness failures remain
-outcomes. Carver uses `MatmulTemplate` with FP8 operands and FP32 accumulation.
+outcomes. Carver uses `FP8MatmulTemplate` with FP8 operands and FP32 accumulation.
 TileTune requires a measured profile for the specific FP8 format and actual
 matrix instruction, including the FP32-to-FP8 output conversion measured by
 profile version 7; an FP16 profile cannot score FP8 work.

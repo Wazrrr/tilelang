@@ -1,4 +1,4 @@
-"""Build a functional TE graph and the same graph as connected Carver nodes."""
+"""Build one functional TE graph and the equivalent connected Carver graph."""
 
 from tvm import te
 
@@ -7,6 +7,8 @@ from ..utils import get_tensorized_func_and_tags
 
 
 class TemplateGraph:
+    """Small graph builder shared by fused multi-stage Carver templates."""
+
     def __init__(self):
         self.inputs = []
         self.stages = []
@@ -28,6 +30,8 @@ class TemplateGraph:
         return te.create_prim_func([*self.inputs, output])
 
     def output_nodes(self, output, arch):
+        if arch is None:
+            raise ValueError("Carver graph construction requires an explicit architecture")
         nodes = {}
         for name, inputs, tensor, function, tensorcore in self.stages:
             tags = {}
@@ -37,7 +41,8 @@ class TemplateGraph:
                     raise ValueError(f"Carver cannot tensorize template stage {name}")
             node = PrimFuncNode(function, name=name, tags=tags)
             nodes[tensor] = node
-            # Tensorization can reorder parameters; connect by buffer name.
+            # Tensorization may reorder parameters. Connect graph edges by the
+            # stable TE input name rather than by the pre-transform position.
             by_name = {t.op.name: t for t in inputs}
             for index, buffer in enumerate(node.input_buffers):
                 tensor_input = by_name[buffer.name]

@@ -224,7 +224,9 @@ class TensorCorePolicy(DefaultPolicy):
                 wmma_invalid = [block_m < wmma_m or block_n < wmma_n for wmma_m, wmma_n in self.arch.get_avaliable_tensorintrin_shapes()]
                 if all(wmma_invalid):
                     return False
-                if not self.tags.get("allow_partial_tiles", False) and any(y % x for x, y in zip(td.tile_map[node], node.get_space_dim())):
+                if not self.tags.get("allow_partial_tiles", False) and any(
+                    y % x for x, y in zip(td.tile_map[node], node.get_space_dim())
+                ):
                     return False
         return super().check_tile_shape_isvalid(td)
 

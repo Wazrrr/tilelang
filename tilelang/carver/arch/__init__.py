@@ -52,6 +52,7 @@ __all__ = [
     "is_ampere_arch",
     "is_ada_arch",
     "is_hopper_arch",
+    "is_blackwell_arch",
     "is_tensorcore_supported_precision",
     "has_mma_support",
     "is_cdna_arch",
