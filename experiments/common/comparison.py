@@ -54,7 +54,11 @@ def split_workloads(workloads, scales):
         for w in workloads:
             for factor in factors:
                 p = dict(w.parameters)
-                keys = ("m", "n", "k") if w.op in ("gemm", "gemm_fp8") else ("sequence",)
+                if w.op == "grouped_gemm":
+                    p["batch_sizes"] = [max(1, int(size * factor)) for size in p["batch_sizes"]]
+                    keys = ("n", "k")
+                else:
+                    keys = ("m", "n", "k") if w.op in ("gemm", "gemm_fp8") else ("sequence",)
                 for key in keys:
                     multiple = p.get("chunk_size", 32) if key == "sequence" else 32
                     p[key] = max(multiple, int(p[key] * factor / multiple) * multiple)

@@ -430,6 +430,7 @@ def run_native(request, output):
             from .smoke import run_smoke
 
             inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(settings["seed"]))
+            case.check_input_values(inputs)
             return dict(
                 result,
                 **run_smoke(
@@ -458,6 +459,7 @@ def run_native(request, output):
 
     generator = torch.Generator(device="cuda").manual_seed(settings["seed"])
     inputs = case.inputs("cuda", generator)
+    case.check_input_values(inputs)
     expected = case.reference(*inputs)
     if xgb_report is not None:
         from .execution import run_selected

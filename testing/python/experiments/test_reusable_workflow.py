@@ -20,14 +20,16 @@ def write(path, data):
     write_json(path, data)
 
 
-@pytest.mark.parametrize("family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 2304)])
+@pytest.mark.parametrize(
+    "family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 72), ("grouped_gemm", 192)]
+)
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
     assert len(plan) == 25
     assert len({row["workload"]["name"] for row in plan}) == 5
     assert {row["variant"] for row in plan} == set(VARIANTS)
     assert all(
-        row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "float16")
+        row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "bfloat16")
         for row in plan
     )
     assert system_plan(family, variants=["combined"], indices=[3, 1])[0]["indices"] == [3, 1]
@@ -75,29 +77,13 @@ def test_runtime_probe_does_not_serialize_full_candidate_pools(monkeypatch):
     assert baseline_store.runtime_identity(device) == {"device": "test"}
 
 
-def test_unsupported_fp8_study_retains_every_case_and_seed(tmp_path, monkeypatch):
-    import experiments.suite as suite
+def test_ampere_fp8_study_is_supported_and_retains_every_case():
+    from experiments.common.spec import Workload, support_reason
 
     plan = study_plan("full", [Device("ampere", TARGETS["ampere"])], families=["gemm_fp8"])
-    monkeypatch.setattr(study, "runtime_identity", lambda device: {})
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("unsupported FP8 must not collect baselines, profile, or launch kernels")
-
-    monkeypatch.setattr(study, "collect_bundle", forbidden)
-    monkeypatch.setattr(suite, "_existing_or_run", forbidden)
-    assert study.execute(plan, tmp_path, {}, baseline_root=tmp_path / "baselines") == 1
-    references = json.loads((tmp_path / "baselines.json").read_text())
-    assert references["ampere"]["gemm_fp8"]["status"] == "unsupported"
-    for seed in plan["budget"]["seeds"]:
-        rows = json.loads((tmp_path / str(seed) / "ampere/comparison.json").read_text())["results"]
-        assert len(rows) == 5
-        for row in rows:
-            assert set(row["methods"]) == set(plan["methods"])
-            assert all(method["status"] == "unsupported" and "FP8" in method["reason"] for method in row["methods"].values())
-    acceptance = json.loads((tmp_path / "acceptance.json").read_text())
-    assert not acceptance["accepted"]
-    assert all(len(seed["cases"]) == 5 for seed in acceptance["targets"]["ampere"]["seeds"].values())
+    assert len(plan["splits"]["test"]) == 5
+    assert all(len(item["indices"]) == 72 for item in plan["subsets"]["ampere"].values())
+    assert all(support_reason(Workload(**w), Device("ampere", TARGETS["ampere"])) is None for w in plan["splits"]["test"])
 
 
 def test_baseline_identity_ignores_tiletune_seed_and_k_but_includes_baseline_seed(monkeypatch):

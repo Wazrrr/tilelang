@@ -10,23 +10,23 @@ defines the single configuration pool using the example's parameter names;
 
 ## Cases
 
-All named-suite cases use FP16. Smoke uses the first development case.
+All named-suite cases use BF16. Smoke uses the first development case.
 
 | Split | Case | Parameters |
 | --- | --- | --- |
-| Training | `attention_train_a` | batch=1, heads=16, sequence=512, dim=128, causal=false |
-| Training | `attention_train_b` | batch=1, heads=16, sequence=1024, dim=128, causal=true |
-| Validation | `attention_validation` | batch=1, heads=16, sequence=2048, dim=128, causal=true |
-| Development | `attention_short_causal` | batch=1, heads=32, sequence=256, dim=128, causal=true |
-| Development | `attention_medium_causal` | batch=1, heads=32, sequence=1024, dim=128, causal=true |
+| Training | `attention_train_a` | batch=1, heads=16, sequence=512, dim=64, causal=false |
+| Training | `attention_train_b` | batch=2, heads=8, sequence=1024, dim=128, causal=true |
+| Validation | `attention_validation` | batch=1, heads=24, sequence=2048, dim=64, causal=true |
+| Development | `attention_short_causal` | batch=1, heads=32, sequence=256, dim=64, causal=true |
+| Development | `attention_batched_causal` | batch=2, heads=16, sequence=1024, dim=64, causal=true |
 | Development | `attention_noncausal` | batch=1, heads=32, sequence=2048, dim=128, causal=false |
 | Development | `attention_causal` | batch=1, heads=32, sequence=2048, dim=128, causal=true |
-| Development | `attention_long_causal` | batch=1, heads=32, sequence=4096, dim=128, causal=true |
-| Final | `attention_short_causal` | batch=1, heads=32, sequence=512, dim=128, causal=true |
-| Final | `attention_medium_causal` | batch=1, heads=32, sequence=2048, dim=128, causal=true |
+| Development | `attention_long_causal` | batch=1, heads=16, sequence=4096, dim=128, causal=true |
+| Final | `attention_short_causal` | batch=1, heads=32, sequence=512, dim=64, causal=true |
+| Final | `attention_batched_causal` | batch=2, heads=16, sequence=2048, dim=64, causal=true |
 | Final | `attention_noncausal` | batch=1, heads=32, sequence=4096, dim=128, causal=false |
 | Final | `attention_causal` | batch=1, heads=32, sequence=4096, dim=128, causal=true |
-| Final | `attention_long_causal` | batch=1, heads=32, sequence=8192, dim=128, causal=true |
+| Final | `attention_long_causal` | batch=1, heads=16, sequence=8192, dim=128, causal=true |
 
 ## Configuration space
 
@@ -94,7 +94,7 @@ python -m experiments.flash_attention.tiletune.run --suite full --device hopper 
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
-on all five final FP16 cases. New TileTune output directories reuse verified baseline
+on all five final BF16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
 Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `FlashAttentionTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

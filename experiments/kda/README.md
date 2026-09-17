@@ -10,22 +10,22 @@ defines the single configuration pool using the example's parameter names;
 
 ## Cases
 
-All named-suite cases use FP16. Smoke uses the first development case.
+All named-suite cases use BF16. Smoke uses the first development case.
 
 | Split | Case | Parameters |
 | --- | --- | --- |
-| Training | `kda_chunk_train_a` | batch=1, heads=32, sequence=1024, dim=128, value_dim=128, chunk_size=64 |
-| Training | `kda_chunk_train_b` | batch=1, heads=32, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
-| Validation | `kda_chunk_validation` | batch=1, heads=32, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
-| Development | `kda_chunk_short` | batch=1, heads=64, sequence=1024, dim=128, value_dim=128, chunk_size=64 |
+| Training | `kda_chunk_train_a` | batch=1, heads=16, sequence=1024, dim=128, value_dim=128, chunk_size=64 |
+| Training | `kda_chunk_train_b` | batch=2, heads=16, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
+| Validation | `kda_chunk_validation` | batch=1, heads=48, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_short` | batch=1, heads=32, sequence=1024, dim=128, value_dim=128, chunk_size=64 |
 | Development | `kda_chunk_medium` | batch=1, heads=64, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
-| Development | `kda_chunk_regular` | batch=1, heads=64, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
-| Development | `kda_chunk_batched` | batch=2, heads=64, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_regular` | batch=1, heads=32, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_batched` | batch=2, heads=32, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
 | Development | `kda_chunk_long` | batch=1, heads=64, sequence=8192, dim=128, value_dim=128, chunk_size=64 |
-| Final | `kda_chunk_short` | batch=1, heads=64, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_short` | batch=1, heads=32, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
 | Final | `kda_chunk_medium` | batch=1, heads=64, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
-| Final | `kda_chunk_regular` | batch=1, heads=64, sequence=8192, dim=128, value_dim=128, chunk_size=64 |
-| Final | `kda_chunk_batched` | batch=2, heads=64, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_regular` | batch=1, heads=32, sequence=8192, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_batched` | batch=2, heads=32, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
 | Final | `kda_chunk_long` | batch=1, heads=64, sequence=16384, dim=128, value_dim=128, chunk_size=64 |
 
 The dimensions and chunk size match the repository's serving-oriented KDA
@@ -98,7 +98,7 @@ python -m experiments.kda.tiletune.run --suite full --device hopper \
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
-on all five final FP16 cases. New TileTune output directories reuse verified baseline
+on all five final BF16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
 Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `KDAChunkTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

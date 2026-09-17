@@ -31,7 +31,7 @@ def test_plan_does_not_import_gpu_runtime():
     code = (
         "from experiments.common.spec import default_workloads; from experiments.common import run; import sys; "
         "assert 'torch' not in sys.modules; assert 'tilelang' not in sys.modules; "
-        "assert len(default_workloads()) == 20"
+        "assert len(default_workloads()) == 25"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
@@ -165,12 +165,12 @@ def test_gpu_fp8_boundaries():
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
-    w = Workload("fp8", "gemm_fp8", dict(m=97, n=113, k=81, transpose_b=True), dtype="float8_e4m3fn")
+    w = Workload("fp8", "gemm_fp8", dict(m=128, n=128, k=128, transpose_b=True), dtype="float8_e4m3fn")
     reason = support_reason(w, Device("test", current_target()))
     if reason:
         pytest.skip(reason)
     case = make_case(w)
-    program = case.build(block_M=64, block_N=64, block_K=32, threads=128, num_stages=1, enable_rasteration=False)
+    program = case.build(block_M=64, block_N=64, block_K=128, threads=128, num_stages=1)
     kernel = tilelang.compile(program, target=current_target(), execution_backend="tvm_ffi", out_idx=case.out_idx)
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
     result = kernel(*inputs)

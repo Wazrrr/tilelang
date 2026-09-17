@@ -28,21 +28,20 @@ def test_original_carver_ranks_common_grid(dtype):
         record = result["configs"][index]
         assert record["model"]["valid"]
         assert record["tile_cost"]["score"] == (record["model"]["traffic_bytes"] + 1) * record["model"]["waves"]
-@pytest.mark.parametrize("op", ["gemm", "attention", "kda_chunk_o", "gemm_fp8"])
+@pytest.mark.parametrize("op", ["gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"])
 def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     from experiments.common.baselines import carver_rank, carver_support_reason
-    from experiments.common.spec import Device, configurations
+    from experiments.common.spec import Device, TARGETS, configurations
     from experiments.families import family_module
-    from tilelang.tiletune.profiling.device_profile import current_target
-
-    device = Device("visible", current_target())
+    device = Device("ampere", TARGETS["ampere"])
     expected_template = {
         "gemm": "MatmulTemplate",
         "attention": "FlashAttentionTemplate",
         "kda_chunk_o": "KDAChunkTemplate",
-        "gemm_fp8": "FP8MatmulTemplate",
+        "gemm_fp8": "MatmulTemplate",
+        "grouped_gemm": "GroupedMatmulTemplate",
     }[op]
     for workload in family_module(op, "cases").cases(holdout=True):
         all_configs = configurations(workload, device)

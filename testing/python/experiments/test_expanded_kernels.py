@@ -51,15 +51,14 @@ def test_example_attention_masks_and_tail_rows(gpu_target, causal, stages):
     _check(w, dict(block_M=64, block_N=64, num_stages=stages, threads=128), gpu_target)
 
 
-@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"])
-def test_example_fp8_tail_inputs(gpu_target, dtype):
+def test_example_fp8_aligned_inputs(gpu_target):
     from experiments.common.spec import Device, support_reason
 
-    w = Workload("fp8", "gemm_fp8", dict(m=97, n=113, k=81, transpose_b=True), dtype)
+    w = Workload("fp8", "gemm_fp8", dict(m=128, n=128, k=128, transpose_b=True), "float8_e4m3fn")
     reason = support_reason(w, Device("test", gpu_target))
     if reason:
         pytest.skip(reason)
-    _check(w, dict(block_M=64, block_N=64, block_K=32, threads=128, num_stages=1, enable_rasteration=False), gpu_target)
+    _check(w, dict(block_M=64, block_N=64, block_K=128, threads=128, num_stages=1), gpu_target)
 
 
 def test_retired_rewrite_knobs_are_not_silently_ignored():
@@ -67,8 +66,8 @@ def test_retired_rewrite_knobs_are_not_silently_ignored():
 
     cases = [
         (
-            Workload("fp8", "gemm_fp8", dict(m=64, n=64, k=64, transpose_b=True), "float8_e4m3fn"),
-            dict(block_M=64, block_N=64, block_K=32, threads=128, num_stages=0, enable_rasteration=False, vector=8),
+            Workload("fp8", "gemm_fp8", dict(m=128, n=128, k=128, transpose_b=True), "float8_e4m3fn"),
+            dict(block_M=64, block_N=64, block_K=128, threads=128, num_stages=0, vector=8),
         ),
         (
             Workload("attention", "attention", dict(batch=1, heads=1, sequence=128, dim=64)),

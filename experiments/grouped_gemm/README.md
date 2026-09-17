@@ -9,14 +9,14 @@ TileLang kernel. Pointer-table and backward examples are outside this family.
 For group sizes `batch_sizes=[M0, M1, ...]`, A has shape `(sum(Mi), K)`.
 B has shape `(G, K, N)` with `transpose_b=False`, or `(G, N, K)` with
 `transpose_b=True`. C concatenates the independent products along its row axis.
-All named workloads use FP16; BF16 is supported too. Group sizes must be positive,
+All named workloads use BF16. Group sizes must be positive,
 and N and K are shared by every group. The independent reference computes each
 product in FP32 and casts to the input dtype. Both elementwise and relative-norm
 checks use 0.01 tolerance. FLOPs are `2 * sum(Mi) * N * K`.
 
-The family is opt-in: use its commands or `experiments.suite --families grouped_gemm`.
-Its frozen holdouts live in [grouped_gemm_final.json](../manifests/grouped_gemm_final.json).
-The default four-family/eight-case matrix and historical results are unchanged.
+The family is part of the default matrix and can also be selected alone with
+`experiments.suite --families grouped_gemm`. Its frozen holdouts live in
+[grouped_gemm_final.json](../manifests/grouped_gemm_final.json).
 
 ## One configuration set
 
@@ -110,7 +110,7 @@ No complete sweep or tuned winner is bundled with this family.
 
 The 20 CPU tests in `testing/python/experiments/test_grouped_gemm.py` cover
 planning without runtime imports, pool identities, frozen/disjoint workloads,
-source fingerprints, seeded metadata, independent references, and FP16/BF16
+source fingerprints, seeded metadata, independent references, and BF16
 structural equality with the example. The affected shared-framework regression
 suite passed 167 tests. Both final workloads generated Hopper CUDA source for
 indices 60 and 125. Grouped GEMM GPU correctness, grouped compilation execution,
@@ -121,7 +121,7 @@ had foreign compute processes attached during validation.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
   python -m pytest testing/python/experiments/test_grouped_gemm.py -k 'not on_gpu' -q
 
-# Run on an idle GPU to include FP16/BF16 boundary and grouped-compilation checks.
+# Run on an idle GPU to include BF16 boundary and grouped-compilation checks.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m pytest testing/python/experiments/test_grouped_gemm.py -q
 ```

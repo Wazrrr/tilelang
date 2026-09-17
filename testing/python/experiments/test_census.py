@@ -46,18 +46,18 @@ def test_census_resumes_interruption_preserves_indices_and_checks_provenance(tmp
 
     monkeypatch.setattr(census, "run_case", run_case)
     root = tmp_path / "census"
-    args = ["--workloads", "gemm_fp8_square", "--config-indices", "0", "6", "223", "--shard-size", "2", "--output", str(root)]
+    args = ["--workloads", "gemm_fp8_square", "--config-indices", "0", "6", "71", "--shard-size", "2", "--output", str(root)]
     with pytest.raises(RuntimeError, match="interrupted worker"):
         census.main(args)
     assert census.main(args + ["--resume"]) == 0
-    assert calls == [[0, 6], [223], [223]]
+    assert calls == [[0, 6], [71], [71]]
     directory = root / "ampere" / "gemm_fp8_square"
     preserved = list(directory.glob("shard-00001.interrupted-*"))
     assert len(preserved) == 1
     assert (preserved[0] / "worker.log").read_text() == "original worker log"
     combined = json.loads((directory / "outcomes.json").read_text())
-    assert [r["index"] for r in combined] == [0, 6, 223]
-    assert [r["original_index"] for r in combined] == [0, 6, 223]
+    assert [r["index"] for r in combined] == [0, 6, 71]
+    assert [r["original_index"] for r in combined] == [0, 6, 71]
     assert [r["shard_index"] for r in combined] == [0, 1, 0]
     assert json.loads((directory / "shard-00001" / "outcomes.json").read_text())[0]["index"] == 0
     summary = json.loads((root / "summary.json").read_text())[0]

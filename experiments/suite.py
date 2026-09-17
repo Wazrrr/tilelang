@@ -22,12 +22,12 @@ CORE_OPS = DEFAULT_OPS
 CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
 CORE_TARGETS = ("ampere", "hopper", "blackwell", "mi355x", "ascend910b")
 BUDGETS = {
-    "smoke": dict(cases=4, configurations=16, seeds=[123], compare=False),
-    "development": dict(cases=20, configurations=256, seeds=[123], compare=True),
-    "final": dict(cases=20, configurations=None, seeds=[123, 456, 789], compare=True),
+    "smoke": dict(cases=5, configurations=16, seeds=[123], compare=False),
+    "development": dict(cases=25, configurations=256, seeds=[123], compare=True),
+    "final": dict(cases=25, configurations=None, seeds=[123, 456, 789], compare=True),
     # A complete expanded-pool benchmark can precede the development gates.
     # It uses the final shapes/protocol without claiming final acceptance.
-    "full": dict(cases=20, configurations=None, seeds=[123, 456, 789], compare=True),
+    "full": dict(cases=25, configurations=None, seeds=[123, 456, 789], compare=True),
 }
 DEVICE_PATTERNS = dict(ampere="A100", hopper="H200", blackwell="B200|GB200", mi355x="MI355X", ascend910b="910B|A2")
 
@@ -42,8 +42,6 @@ def core_cases(suite, families=None):
     cases = [w for op in ops for w in family_module(op, "cases").cases(holdout=suite in ("full", "final"))]
     if suite in ("full", "final"):
         frozen = json.loads(Path(__file__).with_name("manifests").joinpath("five_target_final.json").read_text())["workloads"]
-        if "grouped_gemm" in ops:
-            frozen += json.loads(Path(__file__).with_name("manifests").joinpath("grouped_gemm_final.json").read_text())["workloads"]
         frozen = [w for w in frozen if w["op"] in ops]
         if [w.to_dict() for w in cases] != frozen:
             raise ValueError("final family definitions differ from the frozen holdout manifest")

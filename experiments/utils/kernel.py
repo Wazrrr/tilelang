@@ -13,6 +13,13 @@ class KernelCase:
     pass_configs: dict = field(default_factory=dict)
     rtol: float = 0.02
     atol: float = 0.02
+    input_values: dict = field(default_factory=dict)
+
+    def check_input_values(self, inputs):
+        for index, expected in self.input_values.items():
+            actual = inputs[int(index)]
+            if actual.ndim != 1 or actual.dtype not in (torch.int32, torch.int64) or actual.tolist() != list(expected):
+                raise ValueError(f"input {index} differs from the declared TileTune metadata")
 
     def check(self, actuals, references):
         """Check both elementwise errors and relative signal error.

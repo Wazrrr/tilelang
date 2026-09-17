@@ -76,24 +76,9 @@ def test_export_rejects_incomplete_or_incompatible_pool(saved_oracle, change):
     assert not (root / "experiments").exists()
 
 
-def test_standalone_oracle_records_unsupported_fp8_without_launching(tmp_path, monkeypatch):
+def test_standalone_oracle_accepts_ampere_fp8_storage_contract():
     from experiments.gemm_fp8.cases import cases
+    from experiments.gemm_fp8.spaces import support_reason
 
-    names = [w.name for w in cases(holdout=True)]
-    output = tmp_path / "run"
-    monkeypatch.setattr("sys.argv", ["brute_force", "--device", "ampere", "--output", str(output), "--workloads", *names])
-    monkeypatch.setattr(brute_force, "snapshot", lambda: dict(gpus=[dict(uuid="GPU-test", index="0", name="NVIDIA A100")], processes=[]))
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("unsupported FP8 must not launch a worker")
-
-    monkeypatch.setattr(brute_force.subprocess, "Popen", forbidden)
-    assert brute_force.main() == 0
-    plan = json.loads((output / "plan.json").read_text())
-    summary = json.loads((output / "summary.json").read_text())
-    assert {w["name"] for w in plan["workloads"]} == set(names)
-    assert set(summary["unavailable"]) == set(names)
-    assert not summary["heuristic_files"] and not summary["outcomes"]
-    for name in names:
-        result = json.loads((output / name / "result.json").read_text())
-        assert result["status"] == "unsupported" and "FP8" in result["reason"]
+    device = Device("ampere", TARGETS["ampere"])
+    assert all(support_reason(workload, device) is None for workload in cases(holdout=True))

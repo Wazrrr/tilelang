@@ -11,7 +11,8 @@ EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=64, block_N=64, num_stages=1, threads=128),
     "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
-    "gemm_fp8": dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False),
+    "gemm_fp8": dict(block_M=64, block_N=128, block_K=128, num_stages=2, threads=128),
+    "grouped_gemm": dict(block_M=64, block_N=128, block_K=64, num_stages=0, threads=128),
 }
 
 
@@ -55,18 +56,25 @@ def example_program(w, c):
             threads=c["threads"],
             num_stages=c["num_stages"],
         )
-    from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
+    if w.op == "gemm_fp8":
+        from examples.gemm_fp8.example_mxfp8_blockscaled_gemm_a100 import blockscaled_gemm
 
-    return matmul.get_tir(M=p["m"], N=p["n"], K=p["k"], dtype=w.dtype, **c)
+        return blockscaled_gemm.get_tir(
+            M=p["m"], N=p["n"], K=p["k"], block_M=c["block_M"], block_N=c["block_N"],
+            num_stages=c["num_stages"], threads=c["threads"]
+        )
+    from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
+
+    return grouped_gemm.get_tir(
+        K=p["k"], N=p["n"], batch_sizes_list=tuple(p["batch_sizes"]), trans_b=p.get("transpose_b", False), dtype=w.dtype, **c
+    )
 
 
 @pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)
-@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
-def test_final_programs_are_structurally_identical_to_examples(w, dtype):
+def test_final_programs_are_structurally_identical_to_examples(w):
     from tilelang import tvm
     from experiments.common.kernels import make_case
 
-    w = replace(w, dtype=("float8_e4m3fn" if dtype == "float16" else "float8_e5m2") if w.op == "gemm_fp8" else dtype)
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])
@@ -94,11 +102,6 @@ def test_final_example_kernels_on_gpu(w):
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
-    from experiments.common.spec import support_reason
-
-    reason = support_reason(w, Device("test", current_target()))
-    if reason:
-        pytest.skip(reason)
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     kernel = tilelang.compile(

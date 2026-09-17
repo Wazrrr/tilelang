@@ -87,7 +87,7 @@ def test_family_acceptance_has_local_costs_and_cannot_certify_the_matrix(tmp_pat
     costs = report["targets"]["ampere"]["seeds"]["123"]["costs"]["tiletune"]
     assert costs["online_seconds"] == 5
     assert costs["amortized_seconds_per_case"] == 1.4
-    # The complete case set still requires all five devices for final acceptance.
+    # The complete five-family case set still requires all five devices for final acceptance.
     plan["splits"]["test"] = [w.to_dict() for w in core_cases("final")]
     result.write_text(json.dumps(dict(results=[good_comparison(c) for c in plan["splits"]["test"]])))
     assert not aggregate_study(plan, tmp_path)["accepted"]
