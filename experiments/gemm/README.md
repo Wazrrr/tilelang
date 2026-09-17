@@ -49,11 +49,23 @@ does not assert that every candidate compiles or yields distinct device code.
 
 | Split | M,N,K |
 | --- | --- |
-| Training A | 512,512,512 |
-| Training B | 1024,256,768 |
-| Validation | 384,768,512 |
-| Development | 1024 cubed; 2048 cubed |
-| Final | 4096 cubed; 8192 cubed |
+| Training A | 32,4096,4096 |
+| Training B | 512,14336,4096 |
+| Validation | 2048,4096,4096 |
+| Development decode | 64,4096,4096 |
+| Development prefill | 512,4096,4096 |
+| Development FFN down | 512,4096,14336 |
+| Development large projection | 2048,4096,4096 |
+| Development FFN up | 2048,14336,4096 |
+| Final decode | 128,4096,4096 |
+| Final prefill | 1024,4096,4096 |
+| Final FFN down | 1024,4096,14336 |
+| Final large projection | 4096,4096,4096 |
+| Final FFN up | 4096,14336,4096 |
+
+These represent decode and prefill hidden projections plus both FFN directions
+for a 4096-wide decoder. The stable `gemm_square*` workload identifiers are
+retained for the two large-prefill cases.
 
 ## Commands
 
@@ -89,11 +101,9 @@ Space version 4 identifies this pool. Old measured records are archived under
 belong to their original programs and pools. New results include source/build
 hashes, raw outcomes, device observations and elapsed time.
 
-The completed [H200 sweep](heuristics/H200/README.md) attempted all 2,304 configs
-for both final shapes. The 4096³ winner matches the example; the 8192³ winner
-uses a 192×256×64 tile and improves by 3.36% against the previous example winner
-in the longer paired FP16 comparison. The full sweeps and initial validation
-took approximately 22.1 active minutes on 6–8 available GPUs.
+The completed [H200 sweep](heuristics/H200/README.md) predates the serving-shape
+update and retains its original 4096³/8192³ identity. It is historical evidence,
+not a measurement of the current final workloads.
 
 ## System ablations and reusable baselines
 
@@ -107,7 +117,7 @@ python -m experiments.gemm.tiletune.run --suite full --device hopper \
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
-on both final FP16 cases. New TileTune output directories reuse verified baseline
+on all five final FP16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
 Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
 explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)

@@ -16,7 +16,7 @@ checks use 0.01 tolerance. FLOPs are `2 * sum(Mi) * N * K`.
 
 The family is opt-in: use its commands or `experiments.suite --families grouped_gemm`.
 Its frozen holdouts live in [grouped_gemm_final.json](../manifests/grouped_gemm_final.json).
-The default four-family/eight-case matrix and historical results are unchanged.
+The default four-family/twenty-case matrix remains separate from this opt-in family.
 
 ## One configuration set
 
@@ -57,13 +57,22 @@ the pool size does not promise that every candidate compiles.
 
 | Split/case | Group sizes | N | K | Transpose B |
 | --- | --- | --- | --- | --- |
-| Training A | 32, 96 | 256 | 256 | False |
-| Training B | 47, 81, 129 | 384 | 256 | True |
-| Validation | 65, 127 | 256 | 384 | False |
-| Development aligned | 64, 128, 256 | 512 | 512 | False |
-| Development ragged | 63, 77, 111, 280 | 768 | 512 | True |
-| Final aligned | 64, 128, 256 | 8192 | 8192 | False |
-| Final ragged | 63, 77, 111, 280 | 4096 | 8192 | True |
+| Training A | 16, 32, 64 | 2048 | 7168 | False |
+| Training B | 15, 31, 65 | 7168 | 2048 | True |
+| Validation | 24, 40, 72 | 2048 | 7168 | False |
+| Development decode | 1, 1, 2, 4 | 2048 | 7168 | False |
+| Development prefill | 8, 16, 24, 32 | 2048 | 7168 | False |
+| Development aligned | 32, 64, 128 | 2048 | 7168 | False |
+| Development down aligned | 32, 64, 128 | 7168 | 2048 | True |
+| Development ragged | 31, 47, 81, 129 | 7168 | 2048 | True |
+| Final decode | 1, 2, 4, 8 | 2048 | 7168 | False |
+| Final prefill | 16, 32, 48, 64 | 2048 | 7168 | False |
+| Final aligned | 64, 128, 256 | 2048 | 7168 | False |
+| Final down aligned | 64, 128, 256 | 7168 | 2048 | True |
+| Final ragged | 63, 77, 111, 280 | 7168 | 2048 | True |
+
+The two directions model MoE expert expansion and contraction using the
+repository fused-MoE example's 7168 hidden width and 2048 expert width.
 
 ## Commands
 

@@ -14,13 +14,23 @@ All named-suite cases use FP16. Smoke uses the first development case.
 
 | Split | Case | Parameters |
 | --- | --- | --- |
-| Training | `kda_chunk_train_a` | batch=1, heads=2, sequence=256, dim=32, value_dim=64, chunk_size=32 |
-| Training | `kda_chunk_train_b` | batch=1, heads=2, sequence=256, dim=64, value_dim=96, chunk_size=64 |
-| Validation | `kda_chunk_validation` | batch=1, heads=2, sequence=192, dim=48, value_dim=64, chunk_size=48 |
-| Development | `kda_chunk_regular` | batch=1, heads=4, sequence=512, dim=64, value_dim=64, chunk_size=64 |
-| Development | `kda_chunk_tails` | batch=1, heads=4, sequence=384, dim=48, value_dim=80, chunk_size=48 |
-| Final | `kda_chunk_regular` | batch=1, heads=4, sequence=1024, dim=64, value_dim=64, chunk_size=64 |
-| Final | `kda_chunk_tails` | batch=1, heads=4, sequence=768, dim=96, value_dim=80, chunk_size=48 |
+| Training | `kda_chunk_train_a` | batch=1, heads=32, sequence=1024, dim=128, value_dim=128, chunk_size=64 |
+| Training | `kda_chunk_train_b` | batch=1, heads=32, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
+| Validation | `kda_chunk_validation` | batch=1, heads=32, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_short` | batch=1, heads=64, sequence=1024, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_medium` | batch=1, heads=64, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_regular` | batch=1, heads=64, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_batched` | batch=2, heads=64, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
+| Development | `kda_chunk_long` | batch=1, heads=64, sequence=8192, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_short` | batch=1, heads=64, sequence=2048, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_medium` | batch=1, heads=64, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_regular` | batch=1, heads=64, sequence=8192, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_batched` | batch=2, heads=64, sequence=4096, dim=128, value_dim=128, chunk_size=64 |
+| Final | `kda_chunk_long` | batch=1, heads=64, sequence=16384, dim=128, value_dim=128, chunk_size=64 |
+
+The dimensions and chunk size match the repository's serving-oriented KDA
+examples. All cases use complete 64-token chunks; no artificial tail dimensions
+are included.
 
 ## Configuration space
 
@@ -88,7 +98,7 @@ python -m experiments.kda.tiletune.run --suite full --device hopper \
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
-on both final FP16 cases. New TileTune output directories reuse verified baseline
+on all five final FP16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
 Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver is
 explicitly unsupported outside CUDA GEMM. See the [workflow guide](../README.md)

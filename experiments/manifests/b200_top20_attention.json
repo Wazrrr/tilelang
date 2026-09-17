@@ -8,15 +8,18 @@
   }],
   "splits": {
     "train": [
-      {"name": "attention_train_a", "op": "attention", "parameters": {"batch": 1, "heads": 2, "sequence": 256, "dim": 64, "causal": false}},
-      {"name": "attention_train_b", "op": "attention", "parameters": {"batch": 1, "heads": 2, "sequence": 384, "dim": 128, "causal": true}}
+      {"name": "attention_train_a", "op": "attention", "parameters": {"batch": 1, "heads": 16, "sequence": 512, "dim": 128, "causal": false}},
+      {"name": "attention_train_b", "op": "attention", "parameters": {"batch": 1, "heads": 16, "sequence": 1024, "dim": 128, "causal": true}}
     ],
     "validation": [
-      {"name": "attention_validation", "op": "attention", "parameters": {"batch": 1, "heads": 2, "sequence": 448, "dim": 64, "causal": true}}
+      {"name": "attention_validation", "op": "attention", "parameters": {"batch": 1, "heads": 16, "sequence": 2048, "dim": 128, "causal": true}}
     ],
     "test": [
-      {"name": "attention_noncausal", "op": "attention", "parameters": {"batch": 1, "heads": 4, "sequence": 768, "dim": 64, "causal": false}},
-      {"name": "attention_causal", "op": "attention", "parameters": {"batch": 1, "heads": 4, "sequence": 1152, "dim": 128, "causal": true}}
+      {"name": "attention_short_causal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 512, "dim": 128, "causal": true}},
+      {"name": "attention_medium_causal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 2048, "dim": 128, "causal": true}},
+      {"name": "attention_noncausal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 4096, "dim": 128, "causal": false}},
+      {"name": "attention_causal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 4096, "dim": 128, "causal": true}},
+      {"name": "attention_long_causal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 8192, "dim": 128, "causal": true}}
     ]
   }
 }

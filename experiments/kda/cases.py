@@ -1,18 +1,25 @@
-"""Chunk-output KDA only; sequence lengths always contain complete chunks."""
+"""Chunk-output KDA at the serving dimensions used by the example family."""
 
 
 def cases(holdout=False):
     from experiments.common.spec import Workload
 
-    shapes = ((1024, 64, 64, 64), (768, 96, 80, 48)) if holdout else ((512, 64, 64, 64), (384, 48, 80, 48))
+    sequences = (2048, 4096, 8192, 16384) if holdout else (1024, 2048, 4096, 8192)
+    shapes = (
+        ("short", 1, sequences[0]),
+        ("medium", 1, sequences[1]),
+        ("regular", 1, sequences[2]),
+        ("batched", 2, sequences[1]),
+        ("long", 1, sequences[3]),
+    )
     return [
         Workload(
             "kda_chunk_" + role,
             "kda_chunk_o",
-            dict(batch=1, heads=4, sequence=s, dim=k, value_dim=v, chunk_size=c),
+            dict(batch=batch, heads=64, sequence=sequence, dim=128, value_dim=128, chunk_size=64),
             config_space="expanded",
         )
-        for role, (s, k, v, c) in zip(("regular", "tails"), shapes)
+        for role, batch, sequence in shapes
     ]
 
 
@@ -23,8 +30,8 @@ def training_cases():
         Workload(
             "kda_chunk_" + split,
             "kda_chunk_o",
-            dict(batch=1, heads=2, sequence=s, dim=k, value_dim=v, chunk_size=c),
+            dict(batch=1, heads=32, sequence=sequence, dim=128, value_dim=128, chunk_size=64),
             config_space="expanded",
         )
-        for split, (s, k, v, c) in zip(("train_a", "train_b", "validation"), ((256, 32, 64, 32), (256, 64, 96, 64), (192, 48, 64, 48)))
+        for split, sequence in zip(("train_a", "train_b", "validation"), (1024, 2048, 4096))
     ]

@@ -11,7 +11,10 @@ from experiments.common.spec import Device, TARGETS, configurations, default_wor
 
 
 def test_split_whole_workloads_and_reject_alias_leakage():
-    workloads = default_workloads()[::2]
+    workloads = []
+    for workload in default_workloads():
+        if workload.op not in {w.op for w in workloads}:
+            workloads.append(workload)
     splits = split_workloads(workloads, dict(train=[0.25, 0.5], validation=[0.75], test=[1, 2]))
     assert len(splits["test"]) == 2 * len(workloads)
     with pytest.raises(ValueError, match="overlap"):

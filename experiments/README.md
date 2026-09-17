@@ -8,15 +8,15 @@ start in the family folder:
 
 | Family | Final cases | Commands and implementation |
 | --- | --- | --- |
-| GEMM | 4096³ and 8192³ | [gemm/](gemm/README.md) |
-| FlashAttention | Noncausal and causal | [flash_attention/](flash_attention/README.md) |
-| KDA | Chunk output with equal and unequal head dimensions | [kda/](kda/README.md) |
-| FP8 GEMM | 4096³ E4M3 and 8192³ E5M2 | [gemm_fp8/](gemm_fp8/README.md) |
-| Grouped GEMM (opt-in) | Aligned and ragged groups, NN and NT layouts | [grouped_gemm/](grouped_gemm/README.md) |
+| GEMM | Five continuous-batch decode/prefill projection and FFN shapes | [gemm/](gemm/README.md) |
+| FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
+| KDA | Five 2K–16K and batched chunk-output shapes at DK=DV=128 | [kda/](kda/README.md) |
+| FP8 GEMM | Five decode/prefill projection and FFN shapes across E4M3/E5M2 | [gemm_fp8/](gemm_fp8/README.md) |
+| Grouped GEMM (opt-in) | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
 
 Grouped GEMM follows the same family structure with a 192-config pool. Select it
-through its family commands or `--families grouped_gemm`; the default four-family,
-eight-case matrix remains unchanged. Its holdouts have a separate frozen manifest.
+through its family commands or `--families grouped_gemm`; the default matrix has
+four families and twenty cases. Its five holdouts have a separate frozen manifest.
 
 ## Layout
 
@@ -47,7 +47,7 @@ python -m experiments.kda.tiletune.run --suite development --device ampere --pla
 python -m experiments.gemm_fp8.tiletune.run --suite development --device blackwell --plan
 ```
 
-A development run uses two test cases per family, up to 256 configurations per
+A development run uses five test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
 The four final kernels call their [example builders directly](example_alignment.md).
 Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
@@ -113,7 +113,7 @@ python -m experiments.suite --suite full --devices hopper \
   --output experiments/results/tiletune/revision-b
 ```
 
-`full` uses all eight final cases and complete pools without asserting final
+`full` uses all twenty final cases and complete pools without asserting final
 acceptance. Family commands support the same flags. Baselines are collected once
 per family/device/experiment identity under `baseline-root/TARGET/FAMILY/HASH/`.
 The bundle contains all oracle outcomes, Carver rankings or explicit unsupported
@@ -140,7 +140,7 @@ cost. Original baseline costs are labeled as coming from the baseline bundle.
 ## System optimization ablations
 
 All four default-family `system/run.py` entry points use the shared
-[system runner](common/system.py) and the same two final cases/pools:
+[system runner](common/system.py) and the same five final cases/pools:
 
 ```bash
 python -m experiments.kda.system.run --plan
@@ -241,11 +241,11 @@ Family `system/run.py` commands benchmark compiler execution strategies using
 the same example builders; they are separate from tuner quality.
 
 The retired FP8/vector experiments, compatibility modules, and repair-study
-runner have been removed. The shared runner also uses the eight family-owned
+runner have been removed. The shared runner also uses the twenty family-owned
 cases; `--smoke` chooses their development shapes.
 Use the canonical `experiments.common.*` commands and `experiments.suite`.
 Source fingerprints cover active code roots and exclude `results/`; historical
 measurements retain their original hashes. Begin a new run after code changes.
 
 See [workflow validation](workflow_validation.md) for the offline tests, GPU
-checks of all eight cases, and measured baseline-reuse verification.
+checks of the earlier eight-case matrix, and measured baseline-reuse verification.

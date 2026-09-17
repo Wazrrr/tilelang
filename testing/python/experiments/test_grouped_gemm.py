@@ -40,7 +40,7 @@ assert not any(name.split('.')[0] in ('tilelang', 'torch', 'tvm', 'xgboost') for
 
 def test_opt_in_family_preserves_default_matrix_and_has_frozen_disjoint_splits():
     assert default_workloads() == core_cases("final")
-    assert len(default_workloads()) == 8
+    assert len(default_workloads()) == 20
     assert all(w.op != "grouped_gemm" for w in default_workloads())
     _, frozen = load_manifest(json.loads((ROOT / "experiments/manifests/grouped_gemm_final.json").read_text()))
     assert frozen == cases(holdout=True) == core_cases("final", ["grouped_gemm"])
@@ -50,9 +50,27 @@ def test_opt_in_family_preserves_default_matrix_and_has_frozen_disjoint_splits()
     assert len({digest(canonical_workload(w)) for w in all_cases}) == len(all_cases)
     plan = study_plan("full", [Device("hopper", TARGETS["hopper"])], families=["grouped_gemm"])
     assert plan["families"] == ["grouped_gemm"]
-    assert [len(plan["splits"][key]) for key in ("train", "validation", "test")] == [2, 1, 2]
+    assert [len(plan["splits"][key]) for key in ("train", "validation", "test")] == [2, 1, 5]
     assert all(s["indices"] == list(range(192)) for s in plan["subsets"]["hopper"].values())
-    assert len(core_cases("full", ["gemm", "grouped_gemm"])) == 4
+    assert len(core_cases("full", ["gemm", "grouped_gemm"])) == 10
+
+
+def test_final_grouped_cases_cover_common_moe_serving_shapes():
+    final = cases(holdout=True)
+    assert [w.parameters["batch_sizes"] for w in final] == [
+        [1, 2, 4, 8],
+        [16, 32, 48, 64],
+        [64, 128, 256],
+        [64, 128, 256],
+        [63, 77, 111, 280],
+    ]
+    assert [(w.parameters["n"], w.parameters["k"]) for w in final] == [
+        (2048, 7168),
+        (2048, 7168),
+        (2048, 7168),
+        (7168, 2048),
+        (7168, 2048),
+    ]
 
 
 def test_pool_identity_subsets_and_system_variants():
@@ -73,7 +91,7 @@ def test_pool_identity_subsets_and_system_variants():
     with pytest.raises(ValueError, match="subset"):
         configuration_space(replace(w, configs=[dict(CONFIG, block_M=32)]), device)
     plan = system_plan("grouped_gemm", indices=[125, 60])
-    assert len(plan) == 10
+    assert len(plan) == 25
     assert {row["variant"] for row in plan} == set(VARIANTS)
     assert all(row["indices"] == [125, 60] for row in plan)
 

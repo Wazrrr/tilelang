@@ -39,12 +39,7 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     from experiments.families import family_module
     from tilelang.tiletune.profiling.device_profile import current_target
 
-    workload = family_module(op, "cases").cases(holdout=False)[0]
     device = Device("visible", current_target())
-    all_configs = configurations(workload, device)
-    configs = all_configs[:8] + all_configs[64:72] if op == "attention" else all_configs[:8]
-    assert carver_support_reason(workload, device) is None
-    result = carver_rank(workload, device, configs, top_k=2)
     expected_template = {
         "gemm": "MatmulTemplate",
         "attention": "FlashAttentionTemplate",
@@ -52,10 +47,15 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
         "gemm_fp8": "FP8MatmulTemplate",
         "grouped_gemm": "GroupedMatmulTemplate",
     }[op]
-    assert result["template"] == expected_template
-    assert len(result["configs"]) == len(configs)
-    assert [record["config"] for record in result["configs"]] == configs
-    assert result["selection"]["selected_count"] == 2
-    assert all(result["configs"][index]["model"]["valid"] for index in result["selection"]["selected_indices"])
-    if op == "attention":
-        assert all(not record["model"]["valid"] for record in result["configs"][:8])
+    for workload in family_module(op, "cases").cases(holdout=True):
+        all_configs = configurations(workload, device)
+        configs = all_configs[:8] + all_configs[64:72] if op == "attention" else all_configs[:8]
+        assert carver_support_reason(workload, device) is None
+        result = carver_rank(workload, device, configs, top_k=2)
+        assert result["template"] == expected_template
+        assert len(result["configs"]) == len(configs)
+        assert [record["config"] for record in result["configs"]] == configs
+        assert result["selection"]["selected_count"] == 2
+        assert all(result["configs"][index]["model"]["valid"] for index in result["selection"]["selected_indices"])
+        if op == "attention":
+            assert all(not record["model"]["valid"] for record in result["configs"][:8])

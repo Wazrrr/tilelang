@@ -12,20 +12,26 @@
   }],
   "splits": {
     "train": [
-      {"name": "gemm_train_a", "op": "gemm", "parameters": {"m": 512, "n": 512, "k": 512, "transpose_b": true}},
-      {"name": "gemm_train_b", "op": "gemm", "parameters": {"m": 1024, "n": 256, "k": 768, "transpose_b": true}},
-      {"name": "gemm_fp8_train_a", "op": "gemm_fp8", "parameters": {"m": 512, "n": 512, "k": 512, "transpose_b": true}, "dtype": "float8_e4m3fn"},
-      {"name": "gemm_fp8_train_b", "op": "gemm_fp8", "parameters": {"m": 1024, "n": 256, "k": 768, "transpose_b": true}, "dtype": "float8_e5m2"}
+      {"name": "gemm_train_a", "op": "gemm", "parameters": {"m": 32, "n": 4096, "k": 4096, "transpose_b": true}},
+      {"name": "gemm_train_b", "op": "gemm", "parameters": {"m": 512, "n": 14336, "k": 4096, "transpose_b": true}},
+      {"name": "gemm_fp8_train_a", "op": "gemm_fp8", "parameters": {"m": 32, "n": 4096, "k": 4096, "transpose_b": true}, "dtype": "float8_e4m3fn"},
+      {"name": "gemm_fp8_train_b", "op": "gemm_fp8", "parameters": {"m": 512, "n": 14336, "k": 4096, "transpose_b": true}, "dtype": "float8_e5m2"}
     ],
     "validation": [
-      {"name": "gemm_validation", "op": "gemm", "parameters": {"m": 384, "n": 768, "k": 512, "transpose_b": true}},
-      {"name": "gemm_fp8_validation", "op": "gemm_fp8", "parameters": {"m": 384, "n": 768, "k": 512, "transpose_b": true}, "dtype": "float8_e4m3fn"}
+      {"name": "gemm_validation", "op": "gemm", "parameters": {"m": 2048, "n": 4096, "k": 4096, "transpose_b": true}},
+      {"name": "gemm_fp8_validation", "op": "gemm_fp8", "parameters": {"m": 2048, "n": 4096, "k": 4096, "transpose_b": true}, "dtype": "float8_e4m3fn"}
     ],
     "test": [
+      {"name": "gemm_decode", "op": "gemm", "parameters": {"m": 128, "n": 4096, "k": 4096, "transpose_b": true}},
+      {"name": "gemm_prefill", "op": "gemm", "parameters": {"m": 1024, "n": 4096, "k": 4096, "transpose_b": true}},
+      {"name": "gemm_ffn_down", "op": "gemm", "parameters": {"m": 1024, "n": 4096, "k": 14336, "transpose_b": true}},
       {"name": "gemm_square", "op": "gemm", "parameters": {"m": 4096, "n": 4096, "k": 4096, "transpose_b": true}},
-      {"name": "gemm_square_large", "op": "gemm", "parameters": {"m": 8192, "n": 8192, "k": 8192, "transpose_b": true}},
+      {"name": "gemm_square_large", "op": "gemm", "parameters": {"m": 4096, "n": 14336, "k": 4096, "transpose_b": true}},
+      {"name": "gemm_fp8_decode_e4m3", "op": "gemm_fp8", "parameters": {"m": 128, "n": 4096, "k": 4096, "transpose_b": true}, "dtype": "float8_e4m3fn"},
+      {"name": "gemm_fp8_prefill_e4m3", "op": "gemm_fp8", "parameters": {"m": 1024, "n": 4096, "k": 4096, "transpose_b": true}, "dtype": "float8_e4m3fn"},
+      {"name": "gemm_fp8_ffn_down_e4m3", "op": "gemm_fp8", "parameters": {"m": 1024, "n": 4096, "k": 14336, "transpose_b": true}, "dtype": "float8_e4m3fn"},
       {"name": "gemm_fp8_e4m3", "op": "gemm_fp8", "parameters": {"m": 4096, "n": 4096, "k": 4096, "transpose_b": true}, "dtype": "float8_e4m3fn"},
-      {"name": "gemm_fp8_e5m2", "op": "gemm_fp8", "parameters": {"m": 8192, "n": 8192, "k": 8192, "transpose_b": true}, "dtype": "float8_e5m2"}
+      {"name": "gemm_fp8_e5m2", "op": "gemm_fp8", "parameters": {"m": 4096, "n": 14336, "k": 4096, "transpose_b": true}, "dtype": "float8_e5m2"}
     ]
   }
 }
