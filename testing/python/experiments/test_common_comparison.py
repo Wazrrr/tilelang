@@ -17,6 +17,9 @@ def test_split_whole_workloads_and_reject_alias_leakage():
             workloads.append(workload)
     splits = split_workloads(workloads, dict(train=[0.25, 0.5], validation=[0.75], test=[1, 2]))
     assert len(splits["test"]) == 2 * len(workloads)
+    grouped = next(w for w in splits["train"] if w.op == "grouped_gemm")
+    assert grouped.parameters["batch_sizes"] == [1, 1, 1, 2]
+    assert (grouped.parameters["n"], grouped.parameters["k"]) == (512, 1792)
     with pytest.raises(ValueError, match="overlap"):
         split_workloads([workloads[0], replace(workloads[0], name="alias")], dict(train=[0.5], test=[1]))
     with pytest.raises(ValueError, match="overlap"):

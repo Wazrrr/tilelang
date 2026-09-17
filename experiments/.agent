@@ -6,10 +6,10 @@ Follow the organization in [gemm/](gemm/README.md) and
 The [experiment README](README.md) describes the current execution protocol;
 [utils/README.md](utils/README.md) describes shared helpers.
 
-The current final matrix has four families and eight FP16 cases. Preserve existing
-cases, pools, and recorded results unless the task explicitly changes them.
-The FP8/vector experiment families and their separate manifests/CLI adapters are
-retired; add future families through this guide rather than restoring them.
+The current final matrix has five families and twenty-five cases: GEMM, FP8
+GEMM, grouped GEMM, FlashAttention, and KDA, with five shapes per family.
+Preserve existing cases, pools, and recorded results unless the task explicitly
+changes them. Add future families through this guide.
 Shared-runner defaults come from the same family-owned case definitions.
 Historical alignment reports describe earlier checkpoints; use current source
 and family READMEs for the active contracts.
@@ -88,10 +88,11 @@ contract, not tuning-method choices.
   Smoke/development and explicit config requests select original pool indices;
   they do not define a new pool. All tuning methods use the same ordered pool.
 
-Current counts per case are GEMM 2,304 (288 × 8), attention 320, KDA 720 (90 × 8),
-and softmax 224. Counts describe declared candidates, not guaranteed compilable
-or distinct generated kernels. An intentional pool change needs new identities
-and results; review `common/spaces.py::SPACE_VERSION` and frozen manifests.
+Current counts per case are GEMM 2,304 (288 × 8), FP8 GEMM 288, grouped GEMM
+192, attention 320, and KDA 720 (90 × 8). Counts describe declared candidates,
+not guaranteed compilable or distinct generated kernels. An intentional pool
+change needs new identities and results; review `common/spaces.py::SPACE_VERSION`
+and frozen manifests.
 
 ## Register the family and its source identity
 
@@ -107,8 +108,8 @@ Check all integration points; adding a folder alone is insufficient:
 | `xgboost/data.py::make_context` | Include the authoritative example in learned-model source identity too. |
 | `manifests/`, `common/acceptance.py`, relevant tests | Keep frozen workloads and acceptance scope consistent with the intended matrix. |
 
-`common/acceptance.py` currently recognizes eight cases across four operations
-as the complete family matrix. If the task expands that matrix, update this
+`common/acceptance.py` currently recognizes twenty-five cases across five
+operations as the complete family matrix. If the task expands that matrix, update this
 assumption, manifests, tests, and documentation together. Do not silently relabel
 an expanded or partial study as the old complete final study.
 
@@ -139,9 +140,9 @@ reuse it. Preserve saved baseline costs instead of charging collection again.
 Follow the existing fixed baseline seed and XGBoost training/validation protocol;
 do not train on final oracle labels or resample baselines for each TileTune repeat.
 
-The reusable collection workflow currently runs on local CUDA. Carver currently
-supports CUDA FP16/BF16 GEMM only. Record `unsupported` with a reason for other
-families; do not substitute a heuristic and label it Carver. Planning another
+The reusable collection workflow currently runs on local CUDA. Carver has
+family adapters for all five current kernels. Record `unsupported` with a reason
+for any unsupported future family; do not substitute a heuristic and label it Carver. Planning another
 backend does not establish that it runs. The offline result comparator itself
 is independent of backend.
 

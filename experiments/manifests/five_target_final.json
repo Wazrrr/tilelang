@@ -348,6 +348,94 @@
       "dtype": "float8_e5m2",
       "configs": null,
       "config_space": "expanded"
+    },
+    {
+      "name": "grouped_gemm_decode",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "n": 2048,
+        "k": 7168,
+        "transpose_b": false
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "grouped_gemm_prefill",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          16,
+          32,
+          48,
+          64
+        ],
+        "n": 2048,
+        "k": 7168,
+        "transpose_b": false
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "grouped_gemm_aligned",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          64,
+          128,
+          256
+        ],
+        "n": 2048,
+        "k": 7168,
+        "transpose_b": false
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "grouped_gemm_down_aligned",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          64,
+          128,
+          256
+        ],
+        "n": 7168,
+        "k": 2048,
+        "transpose_b": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
+    },
+    {
+      "name": "grouped_gemm_ragged",
+      "op": "grouped_gemm",
+      "parameters": {
+        "batch_sizes": [
+          63,
+          77,
+          111,
+          280
+        ],
+        "n": 7168,
+        "k": 2048,
+        "transpose_b": true
+      },
+      "dtype": "float16",
+      "configs": null,
+      "config_space": "expanded"
     }
   ]
 }

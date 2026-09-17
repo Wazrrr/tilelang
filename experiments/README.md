@@ -12,11 +12,11 @@ start in the family folder:
 | FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
 | KDA | Five 2K–16K and batched chunk-output shapes at DK=DV=128 | [kda/](kda/README.md) |
 | FP8 GEMM | Five decode/prefill projection and FFN shapes across E4M3/E5M2 | [gemm_fp8/](gemm_fp8/README.md) |
-| Grouped GEMM (opt-in) | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
+| Grouped GEMM | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
 
-Grouped GEMM follows the same family structure with a 192-config pool. Select it
-through its family commands or `--families grouped_gemm`; the default matrix has
-four families and twenty cases. Its five holdouts have a separate frozen manifest.
+Grouped GEMM follows the same family structure with a 192-config pool. The
+default matrix has five families and twenty-five cases. Its five holdouts have a
+separate frozen manifest, and `--families` can still select any subset.
 
 ## Layout
 
@@ -51,7 +51,7 @@ A development run uses five test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
 The four final kernels call their [example builders directly](example_alignment.md).
 Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, and FP8 GEMM 288 configs per case. There is no cap or structural
+KDA 720, FP8 GEMM 288, and grouped GEMM 192 configs per case. There is no cap or structural
 prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
@@ -113,7 +113,7 @@ python -m experiments.suite --suite full --devices hopper \
   --output experiments/results/tiletune/revision-b
 ```
 
-`full` uses all twenty final cases and complete pools without asserting final
+`full` uses all twenty-five final cases and complete pools without asserting final
 acceptance. Family commands support the same flags. Baselines are collected once
 per family/device/experiment identity under `baseline-root/TARGET/FAMILY/HASH/`.
 The bundle contains all oracle outcomes, Carver rankings or explicit unsupported

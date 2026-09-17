@@ -7,7 +7,7 @@ Reusable helpers live in [`../utils/`](../utils/README.md). The `comparison.py`
 commands below describe the lower-level collector; invoke named suites for
 automatic reuse across revisions.
 
-To collect only the twenty final brute-force baselines on all idle H200 GPUs:
+To collect only the twenty-five final brute-force baselines on all idle H200 GPUs:
 
 ```bash
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
@@ -149,11 +149,11 @@ requests, source hashes and native build before reusing completed cases; use a
 new output directory after code changes. The earlier single-method runner below
 remains available.
 
-By default, the comparison uses the same twenty final cases and the family-owned
+By default, the comparison uses the same twenty-five final cases and the family-owned
 two-training/one-validation shape splits as the named suites. A custom
 `--manifest` or explicit `--train-scales` / `--validation-scales` / `--test-scales`
 selects a scaled-shape study. Missing scale lists then default to training at
-0.25× and 0.5×, validation at 0.75×, and held-out tests at 1× and 2×. GEMM scales M/N/K; row kernels scale rows/columns; attention/KDA
+0.25× and 0.5×, validation at 0.75×, and held-out tests at 1× and 2×. GEMM scales M/N/K; grouped GEMM scales expert rows and N/K; row kernels scale rows/columns; attention/KDA
 scale sequence length while retaining head dimensions. Dimensions round down
 to multiples of 32 or the KDA chunk size. Shape aliases and rounding collisions
 across any split are rejected. Custom manifests should avoid duplicate semantic
@@ -251,7 +251,7 @@ Compilation/benchmark timing excludes process startup and reference generation;
 
 ## Workloads
 
-The standalone shared runner uses the same twenty final cases as the family
+The standalone shared runner uses the same twenty-five final cases as the family
 suites. BF16 and supported boundary shapes can be supplied explicitly for
 correctness checks; they do not add default experiment cases:
 
@@ -494,10 +494,10 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 ## Compact five-target suites
 
 `python -m experiments.suite --suite smoke --plan` plans one representative
-shape from each of four families with deterministic subsets. Development uses
-twenty cases and up to 256
+shape from each of five families with deterministic subsets. Development uses
+twenty-five cases and up to 256
 configurations; final uses the complete `expanded` pools (GEMM 2,304,
-FlashAttention 320, KDA 720 and FP8 GEMM 288 per case) and three seeds. See
+FlashAttention 320, KDA 720, FP8 GEMM 288, and grouped GEMM 192 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 

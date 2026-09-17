@@ -10,9 +10,9 @@ FAMILIES = {
     "grouped_gemm": "grouped_gemm",
 }
 
-# The core study replaces softmax with the repository's tensor-core FP8 GEMM.
-# Grouped GEMM remains opt-in because its oracle is substantially larger.
-DEFAULT_OPS = ("gemm", "attention", "kda_chunk_o", "gemm_fp8")
+# The complete study covers every registered kernel family. Keep this ordering
+# stable because it also defines deterministic suite and report ordering.
+DEFAULT_OPS = ("gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm")
 
 
 def family_module(op, component):

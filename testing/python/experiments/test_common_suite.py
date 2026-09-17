@@ -31,7 +31,7 @@ def test_plan_does_not_import_gpu_runtime():
     code = (
         "from experiments.common.spec import default_workloads; from experiments.common import run; import sys; "
         "assert 'torch' not in sys.modules; assert 'tilelang' not in sys.modules; "
-        "assert len(default_workloads()) == 20"
+        "assert len(default_workloads()) == 25"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 

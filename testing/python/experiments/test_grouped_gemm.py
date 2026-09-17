@@ -38,10 +38,10 @@ assert not any(name.split('.')[0] in ('tilelang', 'torch', 'tvm', 'xgboost') for
     assert not list(tmp_path.iterdir())
 
 
-def test_opt_in_family_preserves_default_matrix_and_has_frozen_disjoint_splits():
+def test_default_matrix_includes_grouped_and_has_frozen_disjoint_splits():
     assert default_workloads() == core_cases("final")
-    assert len(default_workloads()) == 20
-    assert all(w.op != "grouped_gemm" for w in default_workloads())
+    assert len(default_workloads()) == 25
+    assert sum(w.op == "grouped_gemm" for w in default_workloads()) == 5
     _, frozen = load_manifest(json.loads((ROOT / "experiments/manifests/grouped_gemm_final.json").read_text()))
     assert frozen == cases(holdout=True) == core_cases("final", ["grouped_gemm"])
     all_cases = training_cases() + cases() + cases(holdout=True)

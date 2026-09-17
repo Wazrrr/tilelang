@@ -14,9 +14,9 @@ and N and K are shared by every group. The independent reference computes each
 product in FP32 and casts to the input dtype. Both elementwise and relative-norm
 checks use 0.01 tolerance. FLOPs are `2 * sum(Mi) * N * K`.
 
-The family is opt-in: use its commands or `experiments.suite --families grouped_gemm`.
-Its frozen holdouts live in [grouped_gemm_final.json](../manifests/grouped_gemm_final.json).
-The default four-family/twenty-case matrix remains separate from this opt-in family.
+The family is part of the default complete matrix and can also be selected alone
+through its commands or `experiments.suite --families grouped_gemm`. Its frozen
+holdouts live in [grouped_gemm_final.json](../manifests/grouped_gemm_final.json).
 
 ## One configuration set
 
@@ -106,7 +106,7 @@ Here the `grouped` mode groups kernel compilations; every mode executes grouped
 matrix multiplication. Multi-GPU modes require two idle devices of the same model.
 The shared runners monitor contention and record per-config failures and timings.
 
-Carver has no grouped GEMM adapter and records `unsupported`. Brute force,
+Carver uses the shared grouped-GEMM template adapter. Brute force, Carver,
 XGBoost, and TileTune use the shared comparison workflow. `full` runs the complete
 pool without claiming final acceptance; `final` requires passing development
 gates. The shared workflow collects missing baselines and reuses verified bundles

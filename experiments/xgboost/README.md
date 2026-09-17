@@ -61,7 +61,7 @@ cost. Sampled collections are not sampled a second time. Explicit subsets retain
 their recorded size and do not establish a full-pool oracle. Models require
 matching implementation, device, source and compiler identities.
 
-For all four families, compare already saved selections with
+For all five families, compare already saved selections with
 the [offline result script](../README.md#compare-saved-selections-against-the-oracle).
 It does not require the XGBoost package. To generate a new ranking from a trained
 model and evaluate it against held-out measurements:

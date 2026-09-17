@@ -13,10 +13,10 @@ from experiments.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
 
 
 def test_smoke_uses_same_cases_and_three_fixed_budgets():
-    assert len(core_cases("smoke")) == 4
-    assert {w.op for w in core_cases("smoke")} == {"gemm", "attention", "kda_chunk_o", "gemm_fp8"}
+    assert len(core_cases("smoke")) == 5
+    assert {w.op for w in core_cases("smoke")} == {"gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"}
     assert all(w in core_cases("development") for w in core_cases("smoke"))
-    assert len(core_cases("final")) == len(core_cases("development")) == 20
+    assert len(core_cases("final")) == len(core_cases("development")) == 25
     assert all(sum(w.op == op for w in core_cases("final")) == 5 for op in {w.op for w in core_cases("final")})
     assert {w.dtype for w in core_cases("final")} == {"float16", "float8_e4m3fn", "float8_e5m2"}
     for w in core_cases("final"):
@@ -106,7 +106,7 @@ def test_no_cube_grid_is_invented_and_no_device_is_removed():
     d = Device("ascend910b", TARGETS["ascend910b"])
     plan = study_plan("smoke", [d])
     assert len(plan["devices"]) == 1
-    assert len(plan["splits"]["test"]) == 4
+    assert len(plan["splits"]["test"]) == 5
     assert "ascend910b" in plan["unavailable"]
     assert plan["subsets"]["ascend910b"] == {}
 
@@ -132,7 +132,7 @@ def test_planning_has_no_compiler_runtime_imports():
     root = str(Path(__file__).resolve().parents[3])
     code = (
         f"import sys; sys.path.insert(0, {root!r}); from experiments.suite import core_cases; "
-        "assert len(core_cases('final')) == 20; "
+        "assert len(core_cases('final')) == 25; "
         "assert not any(k.split('.')[0] in ('tilelang', 'tvm', 'torch') for k in sys.modules)"
     )
     subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)
