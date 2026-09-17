@@ -13,7 +13,20 @@ def model_target(target):
     return Target(target)
 
 
-def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, transpose_b=True, template=None):
+def rank_configs(
+    configs,
+    *,
+    m,
+    n,
+    k,
+    dtype,
+    target,
+    top_k,
+    transpose_a=False,
+    transpose_b=True,
+    template=None,
+    thread_key="thread_num",
+):
     from tilelang import tvm
 
     Target = tvm.target.Target
@@ -25,7 +38,15 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
 
     arch = CUDA(model_target(target))
     template = template or MatmulTemplate(
-        M=m, N=n, K=k, trans_A=transpose_a, trans_B=transpose_b, in_dtype=dtype, out_dtype=dtype, accum_dtype="float32"
+        M=m,
+        N=n,
+        K=k,
+        trans_A=transpose_a,
+        trans_B=transpose_b,
+        in_dtype=dtype,
+        out_dtype=dtype,
+        accum_dtype="float32",
+        _arch=arch,
     )
     func, tags = get_tensorized_func_and_tags(template.equivalent_function(), arch.target, allow_gemv=True)
     if func is None or not tags:
@@ -41,7 +62,7 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
         td = policy.compute_tile_dict([config["block_M"], config["block_N"]], steps)
         valid = td.valid and policy.check_tile_shape_isvalid(td)
         if valid:
-            valid = all(policy._assign_block_size(node, td, config["thread_num"]) is not None for node in policy.ordered_nodes)
+            valid = all(policy._assign_block_size(node, td, config[thread_key]) is not None for node in policy.ordered_nodes)
         # Exactly DefaultPolicy.dfs_smem_tile's priority, evaluated at the supplied
         # reduction step. Do not expand tiles/steps or substitute TileTune estimates.
         score = float((td.traffic + 1) * td.num_wave) if valid else None
@@ -70,6 +91,7 @@ def rank_configs(configs, *, m, n, k, dtype, target, top_k, transpose_a=False, t
         model="legacy_carver_common_grid",
         model_target=str(arch.target),
         compile_target=str(Target(target)),
+        template=type(template).__name__,
         formula="(traffic_bytes + 1) * num_wave",
         ranking=ranking,
         configs=records,
@@ -107,7 +129,10 @@ def carver_rank(workload, device, configs, top_k):
     reason = carver_support_reason(workload, device)
     if reason:
         raise ValueError(reason)
+    from experiments.common.carver import _architecture, workload_template
+
     p = workload.parameters
+    template = workload_template(workload, configs, arch=_architecture(device.target))
     report = rank_configs(
         configs,
         m=p["m"],
@@ -118,8 +143,7 @@ def carver_rank(workload, device, configs, top_k):
         top_k=top_k,
         transpose_a=p.get("transpose_a", False),
         transpose_b=p.get("transpose_b", False),
+        template=template,
     )
-    for record, config in zip(report["configs"], configs):
-        record["config"] = config
     report.update(metric="carver_traffic_waves", score_units="byte-waves")
     return report

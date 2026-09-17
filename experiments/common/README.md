@@ -190,10 +190,11 @@ published results are historical and do not measure this sampled protocol.
 `--method brute_force` on the single-method runner measures every supplied
 candidate independently of TileTune analysis. The older `exhaustive` method
 still means exhaustive **report-only TileTune** analysis/measurement. The new
-Carver adapter accepts plain, nonbatched FP16/BF16 GEMMs, including transpose
-variants, and maps the exact supplied grid to the existing policy. It reports
-unsupported for fused/batched GEMMs and other operations. The experiment
-workload schema rejects FP8 dtypes; their supplementary runners are retired.
+Carver adapters map the exact supplied grids through one canonical template
+selector. Plain FP16/BF16 GEMM uses `MatmulTemplate`, FP8 GEMM uses the dedicated
+`FP8MatmulTemplate`, attention uses `FlashAttentionTemplate`, grouped GEMM uses
+`GroupedMatmulTemplate`, and KDA uses `KDAChunkTemplate`. Unsupported fused or
+batched GEMM forms are still rejected by their family contracts.
 
 Each test case records method outcomes, an independent oracle table, ranking
 diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics

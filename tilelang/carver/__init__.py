@@ -14,6 +14,7 @@ from .roller import *
 from .arch import CUDA, CDNA, RDNA  # noqa: F401
 from .template import (  # noqa: F401
     MatmulTemplate,
+    FP8MatmulTemplate,
     GEMVTemplate,
     ElementwiseTemplate,
     GeneralReductionTemplate,

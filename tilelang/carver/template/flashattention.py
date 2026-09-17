@@ -1,183 +1,164 @@
+"""Canonical Carver graph for stable scaled attention."""
+
 from dataclasses import dataclass
+
+from tvm import te, tirx
+
 from .base import BaseTemplate
-from tvm import te
-from ..arch import TileDevice
-from ..roller import Hint
-from ..roller import PrimFuncNode, OutputNode, Edge
-from ..utils import get_roller_hints_from_output_nodes, get_tensorized_func_and_tags
+from .graph import TemplateGraph
+from ..utils import get_roller_hints_from_output_nodes
 
 
 @dataclass
 class FlashAttentionTemplate(BaseTemplate):
-    _output_nodes: list[OutputNode] = None
+    """QK, masking, softmax and PV as one connected Carver graph."""
 
-    # Operation-related configuration parameters
     batch_size: int = 1
     num_heads: int = 1
-    head_dim: int = 1
-    seq_length: int = 1
-    seq_kv_length: int = 1
-
+    head_dim: int = 64
+    seq_length: int = 128
+    seq_kv_length: int = 128
     is_causal: bool = False
-
     in_dtype: str = "float16"
     out_dtype: str = "float16"
-    accum_dtype: str = "float16"
-
-    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
-        """
-        Retrieves optimized hardware-aware configurations.
-
-        Args:
-            arch (TileDevice, optional): The target hardware architecture.
-            topk (int, optional): Number of top configurations to consider.
-
-        Returns:
-            List[Hint]: A list of optimization hints for hardware acceleration.
-        """
-        roller_hints = get_roller_hints_from_output_nodes(self.output_nodes, arch=arch, topk=topk)
-        return roller_hints
+    accum_dtype: str = "float32"
 
     def initialize_function(self) -> None:
-        """
-        Defines and initializes the matrix multiplication computation.
+        if str(self.in_dtype) not in ("float16", "bfloat16") or str(self.accum_dtype) not in ("float16", "float32"):
+            raise ValueError("attention requires FP16/BF16 inputs and floating-point accumulation")
+        batch_heads = self.batch_size * self.num_heads
+        query_length, key_length, head_dim = self.seq_length, self.seq_kv_length, self.head_dim
+        if min(batch_heads, query_length, key_length, head_dim) <= 0:
+            raise ValueError("attention dimensions must be positive")
 
-        This method sets up placeholders for input matrices, computes
-        the matrix multiplication using TVM's compute API,
-        and optionally applies bias and type casting.
+        graph = TemplateGraph()
+        query = graph.input("Q", (batch_heads, query_length, head_dim), self.in_dtype)
+        key = graph.input("K", (batch_heads, key_length, head_dim), self.in_dtype)
+        value = graph.input("V", (batch_heads, key_length, head_dim), self.in_dtype)
 
-        Raises:
-            AssertionError: If M, N, or K are not positive integers.
-        """
-        batch_size = self.batch_size
-        num_heads = self.num_heads
-        head_dim = self.head_dim
-        seq_length = self.seq_length
-        seq_kv_length = self.seq_kv_length
+        reduction_head = te.reduce_axis((0, head_dim), "head_k")
+        scores = graph.stage(
+            "qk",
+            [query, key],
+            lambda q, k: te.compute(
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: te.sum(
+                    q[b, i, reduction_head].astype(self.accum_dtype)
+                    * k[b, j, reduction_head].astype(self.accum_dtype),
+                    reduction_head,
+                ),
+                name="Scores",
+            ),
+            tensorcore=True,
+        )
+        scores = graph.stage(
+            "scale_mask",
+            [scores],
+            lambda source: te.compute(
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: (
+                    tirx.if_then_else(
+                        i >= j,
+                        source[b, i, j] * head_dim**-0.5,
+                        tirx.const(float("-inf"), self.accum_dtype),
+                    )
+                    if self.is_causal
+                    else source[b, i, j] * head_dim**-0.5
+                ),
+                name="Scaled",
+            ),
+        )
+        reduction_max = te.reduce_axis((0, key_length), "max_k")
+        maximum = graph.stage(
+            "row_max",
+            [scores],
+            lambda source: te.compute(
+                (batch_heads, query_length),
+                lambda b, i: te.max(source[b, i, reduction_max], reduction_max),
+                name="Maximum",
+            ),
+        )
+        exponentials = graph.stage(
+            "exp",
+            [scores, maximum],
+            lambda source, row_max: te.compute(
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: te.exp(source[b, i, j] - row_max[b, i]),
+                name="Exponentials",
+            ),
+        )
+        reduction_sum = te.reduce_axis((0, key_length), "sum_k")
+        denominator = graph.stage(
+            "row_sum",
+            [exponentials],
+            lambda source: te.compute(
+                (batch_heads, query_length),
+                lambda b, i: te.sum(source[b, i, reduction_sum], reduction_sum),
+                name="Denominator",
+            ),
+        )
+        probabilities = graph.stage(
+            "probability_cast",
+            [exponentials],
+            lambda source: te.compute(
+                (batch_heads, query_length, key_length),
+                lambda b, i, j: source[b, i, j].astype(self.in_dtype),
+                name="Probabilities",
+            ),
+        )
+        reduction_sequence = te.reduce_axis((0, key_length), "sequence_k")
+        numerator = graph.stage(
+            "pv",
+            [probabilities, value],
+            lambda probability, values: te.compute(
+                (batch_heads, query_length, head_dim),
+                lambda b, i, j: te.sum(
+                    probability[b, i, reduction_sequence].astype(self.accum_dtype)
+                    * values[b, reduction_sequence, j].astype(self.accum_dtype),
+                    reduction_sequence,
+                ),
+                name="Numerator",
+            ),
+            tensorcore=True,
+        )
+        output = graph.stage(
+            "normalize",
+            [numerator, denominator],
+            lambda source, normalizer: te.compute(
+                (batch_heads, query_length, head_dim),
+                lambda b, i, j: (source[b, i, j] / normalizer[b, i]).astype(self.out_dtype),
+                name="Output",
+            ),
+        )
+        self._graph, self._output = graph, output
+        self.set_function(graph.function(output))
 
-        in_dtype = self.in_dtype
-        out_dtype = self.out_dtype
-        accum_dtype = self.accum_dtype
+    @property
+    def output_nodes(self):
+        return self._graph.output_nodes(self._output, self.arch)
 
-        # Equalize the input shaps into a matmul shape
-        QK_B, QK_M, QK_N, QK_K = batch_size * num_heads, seq_length, seq_kv_length, head_dim
-        SV_B, SV_M, SV_N, SV_K = batch_size * num_heads, seq_length, head_dim, seq_kv_length
-
-        # Define tensor shapes based on transpose flags
-        def create_matmul(B, M, N, K):
-            # Define tensor shapes based on transpose flags
-            input_shape = (B, M, K)
-            weight_shape = (B, N, K)
-            output_shape = (B, M, N)  # Shape of output matrix C
-
-            # Create TVM placeholders for input tensors
-            A = te.placeholder(input_shape, name="A", dtype=in_dtype)  # Input matrix A
-            B = te.placeholder(weight_shape, name="B", dtype=in_dtype)  # Weight matrix B
-
-            # Define a reduction axis for matrix multiplication
-            k = te.reduce_axis((0, K), name="k")
-
-            def _compute_matmul(b, i, j):
-                """
-                Compute function for matrix multiplication.
-
-                Args:
-                    i (int): Row index.
-                    j (int): Column index.
-
-                Returns:
-                    Computed value for C[i, j] as a sum over the reduction axis.
-                """
-                A_indices = [b, i, k]
-                B_indices = [b, j, k]
-                return te.sum(A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
-
-            # Compute matrix multiplication result
-            C = te.compute(
-                output_shape,
-                fcompute=_compute_matmul,
-                name="C",
-            )
-
-            # Optionally cast the output to a different type
-            if out_dtype != accum_dtype:
-                C = te.compute(
-                    output_shape,
-                    lambda b, i, j: C[b, i, j].astype(out_dtype),
-                    name="D",
-                )
-
-            args = [A, B, C]
-            return te.create_prim_func(args)
-
-        MMA0_prim_func = create_matmul(QK_B, QK_M, QK_N, QK_K)
-        MMA1_prim_func = create_matmul(SV_B, SV_M, SV_N, SV_K)
-
-        self.set_function([MMA0_prim_func, MMA1_prim_func])
-
-        def create_node_from_function(func, name):
-            # The legacy tensorization recognizer predates SM100. Carver models
-            # the equivalent MMA graph as SM90 while retaining the actual
-            # device capacities in ``self.arch``.
-            target = self.arch.target
-            if str(target.attrs.get("arch", "")).startswith("sm_10"):
-                from tvm.target import Target
-
-                values = dict(target.export())
-                values["arch"] = "sm_90"
-                target = Target(values)
-            tensorized_func, tags = get_tensorized_func_and_tags(func, target)
-            assert tags is not None
-            return PrimFuncNode(tensorized_func, name=name, tags=tags)
-
-        node_0 = create_node_from_function(MMA0_prim_func, name="MMA0")
-        node_1 = create_node_from_function(MMA1_prim_func, name="MMA1")
-
-        # connect the two nodes
-        edge = Edge(node_0, node_1, 0, 0)
-        node_0._out_edges.append(edge)
-        node_1.set_inputs(0, edge)
-
-        output_nodes = [OutputNode(node_1)]
-        self.set_output_nodes(output_nodes)
+    def get_hardware_aware_configs(self, arch=None, topk=10):
+        selected_arch = arch or self.arch
+        return get_roller_hints_from_output_nodes(
+            self._graph.output_nodes(self._output, selected_arch), arch=selected_arch, topk=topk
+        )
 
     def params_as_dict(self):
-        """
-        Returns the template parameters as a dictionary.
-
-        Returns:
-            dict: Dictionary containing template parameter values.
-        """
         return {
-            "M": self.M,
-            "N": self.N,
-            "K": self.K,
-            "trans_A": self.trans_A,
-            "trans_B": self.trans_B,
-            "in_dtype": self.in_dtype,
-            "out_dtype": self.out_dtype,
-            "accum_dtype": self.accum_dtype,
-            "with_bias": self.with_bias,
+            name: getattr(self, name)
+            for name in (
+                "batch_size",
+                "num_heads",
+                "head_dim",
+                "seq_length",
+                "seq_kv_length",
+                "is_causal",
+                "in_dtype",
+                "out_dtype",
+                "accum_dtype",
+            )
         }
 
     @property
     def class_attributes(self):
-        """
-        Returns the class attributes in dictionary form.
-
-        Returns:
-            dict: Dictionary of class attributes.
-        """
         return self.params_as_dict()
-
-    def __repr__(self) -> str:
-        """
-        Returns a string representation of the class instance.
-
-        Returns:
-            str: A formatted string representation of the class.
-        """
-        cls_name = self.__class__.__name__
-        fields = self.class_attributes
-        field_str = ", ".join(f"{key}={value!r}" for key, value in fields.items())
-        return f"{cls_name}({field_str})"

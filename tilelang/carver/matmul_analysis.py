@@ -540,7 +540,7 @@ def get_tensorized_func_and_tags(
 
     # step2. transform function to tensorcore matmul (e.g. conv2d with im2col)
     def check_sm_version(arch: str) -> int:
-        sm_version = arch.replace("sm_", "")
+        sm_version = arch.replace("sm_", "").rstrip("af")
         return int(sm_version) if sm_version.isdigit() else -1
 
     def is_cuda_tensorcore_target(target: Target) -> bool:

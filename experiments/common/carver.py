@@ -3,6 +3,89 @@
 import math
 
 
+def workload_template(workload, configs=None, *, arch=None):
+    """Build the canonical Carver template for an experiment workload."""
+    from tilelang.carver.template import (
+        FP8MatmulTemplate,
+        FlashAttentionTemplate,
+        GroupedMatmulTemplate,
+        KDAChunkTemplate,
+        MatmulTemplate,
+    )
+
+    p = workload.parameters
+    common = {"_arch": arch} if arch is not None else {}
+    if workload.op == "gemm":
+        return MatmulTemplate(
+            M=p["m"],
+            N=p["n"],
+            K=p["k"],
+            trans_A=p.get("transpose_a", False),
+            trans_B=p.get("transpose_b", False),
+            in_dtype=workload.dtype,
+            out_dtype=workload.dtype,
+            accum_dtype="float32",
+            with_bias=p.get("epilogue", "none") != "none",
+            **common,
+        )
+    if workload.op == "gemm_fp8":
+        return FP8MatmulTemplate(
+            M=p["m"],
+            N=p["n"],
+            K=p["k"],
+            trans_A=p.get("transpose_a", False),
+            trans_B=p.get("transpose_b", False),
+            kernel_dtype=workload.dtype,
+            **common,
+        )
+    if workload.op == "attention":
+        return FlashAttentionTemplate(
+            batch_size=p["batch"],
+            num_heads=p["heads"],
+            seq_length=p["sequence"],
+            seq_kv_length=p["sequence"],
+            head_dim=p["dim"],
+            is_causal=p.get("causal", False),
+            in_dtype=workload.dtype,
+            out_dtype=workload.dtype,
+            accum_dtype="float32",
+            **common,
+        )
+    if workload.op == "grouped_gemm":
+        block_sizes = {config["block_M"] for config in configs or []}
+        if not block_sizes:
+            from experiments.grouped_gemm.spaces import BLOCK_M
+
+            block_sizes = {BLOCK_M}
+        if len(block_sizes) != 1:
+            raise ValueError("one grouped-GEMM Carver template requires one fixed block_M")
+        return GroupedMatmulTemplate(
+            batch_sizes=list(p["batch_sizes"]),
+            block_m=block_sizes.pop(),
+            N=p["n"],
+            K=p["k"],
+            trans_B=p.get("transpose_b", False),
+            in_dtype=workload.dtype,
+            out_dtype=workload.dtype,
+            accum_dtype="float32",
+            **common,
+        )
+    if workload.op == "kda_chunk_o":
+        return KDAChunkTemplate(
+            batch_size=p["batch"],
+            num_heads=p["heads"],
+            sequence=p["sequence"],
+            key_dim=p["dim"],
+            value_dim=p["value_dim"],
+            chunk_size=p["chunk_size"],
+            in_dtype=workload.dtype,
+            out_dtype=workload.dtype,
+            accum_dtype="float32",
+            **common,
+        )
+    raise ValueError(f"No Carver template for experiment operation {workload.op!r}")
+
+
 def _rank_records(configs, top_k, *, arch, template, evaluate):
     from tilelang.tiletune.ranking import rank_records, select_top_k
 
@@ -29,7 +112,7 @@ def _rank_records(configs, top_k, *, arch, template, evaluate):
     return dict(
         model="legacy_carver_common_grid",
         model_target=str(arch.target),
-        template=template,
+        template=type(template).__name__,
         formula="(traffic_bytes_per_cta + 1) * num_waves",
         ranking=ranking,
         configs=records,
@@ -84,25 +167,13 @@ def _full_row_gemm_supported(m, n, threads):
 
 
 def attention_rank(workload, device, configs, top_k):
-    from tilelang.carver.template import FlashAttentionTemplate
-
     p, element_bytes = workload.parameters, 2
     batch, heads, sequence, dim = (p[key] for key in ("batch", "heads", "sequence", "dim"))
     arch = _architecture(device.target)
-    # Construct the repository template so graph recognition remains part of
-    # the baseline. The common-grid adapter below evaluates the actual online
-    # schedule rather than materializing the template's full score matrix.
-    FlashAttentionTemplate(
-        batch_size=batch,
-        num_heads=heads,
-        seq_length=sequence,
-        seq_kv_length=sequence,
-        head_dim=dim,
-        is_causal=p.get("causal", False),
-        in_dtype=workload.dtype,
-        out_dtype=workload.dtype,
-        accum_dtype="float32",
-    ).with_arch(arch)
+    # Keep the semantic graph as the source of workload identity. The grid
+    # adapter evaluates the online tiled recurrence without materializing its
+    # full score matrix.
+    template = workload_template(workload, configs, arch=arch)
 
     def evaluate(c):
         bm, bn, depth = c["block_M"], c["block_N"], max(1, c["num_stages"])
@@ -137,26 +208,15 @@ def attention_rank(workload, device, configs, top_k):
             loop_iterations=average_iterations,
         )
 
-    return _rank_records(configs, top_k, arch=arch, template="FlashAttentionTemplate", evaluate=evaluate)
+    return _rank_records(configs, top_k, arch=arch, template=template, evaluate=evaluate)
 
 
 def kda_rank(workload, device, configs, top_k):
-    from tilelang.carver.template import KDAChunkTemplate
-
     p = workload.parameters
     batch, heads, sequence, dk, dv, chunk = (p[key] for key in ("batch", "heads", "sequence", "dim", "value_dim", "chunk_size"))
     element_bytes = 2
     arch = _architecture(device.target)
-    KDAChunkTemplate(
-        batch_size=batch,
-        num_heads=heads,
-        sequence=sequence,
-        key_dim=dk,
-        value_dim=dv,
-        chunk_size=chunk,
-        in_dtype=workload.dtype,
-        out_dtype=workload.dtype,
-    ).with_arch(arch)
+    template = workload_template(workload, configs, arch=arch)
 
     def evaluate(c):
         bdk, bdv, depth = c["block_DK"], c["block_DV"], max(1, c["num_stages"])
@@ -181,4 +241,4 @@ def kda_rank(workload, device, configs, top_k):
             loop_iterations=iterations,
         )
 
-    return _rank_records(configs, top_k, arch=arch, template="KDAChunkTemplate", evaluate=evaluate)
+    return _rank_records(configs, top_k, arch=arch, template=template, evaluate=evaluate)

@@ -2,6 +2,7 @@
 
 from .base import BaseTemplate  # noqa: F401
 from .matmul import MatmulTemplate  # noqa: F401
+from .matmul_fp8 import FP8MatmulTemplate  # noqa: F401
 from .gemv import GEMVTemplate  # noqa: F401
 from .elementwise import ElementwiseTemplate  # noqa: F401
 from .general_reduce import GeneralReductionTemplate  # noqa: F401

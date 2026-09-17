@@ -70,9 +70,13 @@ settings are 600 rounds, depth 10, learning rate 0.05, subsampling 0.8, and
 validation patience 20. Baselines use one fixed seed (123 by default) and are
 reused across TileTune's three repeats and later revisions. Each new TileTune
 winner receives seven checks. Preparation costs are recorded separately.
-Carver uses its existing matrix-multiplication and FlashAttention templates.
-The grouped-GEMM and KDA families supply matching templates, and every adapter
-scores the exact shared experiment pool rather than a separately generated grid.
+Carver resolves every workload through one canonical template selector:
+`MatmulTemplate` for GEMM, `FP8MatmulTemplate` for FP8 GEMM,
+`FlashAttentionTemplate` for attention, `GroupedMatmulTemplate` for grouped
+GEMM, and `KDAChunkTemplate` for KDA. Every adapter scores the exact shared
+experiment pool rather than a separately generated grid. FP8 templates retain
+the kernel format while lowering `float8_e4m3fn` to Carver's tensorizable
+`float8_e4m3` spelling internally.
 
 The family command checks acceptance for its requested cases and targets. Its
 report identifies the scope; full five-target final acceptance requires all four

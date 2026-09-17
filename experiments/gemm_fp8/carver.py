@@ -2,25 +2,23 @@
 
 
 def carver_rank(workload, device, configs, top_k):
+    from experiments.common.carver import _architecture, workload_template
     from experiments.gemm.carver import rank_configs
 
     p = workload.parameters
-    converted = [dict(c, thread_num=c["threads"]) for c in configs]
-    for config in converted:
-        config.pop("threads")
-    dtype = "float8_e4m3" if workload.dtype == "float8_e4m3fn" else workload.dtype
+    template = workload_template(workload, configs, arch=_architecture(device.target))
     report = rank_configs(
-        converted,
+        configs,
         m=p["m"],
         n=p["n"],
         k=p["k"],
-        dtype=dtype,
+        dtype=template.in_dtype,
         target=device.target,
         top_k=top_k,
         transpose_a=p.get("transpose_a", False),
         transpose_b=p.get("transpose_b", False),
+        template=template,
+        thread_key="threads",
     )
-    for record, config in zip(report["configs"], configs):
-        record["config"] = config
-    report.update(template="MatmulTemplate", metric="carver_traffic_waves", score_units="byte-waves")
+    report.update(metric="carver_traffic_waves", score_units="byte-waves")
     return report

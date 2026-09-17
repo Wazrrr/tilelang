@@ -195,6 +195,9 @@ Carver abstracts common loop patterns through templates:
 - **`GeneralReductionTemplate`**: For general `Spatial-Spatial-Reduce` (SSR) structures or similar.
 - **`FlashAttentionTemplate`**: For attention-like operations with flash memory.
 - **`MatmulTemplate`**: For standard matrix multiplication `C = A * B`.
+- **`FP8MatmulTemplate`**: For native E4M3/E5M2 matrix multiplication with FP32 accumulation.
+- **`GroupedMatmulTemplate`**: For grouped matrix multiplication over its padded CTA domain.
+- **`KDAChunkTemplate`**: For gated chunked-delta output, including both tensor-core products.
 - **`GEMVTemplate`**: For `y = Ax` or `y = xA` style operations.
 - **`ElementwiseTemplate`**: For elementwise transformations or pointwise ops.
 
