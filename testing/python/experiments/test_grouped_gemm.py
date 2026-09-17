@@ -14,7 +14,8 @@ from experiments.grouped_gemm.spaces import get_configs
 from experiments.suite import core_cases, study_plan
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = dict(block_M=64, block_N=64, block_K=64, num_stages=2, threads=128)
+CONFIG = dict(block_M=128, block_N=256, block_K=128, num_stages=6, threads=128, persistent=False)
+PERSISTENT_CONFIG = dict(CONFIG, threads=256, persistent=True)
 
 
 @pytest.mark.parametrize(
@@ -51,7 +52,7 @@ def test_default_matrix_includes_grouped_and_has_frozen_disjoint_splits():
     plan = study_plan("full", [Device("hopper", TARGETS["hopper"])], families=["grouped_gemm"])
     assert plan["families"] == ["grouped_gemm"]
     assert [len(plan["splits"][key]) for key in ("train", "validation", "test")] == [2, 1, 5]
-    assert all(s["indices"] == list(range(192)) for s in plan["subsets"]["hopper"].values())
+    assert all(s["indices"] == [0, 1] for s in plan["subsets"]["hopper"].values())
     assert len(core_cases("full", ["gemm", "grouped_gemm"])) == 10
 
 
@@ -81,25 +82,24 @@ def test_pool_identity_subsets_and_system_variants():
     assert spaces[0] == spaces[1] == spaces[2]
     space = spaces[0]
     assert space["configs"] == get_configs()
-    assert len(set(space["config_ids"])) == space["candidate_count"] == 192
+    assert len(set(space["config_ids"])) == space["candidate_count"] == 2
     assert space["rejected_count"] == space["alias_count"] == space["budget_omitted_count"] == 0
-    assert space["configs"][60] == CONFIG
-    assert space["configs"][125] == dict(CONFIG, block_N=128, threads=256)
+    assert space["configs"] == [CONFIG, PERSISTENT_CONFIG]
     device = Device("hopper", TARGETS["hopper"])
-    subset = [space["configs"][i] for i in (125, 60)]
+    subset = [space["configs"][i] for i in (1, 0)]
     assert configuration_space(replace(w, configs=subset), device)["configs"] == subset
     with pytest.raises(ValueError, match="subset"):
-        configuration_space(replace(w, configs=[dict(CONFIG, block_M=32)]), device)
-    plan = system_plan("grouped_gemm", indices=[125, 60])
+        configuration_space(replace(w, configs=[dict(CONFIG, block_M=64)]), device)
+    plan = system_plan("grouped_gemm", indices=[1, 0])
     assert len(plan) == 25
     assert {row["variant"] for row in plan} == set(VARIANTS)
-    assert all(row["indices"] == [125, 60] for row in plan)
+    assert all(row["indices"] == [1, 0] for row in plan)
 
 
 @pytest.mark.parametrize("sizes", [[], [0, 64], [-1], [True], [1.5], "64,128", (64, 128)])
 def test_invalid_group_sizes_rejected(sizes):
     with pytest.raises(ValueError, match="batch_sizes"):
-        Workload("bad", "grouped_gemm", dict(batch_sizes=sizes, n=128, k=128))
+        Workload("bad", "grouped_gemm", dict(batch_sizes=sizes, n=256, k=128), dtype="float8_e4m3fn")
 
 
 def test_dtype_layout_and_carver_support():
@@ -107,13 +107,13 @@ def test_dtype_layout_and_carver_support():
     from experiments.xgboost.data import canonical_workload
 
     w = cases()[0]
-    with pytest.raises(ValueError, match="float16 and bfloat16"):
+    with pytest.raises(ValueError, match="MXFP8 E4M3"):
         replace(w, dtype="float32")
     with pytest.raises(ValueError, match="transpose_b must be a bool"):
         replace(w, parameters=dict(w.parameters, transpose_b=1))
     implicit = replace(w, parameters={k: v for k, v in w.parameters.items() if k != "transpose_b"})
     assert canonical_workload(implicit) == canonical_workload(w)
-    assert carver_support_reason(w, Device("hopper", TARGETS["hopper"])) is None
+    assert "no block-scaled 2-CTA grouped-MXFP8 model" in carver_support_reason(w, Device("hopper", TARGETS["hopper"]))
 
 
 def test_example_and_adapter_sources_invalidate_baselines_and_models():
@@ -126,7 +126,7 @@ def test_example_and_adapter_sources_invalidate_baselines_and_models():
     args = (cases()[0], "portable.grouped_gemm", TARGETS["hopper"], "H200", "event")
     before = make_context(*args, sources)
     for path in (
-        "examples/grouped_gemm/example_grouped_gemm_fwd.py",
+        "examples/blockscaled_gemm_sm100/grouped_gemm_mxfp8_blockscaled_1d1d.py",
         "experiments/grouped_gemm/kernel.py",
         "experiments/grouped_gemm/reference.py",
         "experiments/grouped_gemm/spaces.py",
@@ -138,26 +138,34 @@ def test_example_and_adapter_sources_invalidate_baselines_and_models():
 @pytest.mark.parametrize("transpose_b", [False, True])
 def test_inputs_reference_and_fixed_offsets(transpose_b):
     import torch
+    from examples.blockscaled_gemm_sm100.grouped_gemm_mxfp8_blockscaled_1d1d import grouped_blockscaled_gemm_ref
     from experiments.grouped_gemm.kernel import make_case
 
-    w = Workload("boundary", "grouped_gemm", dict(batch_sizes=[1, 63, 65], n=33, k=17, transpose_b=transpose_b))
+    w = Workload(
+        "boundary",
+        "grouped_gemm",
+        dict(batch_sizes=[1, 63, 64], n=256, k=128, transpose_b=transpose_b),
+        dtype="float8_e4m3fn",
+    )
     case = make_case(w)
     inputs = case.inputs("cpu", torch.Generator().manual_seed(123))
     repeated = case.inputs("cpu", torch.Generator().manual_seed(123))
     assert all(torch.equal(a, b) for a, b in zip(inputs, repeated))
-    a, b, sizes, offsets, padded = inputs
-    assert sizes.tolist() == [1, 63, 65]
-    assert offsets.tolist() == [0, 1, 64]
-    assert padded.tolist() == [0, 64, 128]
-    expected = torch.empty((129, 33), dtype=a.dtype)
-    for group, start, end in ((0, 0, 1), (1, 1, 64), (2, 64, 129)):
-        weight = b[group].T if transpose_b else b[group]
-        expected[start:end] = a[start:end].double() @ weight.double()
+    a, b, sfa_flat, sfb_flat, offsets, storage_offsets = inputs
+    assert a.shape == (384, 128) and a.dtype == torch.float8_e4m3fn
+    assert b.shape == ((3, 256, 128) if transpose_b else (3, 128, 256))
+    assert offsets.tolist() == [0, 1, 64, 128]
+    assert storage_offsets.tolist() == [0, 128, 256, 384]
+    sfa = sfa_flat.reshape(1, 384).T.contiguous()
+    sfb = sfb_flat.reshape(1, 3, 256).permute(1, 2, 0).contiguous()
+    expected = grouped_blockscaled_gemm_ref(
+        a, b, sfa, sfb, offsets, storage_offsets, transpose_B=transpose_b
+    ).to(torch.bfloat16)
     case.check([case.reference(*inputs)], [expected])
     with pytest.raises(AssertionError):
         case.check([torch.zeros_like(expected)], [expected])
-    with pytest.raises(ValueError, match="block_M=64"):
-        case.build(**dict(CONFIG, block_M=32))
+    with pytest.raises(ValueError, match="block_M=128"):
+        case.build(**dict(CONFIG, block_M=64))
 
 
 def test_autotuner_builder_closure_is_scalar_serializable():
@@ -168,26 +176,38 @@ def test_autotuner_builder_closure_is_scalar_serializable():
 
 
 @pytest.mark.parametrize("w", cases(holdout=True), ids=lambda w: w.name)
-@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
-def test_adapter_program_equals_example(w, dtype):
+def test_adapter_program_equals_example(w):
     from tilelang import tvm
-    from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
+    from examples.blockscaled_gemm_sm100.grouped_gemm_mxfp8_blockscaled_1d1d import grouped_mxfp8_blockscaled_gemm_2cta
     from experiments.common.kernels import make_case
 
-    w = replace(w, dtype=dtype)
     case = make_case(w)
     p = w.parameters
-    example = grouped_gemm.get_tir(
-        K=p["k"], N=p["n"], batch_sizes_list=tuple(p["batch_sizes"]), trans_b=p["transpose_b"], dtype=dtype, **CONFIG
+    example = grouped_mxfp8_blockscaled_gemm_2cta.get_tir(
+        M_storage=sum(((size + 127) // 128) * 128 for size in p["batch_sizes"]),
+        N=p["n"],
+        K=p["k"],
+        E=len(p["batch_sizes"]),
+        E1=len(p["batch_sizes"]) + 1,
+        logical_M_total=sum(p["batch_sizes"]),
+        block_M=128,
+        block_N=256,
+        block_K=128,
+        in_dtype="float8_e4m3fn",
+        out_dtype="bfloat16",
+        accum_dtype="float32",
+        num_stages=6,
+        max_M_per_E=max(p["batch_sizes"]),
+        transpose_B=p["transpose_b"],
+        sf_granularity_k=128,
     )
     assert case.out_idx is None
     tvm.ir.assert_structural_equal(case.build(**CONFIG), example)
 
 
-@pytest.mark.parametrize("sizes,n,k", [([64, 128], 128, 128), ([1, 63, 65], 97, 80)])
+@pytest.mark.parametrize("sizes,n,k", [([64, 128], 256, 128), ([1, 63, 64], 256, 128)])
 @pytest.mark.parametrize("transpose_b", [False, True])
-@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
-def test_grouped_gemm_on_gpu(sizes, n, k, transpose_b, dtype):
+def test_grouped_gemm_on_gpu(sizes, n, k, transpose_b):
     import torch
     import tilelang
     from experiments.common.kernels import make_case
@@ -196,11 +216,13 @@ def test_grouped_gemm_on_gpu(sizes, n, k, transpose_b, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA or ROCm required")
     torch.backends.cuda.matmul.allow_tf32 = False
-    w = Workload("gpu", "grouped_gemm", dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b), dtype=dtype)
+    w = Workload(
+        "gpu", "grouped_gemm", dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b), dtype="float8_e4m3fn"
+    )
     case = make_case(w)
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
     expected = case.reference(*inputs)
-    for config in (CONFIG, dict(CONFIG, block_N=128, threads=256)):
+    for config in (CONFIG, PERSISTENT_CONFIG):
         kernel = tilelang.compile(
             case.build(**config),
             target=current_target(),
@@ -223,9 +245,14 @@ def test_grouped_compilation_preserves_output_contract_on_gpu(transpose_b):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     torch.backends.cuda.matmul.allow_tf32 = False
-    w = Workload("grouped", "grouped_gemm", dict(batch_sizes=[1, 63, 65], n=97, k=80, transpose_b=transpose_b))
+    w = Workload(
+        "grouped",
+        "grouped_gemm",
+        dict(batch_sizes=[1, 63, 64], n=256, k=128, transpose_b=transpose_b),
+        dtype="float8_e4m3fn",
+    )
     case = make_case(w)
-    configs = [CONFIG, dict(CONFIG, block_N=128, threads=256)]
+    configs = [CONFIG, PERSISTENT_CONFIG]
     before = [case.build(**c).script() for c in configs]
     results = compile_grouped_unit_tvm_ffi(
         list(enumerate(configs)),

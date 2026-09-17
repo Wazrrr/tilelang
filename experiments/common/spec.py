@@ -66,8 +66,10 @@ class Workload:
                 raise ValueError(f"{key} must be a positive integer")
         if self.dtype not in _DTYPES:
             raise ValueError(f"Unsupported workload dtype {self.dtype}")
-        if self.op in ("attention", "kda_chunk_o", "grouped_gemm") and self.dtype not in ("float16", "bfloat16"):
+        if self.op in ("attention", "kda_chunk_o") and self.dtype not in ("float16", "bfloat16"):
             raise ValueError(f"{self.op} supports float16 and bfloat16")
+        if self.op == "grouped_gemm" and self.dtype != "float8_e4m3fn":
+            raise ValueError("grouped_gemm uses the SM100 MXFP8 E4M3 kernel")
         if self.op == "gemm_fp8" and self.dtype not in ("float8_e4m3fn", "float8_e5m2"):
             raise ValueError("gemm_fp8 supports float8_e4m3fn and float8_e5m2")
         if self.op == "kda_chunk_o" and self.parameters["sequence"] % self.parameters["chunk_size"]:

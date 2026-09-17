@@ -50,6 +50,11 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     for workload in family_module(op, "cases").cases(holdout=True):
         all_configs = configurations(workload, device)
         configs = all_configs[:8] + all_configs[64:72] if op == "attention" else all_configs[:8]
+        if op == "grouped_gemm":
+            assert "no block-scaled 2-CTA grouped-MXFP8 model" in carver_support_reason(workload, device)
+            with pytest.raises(ValueError, match="no block-scaled"):
+                carver_rank(workload, device, configs, top_k=2)
+            continue
         assert carver_support_reason(workload, device) is None
         result = carver_rank(workload, device, configs, top_k=2)
         assert result["template"] == expected_template

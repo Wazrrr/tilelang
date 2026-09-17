@@ -23,6 +23,7 @@ def matmul(
     accum_dtype,
     num_stages,
     threads,
+    enable_rasteration=False,
 ):
     M, N, K = T.const("M, N, K")
     A_shape = (K, M) if trans_A else (M, K)
@@ -42,6 +43,8 @@ def matmul(
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
         C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
+        T.use_swizzle(panel_size=10, enable=enable_rasteration)
+
         for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
             T.copy(A[by * block_M, k * block_K], A_shared)  # not trans_A
             T.copy(B[bx * block_N, k * block_K], B_shared)  # trans_B
@@ -56,28 +59,44 @@ def matmul(
     return C
 
 
-M, N, K = 4096, 4096, 8192
-block_M, block_N, block_K = 128, 128, 128
-trans_A, trans_B = False, True
-in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
-num_stages = 0 if block_N >= 256 or block_M >= 256 or block_K >= 256 else 2
-threads = 256
+def main():
+    M, N, K = 4096, 4096, 8192
+    block_M, block_N, block_K = 128, 128, 128
+    trans_A, trans_B = False, True
+    in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
+    num_stages = 0 if block_N >= 256 or block_M >= 256 or block_K >= 256 else 2
+    threads = 256
 
-a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
-c = matmul(a, b, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads)
-print(matmul.get_kernel_source(a, b, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads))
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+    args = (
+        a,
+        b,
+        block_M,
+        block_N,
+        block_K,
+        trans_A,
+        trans_B,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
+        num_stages,
+        threads,
+    )
+    c = matmul(*args)
+    print(matmul.get_kernel_source(*args))
 
-ref_c = (a.to(torch.float) @ b.T.to(torch.float)).to(torch.bfloat16)
-torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-print("All checks passed. ✅")
+    ref_c = (a.to(torch.float) @ b.T.to(torch.float)).to(torch.bfloat16)
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    print("All checks passed. ✅")
 
-tl_latency = do_bench(
-    lambda: matmul(a, b, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads),
-    backend="cupti",
-)
-torch_latency = do_bench(lambda: a @ b.T, backend="cupti")
-print(f"Tilelang latency: {tl_latency} ms")
-print(f"Flops: {2 * M * N * K / (tl_latency / 1e3) / 1e12} TFLOPS")
-print(f"Torch latency: {torch_latency} ms")
-print(f"Flops: {2 * M * N * K / (torch_latency / 1e3) / 1e12} TFLOPS")
+    tl_latency = do_bench(lambda: matmul(*args), backend="cupti")
+    torch_latency = do_bench(lambda: a @ b.T, backend="cupti")
+    print(f"Tilelang latency: {tl_latency} ms")
+    print(f"Flops: {2 * M * N * K / (tl_latency / 1e3) / 1e12} TFLOPS")
+    print(f"Torch latency: {torch_latency} ms")
+    print(f"Flops: {2 * M * N * K / (torch_latency / 1e3) / 1e12} TFLOPS")
+
+
+if __name__ == "__main__":
+    main()

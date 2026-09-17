@@ -1,4 +1,4 @@
-"""Grouped GEMMs for common MoE decode, prefill, and up/down projections."""
+"""Grouped MXFP8 GEMMs for common MoE decode, prefill, and projections."""
 
 
 def cases(holdout=False):
@@ -16,6 +16,7 @@ def cases(holdout=False):
             "grouped_gemm_" + role,
             "grouped_gemm",
             dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b),
+            dtype="float8_e4m3fn",
             config_space="expanded",
         )
         for role, sizes, n, k, transpose_b in shapes
@@ -30,6 +31,7 @@ def training_cases():
             "grouped_gemm_" + split,
             "grouped_gemm",
             dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b),
+            dtype="float8_e4m3fn",
             config_space="expanded",
         )
         for split, sizes, n, k, transpose_b in (

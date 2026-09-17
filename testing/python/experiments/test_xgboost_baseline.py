@@ -54,7 +54,7 @@ def write_run(path, rows, *, name="gemm", failed=(), sample_fraction=None):
                 "experiments/families.py",
                 "experiments/gemm/kernel.py",
                 "experiments/gemm/reference.py",
-                "examples/gemm/example_gemm_advanced_autotune.py",
+                "examples/gemm_sm100/gemm_tcgen5mma.py",
             )
         },
         native_build="test-compiler-build",
@@ -122,7 +122,7 @@ def test_split_is_semantic_not_run_name_or_configuration_subset(tmp_path):
             "experiments/families.py",
             "experiments/gemm/kernel.py",
             "experiments/gemm/reference.py",
-            "examples/gemm/example_gemm_advanced_autotune.py",
+            "examples/gemm_sm100/gemm_tcgen5mma.py",
         ],
         "same",
     )
@@ -256,8 +256,8 @@ def _build_with_bad_rows(block_rows, threads):
 
     if block_rows <= 0:
         raise ValueError("bad selected tile")
-    return make_case(Workload("gemm", "gemm", dict(m=16, n=128, k=128, transpose_b=True))).build(
-        block_M=block_rows * 16,
+    return make_case(Workload("gemm", "gemm", dict(m=128, n=128, k=128, transpose_b=True))).build(
+        block_M=block_rows * 64,
         block_N=128,
         block_K=32,
         num_stages=0,
@@ -278,7 +278,7 @@ def test_gpu_frozen_selection_keeps_elaboration_failures_and_original_indices(tm
     monkeypatch.setenv("TILELANG_DISABLE_CACHE", "1")
     monkeypatch.setenv("TILELANG_AUTO_TUNING_DISABLE_CACHE", "1")
     monkeypatch.setenv("TILELANG_AUTO_TUNING_CPU_COUNTS", "2")
-    case = make_case(Workload("gemm", "gemm", dict(m=16, n=128, k=128, transpose_b=True)))
+    case = make_case(Workload("gemm", "gemm", dict(m=128, n=128, k=128, transpose_b=True)))
     case.build = _build_with_bad_rows
     configs = [dict(block_rows=b, threads=128) for b in [0, -1 if all_failed else 1, 2]]
     report = dict(

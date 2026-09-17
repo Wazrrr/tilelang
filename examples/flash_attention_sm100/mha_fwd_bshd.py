@@ -29,13 +29,14 @@ def flashattn(
     block_M=128,
     block_N=128,
     variant="ss",
+    num_stages=1,
+    dtype=T.bfloat16,
 ):
     """Flash Attention forward. variant='ss': mma_ss (128t, P via shared); 'ts': mma_ts (256t, P via TMEM)."""
     use_ts = variant == "ts"
     threads = 256 if use_ts else 128
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     shape = [batch, seq_len, heads, dim]
-    dtype = T.bfloat16
     accum_dtype = T.float32
 
     @T.prim_func
@@ -86,7 +87,7 @@ def flashattn(
                 else T.ceildiv(seq_len, block_N)
             )
 
-            for k in T.Pipelined(loop_range, num_stages=1):
+            for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
 
                 # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)

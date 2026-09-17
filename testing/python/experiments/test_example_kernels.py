@@ -9,9 +9,12 @@ from experiments.common.spec import Device, TARGETS, configurations
 
 EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
-    "attention": dict(block_M=64, block_N=64, num_stages=1, threads=128),
+    "attention": dict(block_M=128, block_N=128, num_stages=1, threads=128),
     "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
-    "gemm_fp8": dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False),
+    "gemm_fp8": dict(block_M=64, block_N=256, block_K=32, num_stages=2, threads=256, enable_rasteration=False),
+    "grouped_gemm": dict(
+        block_M=128, block_N=256, block_K=128, num_stages=6, threads=128, persistent=False
+    ),
 }
 
 
@@ -19,20 +22,38 @@ def example_program(w, c):
     """Build through the example's public API independently of suite dispatch."""
     p = w.parameters
     if w.op == "gemm":
-        from examples.gemm.example_gemm_advanced_autotune import make_autotune_kernel_builder
+        from examples.gemm_sm100.gemm_tcgen5mma import matmul
 
-        return make_autotune_kernel_builder(p["m"], p["n"], p["k"], w.dtype)(**c)
+        return matmul.get_tir(
+            M=p["m"],
+            N=p["n"],
+            K=p["k"],
+            trans_A=False,
+            trans_B=True,
+            in_dtype=w.dtype,
+            out_dtype=w.dtype,
+            accum_dtype="float32",
+            block_M=c["block_M"],
+            block_N=c["block_N"],
+            block_K=c["block_K"],
+            num_stages=c["num_stages"],
+            threads=c["thread_num"],
+            enable_rasteration=c["enable_rasteration"],
+        ).without_attr("tilelang_out_idx")
     if w.op == "attention":
-        from examples.flash_attention.example_mha_fwd_bshd import flashattn
+        from examples.flash_attention_sm100.mha_fwd_bshd import flashattn
 
-        return flashattn.jit_impl.get_tir(
+        return flashattn.get_tir(
             batch=p["batch"],
             heads=p["heads"],
             seq_len=p["sequence"],
             dim=p["dim"],
             is_causal=p["causal"],
             dtype=w.dtype,
-            **c,
+            block_M=c["block_M"],
+            block_N=c["block_N"],
+            num_stages=c["num_stages"],
+            variant="ts" if c["threads"] == 256 else "ss",
         )
     if w.op == "kda_chunk_o":
         from examples.kda.chunk_o import tilelang_chunk_fwd_o
@@ -55,10 +76,42 @@ def example_program(w, c):
             threads=c["threads"],
             num_stages=c["num_stages"],
         )
-    from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
+    if w.op == "grouped_gemm":
+        from examples.blockscaled_gemm_sm100.grouped_gemm_mxfp8_blockscaled_1d1d import (
+            grouped_mxfp8_blockscaled_gemm_2cta,
+        )
+
+        return grouped_mxfp8_blockscaled_gemm_2cta.get_tir(
+            M_storage=sum(((size + 127) // 128) * 128 for size in p["batch_sizes"]),
+            N=p["n"],
+            K=p["k"],
+            E=len(p["batch_sizes"]),
+            E1=len(p["batch_sizes"]) + 1,
+            logical_M_total=sum(p["batch_sizes"]),
+            block_M=c["block_M"],
+            block_N=c["block_N"],
+            block_K=c["block_K"],
+            in_dtype=w.dtype,
+            out_dtype="bfloat16",
+            accum_dtype="float32",
+            num_stages=c["num_stages"],
+            max_M_per_E=max(p["batch_sizes"]),
+            transpose_B=p["transpose_b"],
+            sf_granularity_k=128,
+        )
+
+    from examples.gemm_fp8.example_tilelang_gemm_fp8_sm100 import matmul
 
     return matmul.get_tir(
-        M=p["m"], N=p["n"], K=p["k"], dtype=w.dtype, **c
+        M=p["m"],
+        N=p["n"],
+        K=p["k"],
+        trans_A=False,
+        trans_B=True,
+        in_dtype=w.dtype,
+        out_dtype=w.dtype,
+        accum_dtype="float32",
+        **c,
     ).without_attr("tilelang_out_idx")
 
 
@@ -68,7 +121,7 @@ def test_final_programs_are_structurally_identical_to_examples(w, dtype):
     from tilelang import tvm
     from experiments.common.kernels import make_case
 
-    w = w if w.op == "gemm_fp8" else replace(w, dtype=dtype)
+    w = w if w.op in ("gemm_fp8", "grouped_gemm") else replace(w, dtype=dtype)
     case = make_case(w)
     c = EXAMPLE_CONFIGS[w.op]
     assert all(isinstance(cell.cell_contents, (int, float, str, bool, type(None))) for cell in case.build.__closure__ or [])
@@ -77,14 +130,11 @@ def test_final_programs_are_structurally_identical_to_examples(w, dtype):
 
 @pytest.mark.parametrize("target", ["ampere", "hopper", "blackwell", "mi355x"])
 def test_expanded_retains_every_advanced_example_configuration(target):
-    from examples.gemm.example_gemm_advanced_autotune import get_configs
-
     d = Device(target, TARGETS[target])
     for w in core_cases("final")[:2]:
         pool = configurations(w, d)
         assert len(pool) == 2304
-        for c in get_configs(w.parameters["m"], w.parameters["n"], w.parameters["k"]):
-            assert c in pool
+        assert EXAMPLE_CONFIGS["gemm"] in pool
 
 
 @pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)

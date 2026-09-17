@@ -363,7 +363,7 @@
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float16",
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     },
@@ -381,7 +381,7 @@
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float16",
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     },
@@ -398,7 +398,7 @@
         "k": 7168,
         "transpose_b": false
       },
-      "dtype": "float16",
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     },
@@ -415,7 +415,7 @@
         "k": 2048,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     },
@@ -433,7 +433,7 @@
         "k": 2048,
         "transpose_b": true
       },
-      "dtype": "float16",
+      "dtype": "float8_e4m3fn",
       "configs": null,
       "config_space": "expanded"
     }

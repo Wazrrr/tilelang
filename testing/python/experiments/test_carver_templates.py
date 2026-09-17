@@ -37,7 +37,8 @@ def _offline_hopper():
             _workload(
                 "grouped",
                 "grouped_gemm",
-                {"batch_sizes": [31, 65], "n": 128, "k": 64, "transpose_b": True},
+                {"batch_sizes": [31, 65], "n": 256, "k": 128, "transpose_b": True},
+                dtype="float8_e4m3fn",
             ),
             "GroupedMatmulTemplate",
         ),
@@ -52,7 +53,7 @@ def _offline_hopper():
     ],
 )
 def test_each_experiment_family_selects_its_canonical_template(workload, expected):
-    configs = [{"block_M": 64}] if workload.op == "grouped_gemm" else None
+    configs = [{"block_M": 128}] if workload.op == "grouped_gemm" else None
     template = workload_template(workload, configs, arch=_offline_hopper())
     assert type(template).__name__ == expected
 
@@ -109,8 +110,9 @@ def test_grouped_template_preserves_padded_cta_domain():
     workload = _workload(
         "grouped",
         "grouped_gemm",
-        {"batch_sizes": [31, 65], "n": 128, "k": 64, "transpose_b": True},
+        {"batch_sizes": [31, 65], "n": 256, "k": 128, "transpose_b": True},
+        dtype="float8_e4m3fn",
     )
-    template = workload_template(workload, [{"block_M": 64}], arch=_offline_hopper())
-    assert template.M == 3 * 64
-    assert template.block_m == 64
+    template = workload_template(workload, [{"block_M": 128}], arch=_offline_hopper())
+    assert template.M == 2 * 128
+    assert template.block_m == 128

@@ -1,4 +1,4 @@
-"""2,304 native schedules containing the FP8 example's 288-config grid."""
+"""TCGen05 FP8 GEMM tile, pipeline, thread, and rasterization candidates."""
 
 from experiments.utils.grid import grid
 

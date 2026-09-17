@@ -1,4 +1,4 @@
-"""One 2,304-config expansion of the advanced example's 288-config grid."""
+"""TCGen05 GEMM tile, pipeline, thread, and rasterization candidates."""
 
 from experiments.utils.grid import grid
 

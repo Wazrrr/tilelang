@@ -1,4 +1,4 @@
-"""One 320-config pool using the example's native scheduling parameters."""
+"""SM100 MHA-forward tiles, pipeline depths, and SS/TS variants."""
 
 from experiments.utils.grid import grid
 

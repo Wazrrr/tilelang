@@ -17,6 +17,8 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
     SFA,
     SFB,
     offsets,
+    storage_offsets,
+    logical_M_total,
     block_M,
     block_N,
     block_K,
@@ -31,12 +33,12 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
     """Grouped 2CTA MXFP8 blockscaled GEMM.
 
     Logical scale shape follows tilelang_gemm.py:
-      SFA [M_total, sf_k_packed], SFB [E, N, sf_k_packed]
+      SFA [M_storage, sf_k_packed], SFB [E, N, sf_k_packed]
 
     Kernel scale operands are group-major flat buffers so the SF loads can use
     the same contiguous TMA pattern as mxfp8_blockscaled_gemm_2cta.
     """
-    M_total, N, K, E, E1 = T.const("M_total, N, K, E, E1")
+    M_storage, N, K, E, E1 = T.const("M_storage, N, K, E, E1")
 
     assert block_M == 128
     assert block_N == 256
@@ -49,12 +51,13 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
     sf_k_groups = T.ceildiv(T.ceildiv(K, sf_granularity_k), 4)
     assert sf_load_period == 4
 
-    A: T.Tensor[[M_total, K], in_dtype]
+    A: T.Tensor[[M_storage, K], in_dtype]
     B: T.Tensor[[E, N, K] if transpose_B else [E, K, N], in_dtype]
-    SFA: T.Tensor[[sf_k_groups * M_total], T.uint32]
+    SFA: T.Tensor[[sf_k_groups * M_storage], T.uint32]
     SFB: T.Tensor[[sf_k_groups * E * N], T.uint32]
     offsets: T.Tensor[[E1], T.int32]
-    C = T.empty((M_total, N), out_dtype)
+    storage_offsets: T.Tensor[[E1], T.int32]
+    C = T.empty((logical_M_total, N), out_dtype)
 
     n_blocks = T.ceildiv(N, block_N)
     max_M_blocks = T.ceildiv(max_M_per_E, block_M)
@@ -89,12 +92,14 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
         warp_idx = tx // 32
         T.use_swizzle(16)
 
-        start_m = offsets[eid]
-        end_m = offsets[eid + 1]
-        m_size = end_m - start_m
+        output_start_m = offsets[eid]
+        output_end_m = offsets[eid + 1]
+        input_start_m = storage_offsets[eid]
+        m_size = output_end_m - output_start_m
         expert_m_blocks = T.ceildiv(m_size, block_M)
         clamped_pid_m = T.min(pid_m, T.max(expert_m_blocks, 1) - 1)
-        tile_m = start_m + clamped_pid_m * block_M
+        input_tile_m = input_start_m + clamped_pid_m * block_M
+        output_tile_m = output_start_m + clamped_pid_m * block_M
 
         if warp_idx == 0:
             for k in T.serial(k_iters):
@@ -102,7 +107,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
                 phase = (k // num_stages) & 1
                 T.mbarrier_wait_parity(consumed[stage], phase ^ 1)
                 T.tma_copy(
-                    A[tile_m : tile_m + block_M, k * block_K : (k + 1) * block_K],
+                    A[input_tile_m : input_tile_m + block_M, k * block_K : (k + 1) * block_K],
                     A_shared[stage, :, :],
                     barrier=loaded[stage],
                 )
@@ -129,7 +134,12 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
                 if k % sf_load_period == 0:
                     sf_group_idx = k // sf_load_period
                     T.tma_copy(
-                        SFA[sf_group_idx * M_total + tile_m : sf_group_idx * M_total + tile_m + block_M],
+                        SFA[
+                            sf_group_idx * M_storage
+                            + input_tile_m : sf_group_idx * M_storage
+                            + input_tile_m
+                            + block_M
+                        ],
                         SFA_shared[stage, :],
                         barrier=loaded[stage],
                     )
@@ -179,15 +189,15 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
         T.mbarrier_wait_parity(tmem_full, 0)
         T.copy(C_tmem, C_local)
 
-        if pid_m * block_M < m_size and tile_m + block_M <= end_m:
+        if pid_m * block_M < m_size and output_tile_m + block_M <= output_end_m:
             T.copy(C_local, C_shared)
-            T.copy(C_shared, C[tile_m, pid_n * block_N])
+            T.copy(C_shared, C[output_tile_m, pid_n * block_N])
         elif pid_m * block_M < m_size:
             T.copy(C_local, C_local_cast)
-            actual_rows = end_m - tile_m
+            actual_rows = output_end_m - output_tile_m
             for i, j in T.Parallel(block_M, block_N):
                 if i < actual_rows and pid_n * block_N + j < N:
-                    C[tile_m + i, pid_n * block_N + j] = C_local_cast[i, j]
+                    C[output_tile_m + i, pid_n * block_N + j] = C_local_cast[i, j]
 
     return C
 
@@ -199,6 +209,8 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
     SFA,
     SFB,
     offsets,
+    storage_offsets,
+    logical_M_total,
     block_M,
     block_N,
     block_K,
@@ -212,7 +224,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
     store_block_N=64,
 ):
     """Persistent grouped 2CTA MXFP8 blockscaled GEMM with one accumulator TMEM."""
-    M_total, N, K, E, E1 = T.const("M_total, N, K, E, E1")
+    M_storage, N, K, E, E1 = T.const("M_storage, N, K, E, E1")
 
     assert block_M == 128
     assert block_N == 256
@@ -225,12 +237,13 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
     sf_k_groups = T.ceildiv(T.ceildiv(K, sf_granularity_k), 4)
     assert sf_load_period == 4
 
-    A: T.Tensor[[M_total, K], in_dtype]
+    A: T.Tensor[[M_storage, K], in_dtype]
     B: T.Tensor[[E, N, K] if transpose_B else [E, K, N], in_dtype]
-    SFA: T.Tensor[[sf_k_groups * M_total], T.uint32]
+    SFA: T.Tensor[[sf_k_groups * M_storage], T.uint32]
     SFB: T.Tensor[[sf_k_groups * E * N], T.uint32]
     offsets: T.Tensor[[E1], T.int32]
-    C = T.empty((M_total, N), out_dtype)
+    storage_offsets: T.Tensor[[E1], T.int32]
+    C = T.empty((logical_M_total, N), out_dtype)
 
     sm_num = driver.get_num_sms()
     num_clusters = sm_num // 2
@@ -285,13 +298,14 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
                 pid_n = (local_tile_id % num_pid_in_group) // group_m
 
                 if tile_id < total_cluster_tiles:
-                    start_m = offsets[eid]
-                    end_m = offsets[eid + 1]
-                    m_size = end_m - start_m
+                    output_start_m = offsets[eid]
+                    output_end_m = offsets[eid + 1]
+                    input_start_m = storage_offsets[eid]
+                    m_size = output_end_m - output_start_m
                     expert_m_blocks = T.ceildiv(m_size, block_M)
                     pid_m = pid_m_cluster * 2 + cta_id
                     safe_pid_m = T.min(pid_m, T.max(expert_m_blocks, 1) - 1)
-                    tile_m = start_m + safe_pid_m * block_M
+                    input_tile_m = input_start_m + safe_pid_m * block_M
 
                     for k in T.serial(k_iters):
                         phase = w * k_iters + k
@@ -299,7 +313,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
                         parity = (phase // num_stages) & 1
                         T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
                         T.tma_copy(
-                            A[tile_m : tile_m + block_M, k * block_K : (k + 1) * block_K],
+                            A[input_tile_m : input_tile_m + block_M, k * block_K : (k + 1) * block_K],
                             A_shared[stage, :, :],
                             barrier=loaded[stage],
                         )
@@ -326,7 +340,12 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
                         if k % sf_load_period == 0:
                             sf_group_idx = k // sf_load_period
                             T.tma_copy(
-                                SFA[sf_group_idx * M_total + tile_m : sf_group_idx * M_total + tile_m + block_M],
+                                SFA[
+                                    sf_group_idx * M_storage
+                                    + input_tile_m : sf_group_idx * M_storage
+                                    + input_tile_m
+                                    + block_M
+                                ],
                                 SFA_shared[stage, :],
                                 barrier=loaded[stage],
                             )
@@ -404,24 +423,24 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
                 pid_m = pid_m_cluster * 2 + cta_id
 
                 if tile_id < total_cluster_tiles:
-                    start_m = offsets[eid]
-                    end_m = offsets[eid + 1]
-                    m_size = end_m - start_m
-                    tile_m = start_m + pid_m * block_M
+                    output_start_m = offsets[eid]
+                    output_end_m = offsets[eid + 1]
+                    m_size = output_end_m - output_start_m
+                    output_tile_m = output_start_m + pid_m * block_M
                     T.mbarrier_wait_parity(tmem_full, w & 1)
                     T.copy(C_tmem, C_local)
                     T.mbarrier_arrive(tmem_empty, 0)
 
-                    if pid_m * block_M < m_size and tile_m + block_M <= end_m:
+                    if pid_m * block_M < m_size and output_tile_m + block_M <= output_end_m:
                         for i in T.unroll(T.ceildiv(block_N, store_block_N)):
                             T.copy(C_local[:, i * store_block_N : (i + 1) * store_block_N], C_shared)
-                            T.copy(C_shared, C[tile_m, pid_n * block_N + i * store_block_N])
+                            T.copy(C_shared, C[output_tile_m, pid_n * block_N + i * store_block_N])
                     elif pid_m * block_M < m_size:
                         T.copy(C_local, C_local_cast)
-                        actual_rows = end_m - tile_m
+                        actual_rows = output_end_m - output_tile_m
                         for i, j in T.Parallel(block_M, block_N):
                             if i < actual_rows and pid_n * block_N + j < N:
-                                C[tile_m + i, pid_n * block_N + j] = C_local_cast[i, j]
+                                C[output_tile_m + i, pid_n * block_N + j] = C_local_cast[i, j]
 
     return C
 
@@ -484,8 +503,11 @@ def quantize_fp8_with_packed_ue8m0_rows(x, gran_k=128):
     return x_fp8, pack_sf_u8_to_u32_rows(sf_u8_padded), sf_u8
 
 
-def grouped_blockscaled_gemm_ref(a, b, sfa_packed, sfb_packed, offsets, sf_granularity_k=128, transpose_B=True):
-    m_total, k = a.shape
+def grouped_blockscaled_gemm_ref(
+    a, b, sfa_packed, sfb_packed, offsets, storage_offsets=None, sf_granularity_k=128, transpose_B=True
+):
+    _, k = a.shape
+    m_total = int(offsets[-1].item())
     if transpose_B:
         e, n, k2 = b.shape
     else:
@@ -504,13 +526,15 @@ def grouped_blockscaled_gemm_ref(a, b, sfa_packed, sfb_packed, offsets, sf_granu
     for eid in range(e):
         start = int(offsets[eid].item())
         end = int(offsets[eid + 1].item())
+        input_start = start if storage_offsets is None else int(storage_offsets[eid].item())
         if start == end:
             continue
         out = torch.zeros((end - start, n), device=a.device, dtype=torch.float32)
         for bi in range(sf_k_blocks):
             k_start = bi * sf_granularity_k
             k_end = min(k_start + sf_granularity_k, k)
-            a_block = a_f32[start:end, k_start:k_end] * sfa_scales[start:end, bi : bi + 1]
+            input_end = input_start + end - start
+            a_block = a_f32[input_start:input_end, k_start:k_end] * sfa_scales[input_start:input_end, bi : bi + 1]
             if transpose_B:
                 b_block = b_f32[eid, :, k_start:k_end] * sfb_scales[eid, :, bi : bi + 1]
                 out += a_block @ b_block.T
@@ -539,6 +563,8 @@ def run_grouped_mxfp8_blockscaled_gemm(
     sfa_flat,
     sfb_flat,
     offsets,
+    storage_offsets,
+    logical_M_total,
     max_M_per_E,
     transpose_B=True,
     persistent=True,
@@ -548,12 +574,13 @@ def run_grouped_mxfp8_blockscaled_gemm(
     num_stages = 6
     sf_granularity_k = 128
 
-    m_total, k = a.shape
+    m_storage, k = a.shape
     if transpose_B:
         _, n, k2 = b.shape
     else:
         _, k2, n = b.shape
     assert k == k2
+    assert logical_M_total <= m_storage
     assert n % block_N == 0, f"N={n} not divisible by {block_N}"
     assert k % block_K == 0, f"K={k} not divisible by {block_K}"
 
@@ -564,6 +591,8 @@ def run_grouped_mxfp8_blockscaled_gemm(
         sfa_flat,
         sfb_flat,
         offsets,
+        storage_offsets,
+        logical_M_total,
         block_M,
         block_N,
         block_K,
@@ -600,9 +629,18 @@ def main():
     k = args.K
 
     offsets = make_offsets(batch_sizes, device)
+    storage_sizes = [((size + 127) // 128) * 128 for size in batch_sizes]
+    storage_offsets = make_offsets(storage_sizes, device)
     max_M_per_E = max(batch_sizes)
 
-    x = torch.randn(m_total, k, device=device, dtype=torch.float16)
+    m_storage = sum(storage_sizes)
+    x = torch.zeros(m_storage, k, device=device, dtype=torch.float16)
+    logical_x = torch.randn(m_total, k, device=device, dtype=torch.float16)
+    logical_start = 0
+    for eid, size in enumerate(batch_sizes):
+        input_start = int(storage_offsets[eid].item())
+        x[input_start : input_start + size] = logical_x[logical_start : logical_start + size]
+        logical_start += size
     w_nt = torch.randn(e, n, k, device=device, dtype=torch.float16)
 
     a, sfa, _ = quantize_fp8_with_packed_ue8m0_rows(x)
@@ -620,11 +658,15 @@ def main():
         sfa_flat,
         sfb_flat,
         offsets,
+        storage_offsets,
+        m_total,
         max_M_per_E,
         transpose_B,
         persistent,
     )
-    ref_c = grouped_blockscaled_gemm_ref(a, b, sfa, sfb, offsets, transpose_B=transpose_B).to(torch.bfloat16)
+    ref_c = grouped_blockscaled_gemm_ref(
+        a, b, sfa, sfb, offsets, storage_offsets, transpose_B=transpose_B
+    ).to(torch.bfloat16)
     sim = cosine_similarity(c, ref_c)
     max_abs = (c.float() - ref_c.float()).abs().max().item()
 
@@ -645,6 +687,8 @@ def main():
                 sfa_flat,
                 sfb_flat,
                 offsets,
+                storage_offsets,
+                m_total,
                 max_M_per_E,
                 transpose_B,
                 persistent,

@@ -8,7 +8,6 @@ import tilelang.language as T
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT: True,
     },
 )
 def matmul(
@@ -24,6 +23,7 @@ def matmul(
     accum_dtype,
     num_stages,
     threads,
+    enable_rasteration=False,
 ):
     M, N, K = T.const("M, N, K")
     A_shape = (K, M) if trans_A else (M, K)
@@ -42,6 +42,8 @@ def matmul(
         mbar = T.alloc_barrier(1)
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
         C_shared = T.alloc_shared((block_M, block_N), out_dtype)
+
+        T.use_swizzle(panel_size=10, enable=enable_rasteration)
 
         for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
             T.copy(A[by * block_M, k * block_K], A_shared)
@@ -72,47 +74,47 @@ def calc_diff(x, y):
     return 1 - sim
 
 
-M, N, K = 4096, 4096, 8192
-block_M, block_N, block_K = 64, 256, 32
-trans_A, trans_B = False, True
-num_stages = 2
-threads = 256
-for tvm_fp8_dtype in [T.float8_e4m3fn, T.float8_e5m2]:
-    for tvm_acc_dtype in [T.float16, T.float32]:  # , torch.float16]:
-        torch_fp8_dtype = tvm_fp8_dtype.as_torch()
-        torch_acc_dtype = tvm_acc_dtype.as_torch()
-        print(f"running {tvm_fp8_dtype} -> {tvm_acc_dtype}")
-        in_dtype, out_dtype, accum_dtype = tvm_fp8_dtype, tvm_acc_dtype, tvm_acc_dtype
+def main():
+    M, N, K = 4096, 4096, 8192
+    block_M, block_N, block_K = 64, 256, 32
+    trans_A, trans_B = False, True
+    num_stages = 2
+    threads = 256
+    for tvm_fp8_dtype in [T.float8_e4m3fn, T.float8_e5m2]:
+        for tvm_acc_dtype in [T.float16, T.float32]:
+            torch_fp8_dtype = tvm_fp8_dtype.as_torch()
+            print(f"running {tvm_fp8_dtype} -> {tvm_acc_dtype}")
+            in_dtype, out_dtype, accum_dtype = tvm_fp8_dtype, tvm_acc_dtype, tvm_acc_dtype
 
-        jit_kernel = matmul.compile(
-            M=M,
-            N=N,
-            K=K,
-            block_M=block_M,
-            block_N=block_N,
-            block_K=block_K,
-            trans_A=trans_A,
-            trans_B=trans_B,
-            in_dtype=in_dtype,
-            out_dtype=out_dtype,
-            accum_dtype=accum_dtype,
-            num_stages=num_stages,
-            threads=threads,
-        )
-        # jit_kernel.export_ptx("./dump.ptx")
-        # jit_kernel.export_sources("./dump.cu")
+            jit_kernel = matmul.compile(
+                M=M,
+                N=N,
+                K=K,
+                block_M=block_M,
+                block_N=block_N,
+                block_K=block_K,
+                trans_A=trans_A,
+                trans_B=trans_B,
+                in_dtype=in_dtype,
+                out_dtype=out_dtype,
+                accum_dtype=accum_dtype,
+                num_stages=num_stages,
+                threads=threads,
+            )
 
-        a = torch.randn(M, K, device="cuda", dtype=torch.float16).to(torch_fp8_dtype)
-        b = torch.randn(N, K, device="cuda", dtype=torch.float16).to(torch_fp8_dtype)
+            a = torch.randn(M, K, device="cuda", dtype=torch.float16).to(torch_fp8_dtype)
+            b = torch.randn(N, K, device="cuda", dtype=torch.float16).to(torch_fp8_dtype)
 
-        c = jit_kernel(a, b)
-        ref_c = (a.to(torch.half) @ b.T.to(torch.half)).float()
-        c = c.float()
-        diff = calc_diff(c, ref_c)
-        # assert diff < 1e-3, f"{diff}"
-        print(f"[{tvm_fp8_dtype} -> {tvm_acc_dtype}] diff = {diff}")
+            c = jit_kernel(a, b)
+            ref_c = (a.to(torch.half) @ b.T.to(torch.half)).float()
+            diff = calc_diff(c.float(), ref_c)
+            print(f"[{tvm_fp8_dtype} -> {tvm_acc_dtype}] diff = {diff}")
 
-        profiler = jit_kernel.get_profiler()
-        latency = profiler.do_bench()
-        print(f"[{tvm_fp8_dtype} -> {tvm_acc_dtype}] Latency: {latency} ms")
-        print(f"[{tvm_fp8_dtype} -> {tvm_acc_dtype}] Flops: {2 * M * N * K / (latency / 1e3) / 1e12} TFLOPS")
+            profiler = jit_kernel.get_profiler()
+            latency = profiler.do_bench()
+            print(f"[{tvm_fp8_dtype} -> {tvm_acc_dtype}] Latency: {latency} ms")
+            print(f"[{tvm_fp8_dtype} -> {tvm_acc_dtype}] Flops: {2 * M * N * K / (latency / 1e3) / 1e12} TFLOPS")
+
+
+if __name__ == "__main__":
+    main()

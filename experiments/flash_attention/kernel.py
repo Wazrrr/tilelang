@@ -1,4 +1,4 @@
-"""Inputs and reference for the BSHD FlashAttention example."""
+"""Inputs and reference for the SM100 BSHD MHA-forward example."""
 
 from experiments.utils.kernel import KernelCase, _random
 
@@ -9,15 +9,15 @@ _ATTENTION_LOCK = Lock()
 
 
 def _attention_program(**kwargs):
-    from examples.flash_attention.example_mha_fwd_bshd import flashattn
+    from examples.flash_attention_sm100.mha_fwd_bshd import flashattn
 
     with _ATTENTION_LOCK:
-        return flashattn.jit_impl.get_tir(**kwargs)
+        return flashattn.get_tir(**kwargs)
 
 
 def make_case(w):
-    # Reuse the existing FlashAttention algorithm, including its stable online
-    # softmax. The eager builder is mutable, so serialize elaboration only.
+    # Reuse the SM100 MHA-forward algorithm and its stable online softmax. The
+    # eager builder is mutable, so serialize elaboration only.
     p = w.parameters
     batch, heads, sequence, dim = (p[key] for key in ("batch", "heads", "sequence", "dim"))
     causal = p.get("causal", False)
@@ -32,8 +32,8 @@ def make_case(w):
             is_causal=causal,
             block_M=block_M,
             block_N=block_N,
+            variant="ts" if threads == 256 else "ss",
             num_stages=num_stages,
-            threads=threads,
             dtype=dtype,
         )
 

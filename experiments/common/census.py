@@ -100,7 +100,7 @@ def main(argv=None, *, family=None):
     from .spec import Workload
 
     provenance = dict(
-        source_sha256=source_hashes("experiments/common/kernels.py", "examples/flash_attention/example_mha_fwd_bshd.py"),
+        source_sha256=source_hashes("experiments/common/kernels.py", "examples/flash_attention_sm100/mha_fwd_bshd.py"),
         native_build=KernelCache._get_tilelang_lib_stamp(),
     )
     if (root / "provenance.json").exists() and json.loads((root / "provenance.json").read_text()) != provenance:

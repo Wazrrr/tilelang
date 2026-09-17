@@ -10,7 +10,7 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 2304}
+COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 2304, "grouped_gemm": 2}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 
@@ -37,7 +37,8 @@ def test_retired_presets_are_rejected(w, preset):
 def test_explicit_native_configs_must_select_from_same_pool(w):
     device = Device("hopper", TARGETS["hopper"])
     pool = family_module(w.op, "spaces").get_configs()
-    assert configuration_space(replace(w, configs=pool[7:10]), device)["configs"] == pool[7:10]
+    selected = pool if len(pool) < 10 else pool[7:10]
+    assert configuration_space(replace(w, configs=selected), device)["configs"] == selected
     with pytest.raises(ValueError, match="subset"):
         configuration_space(replace(w, configs=[dict(pool[0], threads=123)]), device)
     with pytest.raises(ValueError, match="subset"):
@@ -45,23 +46,23 @@ def test_explicit_native_configs_must_select_from_same_pool(w):
 
 
 def test_every_example_config_and_explicit_default_is_included():
-    from examples.flash_attention.example_mha_fwd_bshd import get_configs as fa_configs
     from examples.kda.chunk_o import get_configs as kda_configs
 
     fa = family_module("attention", "spaces").get_configs()
     kda = family_module("kda_chunk_o", "spaces").get_configs()
     fp8 = family_module("gemm_fp8", "spaces").get_configs()
-    assert len(fa_configs()) == 1 and all(c in fa for c in fa_configs())
     assert dict(block_M=128, block_N=128, num_stages=1, threads=128) in fa
     assert len(kda_configs()) == 90 and len(kda) == 8 * len(kda_configs())
     assert all(c in kda for c in kda_configs())
     assert dict(block_DK=64, block_DV=64, num_stages=0, threads=256) in kda
-    from examples.gemm_fp8.example_gemm_fp8_tiletune import get_configs as fp8_configs
-
     assert len(fp8) == 2304
-    assert all(c in fp8 for c in fp8_configs())
     assert dict(block_M=32, block_N=192, block_K=128, num_stages=2, threads=256, enable_rasteration=True) in fp8
-    assert dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False) in fp8
+    assert dict(block_M=64, block_N=256, block_K=32, num_stages=2, threads=256, enable_rasteration=False) in fp8
+    grouped = family_module("grouped_gemm", "spaces").get_configs()
+    assert grouped == [
+        dict(block_M=128, block_N=256, block_K=128, num_stages=6, threads=128, persistent=False),
+        dict(block_M=128, block_N=256, block_K=128, num_stages=6, threads=256, persistent=True),
+    ]
 
 
 def test_every_case_split_and_frozen_manifest_use_the_single_pool():
@@ -74,7 +75,11 @@ def test_every_case_split_and_frozen_manifest_use_the_single_pool():
     for w in CASES:
         assert len(plan["subsets"]["hopper"][w.name]["indices"]) == COUNTS[w.op]
     smoke = study_plan("smoke", [Device("hopper", TARGETS["hopper"])])
-    assert all(len(s["indices"]) == 16 for s in smoke["subsets"]["hopper"].values())
+    assert all(
+        len(smoke["subsets"]["hopper"][w.name]["indices"]) == min(16, COUNTS[w.op])
+        for w in CASES
+        if w.name in smoke["subsets"]["hopper"]
+    )
 
 
 def test_recurrent_kda_is_not_silently_substituted_by_chunk_output():

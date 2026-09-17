@@ -356,11 +356,7 @@ def run_native(request, output):
             max_local_bytes=None,
             **exploration_options(settings, TileTuneConfig),
         )
-    extra_sources = (
-        ("examples/flash_attention/example_mha_fwd_bshd.py", "examples/flash_attention/example_mha_tiletune.py")
-        if workload.op == "attention"
-        else ()
-    )
+    extra_sources = (("examples/flash_attention_sm100/mha_fwd_bshd.py",) if workload.op == "attention" else ())
     hashes = source_hashes("experiments/common/kernels.py", *extra_sources)
     xgb_report = None
     native_build = KernelCache._get_tilelang_lib_stamp()

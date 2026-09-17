@@ -16,10 +16,10 @@ from experiments.xgboost.data import digest
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = {
-    "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
-    "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
-    "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
-    "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
+    "gemm": "examples/gemm_sm100/gemm_tcgen5mma.py",
+    "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8_sm100.py",
+    "grouped_gemm": "examples/blockscaled_gemm_sm100/grouped_gemm_mxfp8_blockscaled_1d1d.py",
+    "flash_attention": "examples/flash_attention_sm100/mha_fwd_bshd.py",
     "kda": "examples/kda/chunk_o.py",
 }
 

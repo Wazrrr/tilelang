@@ -12,9 +12,12 @@ def carver_support_reason(workload, device):
     from experiments.families import family_module
 
     try:
-        family_module(workload.op, "carver")
+        adapter = family_module(workload.op, "carver")
     except ModuleNotFoundError:
         return f"no Carver template adapter for {workload.op}"
+    adapter_reason = getattr(adapter, "support_reason", lambda _workload, _device: None)(workload, device)
+    if adapter_reason:
+        return adapter_reason
     return None
 
 
