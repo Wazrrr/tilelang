@@ -10,7 +10,7 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 288}
+COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 2304}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 
@@ -58,8 +58,9 @@ def test_every_example_config_and_explicit_default_is_included():
     assert dict(block_DK=64, block_DV=64, num_stages=0, threads=256) in kda
     from examples.gemm_fp8.example_gemm_fp8_tiletune import get_configs as fp8_configs
 
-    assert len(fp8) == 288
+    assert len(fp8) == 2304
     assert all(c in fp8 for c in fp8_configs())
+    assert dict(block_M=32, block_N=192, block_K=128, num_stages=2, threads=256, enable_rasteration=True) in fp8
     assert dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False) in fp8
 
 

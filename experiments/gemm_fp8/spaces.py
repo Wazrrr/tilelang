@@ -1,13 +1,13 @@
-"""The 288 configurations declared by the repository FP8 GEMM example."""
+"""2,304 native schedules containing the FP8 example's 288-config grid."""
 
 from experiments.utils.grid import grid
 
 
 def get_configs():
     return grid(
-        block_M=[64, 128, 256],
-        block_N=[64, 128, 256],
-        block_K=[32, 64],
+        block_M=[32, 64, 96, 128, 192, 256],
+        block_N=[32, 64, 96, 128, 192, 256],
+        block_K=[32, 64, 96, 128],
         num_stages=[0, 1, 2, 3],
         threads=[128, 256],
         enable_rasteration=[True, False],

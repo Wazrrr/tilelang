@@ -33,7 +33,7 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 6 gives each final family exactly one `expanded` pool. Each pool
+Space version 7 gives each final family exactly one `expanded` pool. Each pool
 uses the example's native parameters and includes its original configs/defaults.
 The same complete domain is used for both cases and all native targets.
 
@@ -42,7 +42,7 @@ The same complete domain is used for both cases and all native targets.
 | [GEMM](../gemm/README.md) | 2,304 | All 288 autotune configs; 8× expansion |
 | [FlashAttention](../flash_attention/README.md) | 320 | Single autotune config and explicit 128/128 launch |
 | [KDA chunk output](../kda/README.md) | 720 | All 90 autotune configs; 8× expansion |
-| [FP8 GEMM](../gemm_fp8/README.md) | 288 | Complete native E4M3/E5M2 example grid |
+| [FP8 GEMM](../gemm_fp8/README.md) | 2,304 | Complete native grid plus expanded tile dimensions |
 
 Shapes, dtype, causal mode and chunk size are workload properties. They do not
 multiply the config count. Full sweeps have no cap, protected subset or
@@ -497,7 +497,7 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 shape from each of five families with deterministic subsets. Development uses
 twenty-five cases and up to 256
 configurations; final uses the complete `expanded` pools (GEMM 2,304,
-FlashAttention 320, KDA 720, FP8 GEMM 288, and grouped GEMM 192 per case) and three seeds. See
+FlashAttention 320, KDA 720, FP8 GEMM 2,304, and grouped GEMM 192 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 

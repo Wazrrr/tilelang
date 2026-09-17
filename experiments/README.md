@@ -51,7 +51,7 @@ A development run uses five test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
 The four final kernels call their [example builders directly](example_alignment.md).
 Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, FP8 GEMM 288, and grouped GEMM 192 configs per case. There is no cap or structural
+KDA 720, FP8 GEMM 2,304, and grouped GEMM 192 configs per case. There is no cap or structural
 prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 

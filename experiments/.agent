@@ -88,7 +88,7 @@ contract, not tuning-method choices.
   Smoke/development and explicit config requests select original pool indices;
   they do not define a new pool. All tuning methods use the same ordered pool.
 
-Current counts per case are GEMM 2,304 (288 × 8), FP8 GEMM 288, grouped GEMM
+Current counts per case are GEMM 2,304 (288 × 8), FP8 GEMM 2,304, grouped GEMM
 192, attention 320, and KDA 720 (90 × 8). Counts describe declared candidates,
 not guaranteed compilable or distinct generated kernels. An intentional pool
 change needs new identities and results; review `common/spaces.py::SPACE_VERSION`

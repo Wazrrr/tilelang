@@ -16,7 +16,7 @@ This records the initial alignment checkpoint. All four families then had one
 complete expanded pool and no local/legacy experiment kernels: GEMM 2,304,
 FlashAttention 320, KDA 720 and softmax 224 configs per case. See the
 [current family contracts](README.md). Pool counts and measured results below
-describe the earlier checkpoint, not the current space-version-6 pools.
+describe the earlier checkpoint, not the current space-version-7 pools.
 
 The final eight cases now build their TileLang programs by calling the example
 builders directly. This replaces the separate implementations selected by the
