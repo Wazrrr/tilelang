@@ -104,7 +104,7 @@ def sweep(study, ks, percents, methods):
                 raise ValueError(f"ranking changed since the original comparison: {path}, {name}")
             curves = {c["k"]: c for c in method["curves"]}
             old20 = next((c for c in references[name]["curves"] if c["k"] == 20), None)
-            if old20 is not None and curves[20]["oracle_at_k"] != old20["oracle_at_k"]:
+            if saved.get("version") == result["version"] and old20 is not None and curves[20]["oracle_at_k"] != old20["oracle_at_k"]:
                 raise ValueError(f"Oracle@20 differs from the original comparison: {path}, {name}")
             if method["status"] == "evaluated" and method["candidate_count"] != result["oracle"]["candidate_count"]:
                 raise ValueError(f"method does not record the full configuration pool: {path}, {name}")
@@ -150,7 +150,7 @@ def sweep(study, ks, percents, methods):
             families={family: aggregate([r for r in subset if r["family"] == family]) for family in sorted({r["family"] for r in subset})},
         )
     return dict(
-        version=1,
+        version=2,
         study=provenance(study / "comparison.json"),
         completed_comparisons=len(paths),
         semantics=dict(
@@ -158,7 +158,8 @@ def sweep(study, ks, percents, methods):
             exact_hit="At least one candidate has exactly the minimum recorded oracle latency; tied minima count, rounded 100% does not",
             percentages="ceil(percent * total declared pool / 100), including failed and model-excluded configurations in the denominator",
             order="Finite eligible scores in saved order; unknown/rejected candidates remain excluded; compile/check failures consume K",
-            cutoff="Maximum first-hit position across every case/seed; null when any oracle is unreachable",
+            cutoff="Maximum first-hit primary-score group tail rank across every case/seed; null when any oracle is unreachable",
+            ties="Only complete equal-primary-score groups within K count in ranking curves; saved selections retain their actual contents",
             repeats="TileTune includes every saved seed; fixed baselines count once per workload",
         ),
         aggregate=groups,

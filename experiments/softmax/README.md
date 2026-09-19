@@ -34,7 +34,10 @@ This checks CPU analysis coverage only. It performs no compiler lowering, GPU
 execution, numerical correctness comparison, or oracle measurement. A finite
 score does not prove compilation success or good ranking: all eight large-shape
 configurations tie, and changing only the thread count never changes this memory
-score. Dependencies and liveness remain reported facts/resource-policy inputs;
+score. Under the conservative tie rule, all eight large-shape candidates have
+rank 8/8. A runtime top-K cutoff inside that group retains all eight; a strict
+50% evaluation cannot claim that it identifies any particular winner.
+Dependencies and liveness remain reported facts/resource-policy inputs;
 the simplified score does not estimate dependency critical paths, reduction
 service time, or thread-dependent occupancy.
 

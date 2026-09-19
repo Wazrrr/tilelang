@@ -122,6 +122,12 @@ records violations without enforcing this gate. A positive `top_k` still
 excludes unscored and pressure-rejected entries and freezes selection before
 compilation. Failed selected candidates are never replaced.
 
+Equal primary scores share their group's last rank. Runtime selection retains
+the complete group at the K boundary, so `selected_count` may exceed requested
+K; `budget_excess` records the difference. `position` is only the deterministic
+report order. Offline strict-budget comparisons require the whole group to fit
+within K before counting its oracle hit.
+
 For timing, read `compute.estimate_phase_cycles`,
 `schedule.buffer_transition`, `pipeline.estimate_pipeline_cycles`, then
 `ranking.apply_ranking_metric`. Ranking recomputes timing with modeled CTA
@@ -212,11 +218,12 @@ rates. Use your measured `performance_model` for performance interpretation.
 
 Use `TileTuneConfig(ranking_metric="memory", ...)` to rank by logical memory
 work without compute profiles, pipeline timing, or occupancy prediction. The
-target's SM count is required. Equal byte-work scores are ordered by fewer
-memory operations, then original configuration index. Storage and dependency
-facts remain available; unresolved scheduling or a soft register estimate does
+target's SM count is required. Equal byte-work scores share their group's tail
+rank; memory operations and original index only order report entries. Storage
+and dependency facts remain available; unresolved scheduling or a soft register estimate does
 not prevent a memory score. Explicit resource policies still apply.
 
-This opt-in path scores every oracle winner within the first half of its pool
-in the saved 25-case H200 study. It has lower quality at small budgets than the
-existing timing model. See [the implementation, results and limitations](../../experiments/MEMORY_RANKING.md).
+This opt-in path scores every oracle winner in the saved 25-case H200 study.
+Conservative tie ranks reach 20/25 within 50% and all 25 at a ceil-rounded 58%
+budget. It has lower quality at small budgets than the existing timing model.
+See [the implementation, results and limitations](../../experiments/MEMORY_RANKING.md).

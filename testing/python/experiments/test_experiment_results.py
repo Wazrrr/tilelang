@@ -27,6 +27,9 @@ def test_measured_winner_uses_model_rank_and_preserves_ties():
     assert result["predicted_rank"] == 3
     assert (result["tie_first_rank"], result["tie_last_rank"]) == (2, 3)
     assert result["scored_candidates"] == result["total_candidates"] == 4
+    first_in_tie = winner_summary(data, {"block": 192}, 0.5)
+    assert first_in_tie["predicted_rank"] == 3
+    assert first_in_tie["report_position"] == 2
     # Candidate measurements never alter the precomputed model ranking.
     for record in data["configs"]:
         record["latency_ms"] = record["index"] / 100

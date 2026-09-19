@@ -7,8 +7,9 @@ def score_memory(accesses, grid_blocks, sm_count):
     Each access describes a tile transfer or a scalar access and its loop visits.
     Predicates and tail masks may suppress work: these are logical upper estimates,
     not measured DRAM traffic. One CTA per SM is an ordering convention, not an
-    occupancy claim. The secondary key favors fewer transfer/dependency events
-    only when the byte scores are exactly equal. No hardware rates are needed.
+    occupancy claim. The secondary key orders equal-score report entries by
+    transfer count; it does not split their conservative rank group. No hardware
+    rates are needed.
     """
     unknown = []
     for name, value in (("grid_blocks", grid_blocks), ("sm_count", sm_count)):
@@ -43,7 +44,7 @@ def score_memory(accesses, grid_blocks, sm_count):
         assumptions=[
             "padded and predicated logical accesses; no transaction, cache, coalescing or bandwidth model",
             "single-CTA waves account for grid size without predicting physical residency",
-            "memory-event count breaks byte-score ties; no compute or overlap timing is estimated",
+            "memory events order tied report entries; primary-score ties share one tail rank; no compute or overlap timing",
             "storage and scheduling uncertainty do not exclude a resolved memory score",
         ],
     )

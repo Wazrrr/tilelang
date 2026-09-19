@@ -142,14 +142,13 @@ def replay(study, output):
         if original_manifest.is_file():
             (target / "experiment.json").write_bytes(original_manifest.read_bytes())
         n = len(records)
-        ks = sorted({20, 100, (n + 4) // 5, (n + 1) // 2, n})
-        comparison = compare(saved["oracle"]["sources"][0]["path"], {"tiletune": ranked_path}, ks)
+        ks = sorted({20, 100, (n + 4) // 5, (n + 1) // 2, (58 * n + 99) // 100, n})
+        comparison = compare(saved["oracle"]["sources"][0]["path"], {"tiletune": ranked_path, "previous_tiletune": ref["path"]}, ks)
         if comparison["oracle"]["sources"] != saved["oracle"]["sources"]:
             raise ValueError("oracle changed since the original study")
         (target / "oracle-curves.json").write_text(json.dumps(comparison, indent=2, allow_nan=False) + "\n")
         method = comparison["methods"][0]
         first = method["first_oracle_hit_k"]
-        original_records = {r["index"]: r for r in report["configs"]}
         rows.append(
             dict(
                 workload=name,
@@ -163,14 +162,9 @@ def replay(study, output):
                 hits_20_percent=first is not None and first <= (n + 4) // 5,
                 hits_50_percent=first is not None and first <= (n + 1) // 2,
                 scoring_seconds=scoring_seconds,
-                old_first_oracle_hit_k=next(
-                    (
-                        i + 1
-                        for i, r in enumerate(v for v in report["ranking"] if v["tier"] == "eligible")
-                        if original_records[r["index"]]["config"] == comparison["oracle"]["best_config"]
-                    ),
-                    None,
-                ),
+                old_first_oracle_hit_k=comparison["methods"][1]["first_oracle_hit_k"],
+                old_curves=comparison["methods"][1]["curves"],
+                oracle_candidates=method["oracle_candidates"],
                 source=ref,
                 ranking=provenance(ranked_path),
                 curves=method["curves"],
@@ -183,13 +177,28 @@ def replay(study, output):
         study=provenance(study / "comparison.json"),
         code=[
             provenance(root / p)
-            for p in ("tiletune_core/memory.py", "tiletune_core/ranking.py", "tilelang/tiletune/memory.py", "experiments/replay_memory.py")
+            for p in (
+                "tiletune_core/memory.py",
+                "tiletune_core/ranking.py",
+                "tilelang/tiletune/memory.py",
+                "experiments/replay_memory.py",
+                "experiments/compare_results.py",
+                "experiments/utils/results.py",
+            )
         ],
-        semantics="Retrospective replay of frozen collector facts. Kernels, pool, input values, oracle timings and hard resource policies are unchanged. No GPU work. Scoring time excludes IR capture and file I/O.",
+        semantics="Retrospective replay of frozen collector facts. Equal primary scores share their group's tail rank; strict-budget curves include only complete groups. Kernels, pool, input values, oracle timings and hard resource policies are unchanged. No GPU work. Scoring time excludes IR capture and file I/O.",
         rows=rows,
         all_oracles_scored=all(r["first_oracle_hit_k"] is not None for r in rows),
         hits_20_percent=sum(r["hits_20_percent"] for r in rows),
         hits_50_percent=sum(r["hits_50_percent"] for r in rows),
+        all_hit_whole_pool_percent=next(
+            (
+                p
+                for p in range(1, 101)
+                if all(r["first_oracle_hit_k"] is not None and r["first_oracle_hit_k"] <= (p * r["pool_size"] + 99) // 100 for r in rows)
+            ),
+            None,
+        ),
     )
     (output / "summary.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     (output / "report.md").write_text(render(result))
@@ -205,7 +214,9 @@ def render(result):
         "",
         f"Oracle hits: **{result['hits_20_percent']}/{len(rows)} at 20%**, **{result['hits_50_percent']}/{len(rows)} at 50%**.",
         "",
-        "Primary score: logical global bytes per CTA × ceil(grid CTAs / SMs). Break equal-byte ties by fewer logical memory accesses per wave, then original index. No compute rates, inferred overlap, or occupancy prediction.",
+        f"All-case cutoff: **{result['all_hit_whole_pool_percent']}%**, with per-pool budgets rounded up.",
+        "",
+        "Primary score: logical global bytes per CTA × ceil(grid CTAs / SMs). Equal scores share their group's last rank. Memory events and original index order display only; they do not split score ties. No compute rates, inferred overlap, or occupancy prediction.",
         "",
         "| Case | Pool | Scored | Previous oracle rank | New oracle rank | Pool share | Replay scoring ms |",
         "|---|---:|---:|---:|---:|---:|---:|",

@@ -1,4 +1,4 @@
-"""Deterministic ranking and explicit fixed-budget selection."""
+"""Conservative score ranks and selection that retains boundary ties."""
 
 from .pipeline import estimate_pipeline_cycles
 from .schedule import estimate_grid_cycles
@@ -56,15 +56,21 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
     return result
 
 
-def select_top_k(ranking, k):
-    """Select at most k finite, eligible scores; ties retain original grid order."""
+def select_top_k(ranking, k, *, include_ties=True):
+    """Keep the first k eligible candidates and their complete boundary tie.
+
+    Equal primary scores are inseparable by default. Fixed-budget historical
+    baselines can explicitly request ``include_ties=False``.
+    """
     import math
 
     if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
         raise ValueError("top_k must be a positive integer")
-    return [
-        entry["index"] for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])
-    ][:k]
+    eligible = [entry for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])]
+    if not include_ties or len(eligible) <= k:
+        return [entry["index"] for entry in eligible[:k]]
+    boundary = eligible[k - 1]["score"]
+    return [entry["index"] for position, entry in enumerate(eligible) if position < k or entry["score"] == boundary]
 
 
 def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
@@ -105,13 +111,30 @@ def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
             if queue:
                 pool.append(queue.popleft())
     reserved = min(len(pool), math.ceil(k * fraction))
-    selected = ranked[: k - reserved]
-    explored = pool[: k - len(selected)]
+    selected = ranked if not reserved else select_top_k(ranking, k - reserved) if k > reserved else []
+    explored = pool[: max(reserved, k - len(selected))]
     return selected + explored, explored
 
 
+def assign_tail_ranks(entries):
+    """Annotate an ordered report with positions and primary-score tie ranges."""
+    groups = {}
+    for position, entry in enumerate(entries, 1):
+        entry["position"] = position
+        groups.setdefault((entry["tier"], entry["score"]), []).append(position)
+    for entry in entries:
+        positions = groups[entry["tier"], entry["score"]]
+        entry.update(rank=positions[-1], tie_first_rank=positions[0], tie_last_rank=positions[-1])
+    return entries
+
+
 def rank_records(records):
-    """Return all original indices in score order, without reading measurements."""
+    """Order candidates and assign equal primary scores their group's tail rank.
+
+    Secondary keys only order the report within a tie. They cannot make an
+    equal-score candidate appear safer to prune. ``position`` records that
+    deterministic order separately from the conservative predicted ``rank``.
+    """
     import math
 
     if len({r["index"] for r in records}) != len(records):
@@ -148,15 +171,7 @@ def rank_records(records):
             e["index"],
         )
     )
-    for i, entry in enumerate(entries):
-        entry["rank"] = i + 1
-    groups = {}
-    for entry in entries:
-        groups.setdefault((entry["tier"], entry["score"], entry.get("tie_break_score")), []).append(entry["rank"])
-    for entry in entries:
-        ranks = groups[entry["tier"], entry["score"], entry.get("tie_break_score")]
-        entry.update(tie_first_rank=min(ranks), tie_last_rank=max(ranks))
-    return entries
+    return assign_tail_ranks(entries)
 
 
 def combine_tile_cost(memory, waves):

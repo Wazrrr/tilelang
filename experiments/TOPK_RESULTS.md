@@ -1,5 +1,10 @@
 # H200 oracle hits at larger top-K budgets
 
+Historical report: the numbers below use deterministic within-tie positions.
+Current comparisons assign equal primary scores their group's tail rank and
+require complete groups within each strict budget. See
+[the updated memory-ranking study](MEMORY_RANKING.md) for current results.
+
 Evaluated on September 19, 2026 using the completed
 [`h200-25shape-20260917T080241Z`](results/studies/h200-25shape-20260917T080241Z/REPORT.md)
 study: five families, five shapes each, TileTune seed 123. These are the saved

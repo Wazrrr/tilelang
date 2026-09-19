@@ -29,11 +29,29 @@ def test_top_k_ties_unknowns_and_shortfall():
     records = [dict(index=i, tile_cost={"score": score}) for i, score in enumerate([None, 20, 10, 10, float("inf")])]
     records.append(dict(index=5, tile_cost={"score": 1}, pre_lowering={"would_reject": True}))
     ranking = rank_records(records)
-    assert select_top_k(ranking, 1) == [2]
+    assert select_top_k(ranking, 1) == [2, 3]
+    assert select_top_k(ranking, 1, include_ties=False) == [2]
+    assert [r["rank"] for r in ranking[:3]] == [2, 2, 3]
     assert select_top_k(ranking, 8) == [2, 3, 1]
     for record in records:
         record["latency_ms"] = 1 / (record["index"] + 1)
     assert select_top_k(rank_records(records), 2) == [2, 3]
+
+
+def test_preparation_keeps_the_whole_boundary_tie(monkeypatch):
+    session = TileTuneSession(TileTuneConfig(top_k=1), [{"id": i} for i in range(3)])
+
+    def analyze(program, *args, **kwargs):
+        return dict(tile_cost={"score": 10}, pressure={"decision": {"keep": True}})
+
+    monkeypatch.setattr("tilelang.tiletune.runtime.analyze_prim_func", analyze)
+    selected = session.prepare_top_k([(i, {"id": i}, {}) for i in range(3)], lambda id: id)
+    assert selected == [0, 1, 2]
+    assert set(session.prepared_programs) == {0, 1, 2}
+    assert session.selection["requested_k"] == 1
+    assert session.selection["selected_count"] == 3
+    assert session.selection["budget_excess"] == 2
+    assert session.selection["tie_policy"] == "include_boundary_score_group"
 
 
 def test_preparation_retains_failures_and_never_refills(monkeypatch):

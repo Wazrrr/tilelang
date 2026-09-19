@@ -105,8 +105,9 @@ def test_wave_rounding_memory_ties_and_measurement_independence():
     ]
     expected = rank_records(records)
     assert [r["index"] for r in expected] == [4, 7, 2]
-    assert expected[0]["tie_first_rank"] == 1 and expected[0]["tie_last_rank"] == 2
-    assert expected[-1]["tie_first_rank"] == 3
+    assert all(r["rank"] == r["tie_last_rank"] == 3 and r["tie_first_rank"] == 1 for r in expected)
+    assert [r["position"] for r in expected] == [1, 2, 3]
+    assert select_top_k(expected, 1) == [4, 7, 2]
     for r in records:
         r.update(latency_ms=-r["index"], winner=True, compiler_resources={"registers": 255})
     assert rank_records(records) == expected

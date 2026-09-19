@@ -100,6 +100,41 @@ def test_selection_only_reports_and_negative_xgboost_scores(inputs):
     assert rows[-1]["shortfall"] == 3
 
 
+def test_primary_score_ties_use_tail_ranks_and_complete_budget_groups(inputs):
+    oracle, method, _, report = inputs
+    # The optimum is first in a score tie. Historical ordinal rank and a
+    # favorable secondary key must not turn that accident into a top-2 hit.
+    report["ranking"] = [
+        dict(index=11, tier="eligible", score=0, rank=1),
+        dict(index=13, tier="eligible", score=1, tie_break_score=0, rank=2),
+        dict(index=10, tier="eligible", score=1, tie_break_score=100, rank=3),
+        dict(index=12, tier="eligible", score=2, rank=4),
+    ]
+    write(method, report)
+    result = compare(oracle, {"tiletune": method}, [2, 3])["methods"][0]
+    winner = result["oracle_candidates"][0]
+    assert winner["position"] == 2 and winner["rank"] == 3
+    assert (winner["tie_first_rank"], winner["tie_last_rank"]) == (2, 3)
+    assert result["first_oracle_hit_k"] == 3
+    assert result["curves"][0]["selected_indices"] == [11]
+    assert result["curves"][0]["oracle_at_k"] is None
+    assert result["curves"][1]["oracle_at_k"] == 1
+    report["ranking"][1:3] = reversed(report["ranking"][1:3])
+    write(method, report)
+    changed = compare(oracle, {"tiletune": method}, [2, 3])["methods"][0]
+    assert changed["first_oracle_hit_k"] == 3
+    assert [r["oracle_at_k"] for r in changed["curves"]] == [None, 1]
+
+
+def test_saved_tie_expansion_is_measured_at_its_actual_cost(inputs):
+    oracle, method, _, report = inputs
+    report["selection"] = dict(requested_k=1, selected_indices=[10, 13], tie_policy="include_boundary_score_group")
+    write(method, report)
+    saved = compare(oracle, {"tiletune": method}, [1])["methods"][0]["saved_selection"]
+    assert saved["k"] == 1 and saved["selected_count"] == 2 and saved["budget_excess"] == 1
+    assert saved["oracle_at_k"] == 1
+
+
 @pytest.mark.parametrize("value", [0, -1, True, float("nan"), float("inf")])
 def test_invalid_successful_oracle_latencies_are_not_admitted(inputs, value):
     oracle, method, records, _ = inputs

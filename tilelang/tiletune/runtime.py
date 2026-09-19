@@ -237,6 +237,9 @@ class TileTuneSession:
             "selected_indices": indices,
             "selected_count": len(indices),
             "shortfall": max(0, self.config.top_k - len(indices)),
+            "budget_excess": max(0, len(indices) - self.config.top_k),
+            "tie_policy": "include_boundary_score_group",
+            "rank_policy": "equal primary scores share the group's last rank",
             "tie_break": "logical memory events, then original configuration index"
             if self.config.ranking_metric == "memory"
             else "original configuration index",

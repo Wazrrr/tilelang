@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 25
+ANALYSIS_VERSION = 26
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class TileTuneConfig:
     attention_spill_budget_registers_per_thread: int = 0
     report_path: str | None = None
     ranking: bool = True
-    top_k: int | None = None  # Analyze the full grid, then compile at most this many scored candidates.
+    top_k: int | None = None  # Select this many scored candidates, expanding to retain a complete boundary tie.
     exploration_fraction: float = 0.0  # Opt-in unknown-cost attempts; pure ranking remains the default.
     exploration_seed: int = 123
     device_limits: dict | None = None
