@@ -40,6 +40,15 @@ def test_explicit_policy_and_resource_rejections_are_never_explored():
     assert 0 not in selected and 1 not in selected
 
 
+def test_exploration_reservation_does_not_split_scored_ties():
+    rows = records(4, 2)
+    for row in rows[:4]:
+        row["tile_cost"]["score"] = 10
+    selected, explored = select_with_exploration(rank_records(rows), rows, 3, fraction=1 / 3)
+    assert selected[:4] == [0, 1, 2, 3]
+    assert len(explored) == 1 and len(selected) == 5
+
+
 def test_logical_demand_is_uncertainty_when_spilling_is_permitted():
     pressure = dict(
         budget=255,

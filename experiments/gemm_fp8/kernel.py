@@ -4,7 +4,7 @@ from threading import Lock
 
 from experiments.utils.kernel import KernelCase, _random
 from .reference import reference
-from .spaces import BLOCK_K, BLOCK_M, support_reason
+from .spaces import BLOCK_K, BLOCK_M, GROUP_SIZES, NUM_STAGES, STORE_BLOCK_NS, support_reason
 
 _BUILD_LOCK = Lock()
 
@@ -35,9 +35,22 @@ def make_case(workload):
         raise ValueError(reason)
     m, n, k = (workload.parameters[key] for key in ("m", "n", "k"))
 
-    def build(block_M, block_N, block_K, num_stages, threads, implementation, group_size, use_tma_store, store_block_N):
-        if block_M != BLOCK_M or block_N != 256 or block_K != BLOCK_K or num_stages != 6:
-            raise ValueError("SM100 block-scaled FP8 fixes the 128x256x128 two-CTA tile and six stages")
+    def build(
+        block_M,
+        block_N,
+        block_K,
+        num_stages,
+        threads,
+        implementation,
+        group_size,
+        use_tma_store,
+        store_block_N,
+        column_major=True,
+    ):
+        if block_M != BLOCK_M or block_N != 256 or block_K != BLOCK_K:
+            raise ValueError("SM100 block-scaled FP8 fixes the 128x256x128 two-CTA tile")
+        if num_stages not in NUM_STAGES:
+            raise ValueError(f"SM100 block-scaled FP8 requires num_stages in {NUM_STAGES}")
         valid = (implementation, threads) in (("tcgen05_2cta", 128), ("tcgen05_2cta_persistent", 256))
         if not valid:
             raise ValueError("invalid native SM100 FP8 implementation/configuration pair")
@@ -56,7 +69,16 @@ def make_case(workload):
             transpose_B=True,
         )
         if implementation.endswith("persistent"):
-            kwargs.update(use_tma_store=use_tma_store, store_block_N=store_block_N, group_size=group_size)
+            if group_size not in GROUP_SIZES or not isinstance(column_major, bool):
+                raise ValueError("invalid persistent SM100 tile traversal")
+            if use_tma_store and store_block_N not in STORE_BLOCK_NS:
+                raise ValueError("invalid persistent SM100 TMA-store tile")
+            kwargs.update(
+                use_tma_store=use_tma_store,
+                store_block_N=store_block_N,
+                group_size=group_size,
+                column_major=column_major,
+            )
         return _program(implementation, **kwargs)
 
     def inputs(device, generator):

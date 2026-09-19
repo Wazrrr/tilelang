@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 27
+ANALYSIS_VERSION = 33
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,8 @@ class TileTuneConfig:
     attention_spill_budget_registers_per_thread: int = 0
     report_path: str | None = None
     ranking: bool = True
-    top_k: int | None = None  # Analyze the full grid, then compile at most this many scored candidates.
+    top_k: int | None = None  # Select this many candidates, expanding scored or permitted-unscored boundary ties.
+    strict_top_k: bool = False  # Exclude, rather than split or expand, a tie group that crosses top_k.
     exploration_fraction: float = 0.0  # Opt-in unknown-cost attempts; pure ranking remains the default.
     exploration_seed: int = 123
     device_limits: dict | None = None
@@ -44,8 +45,8 @@ class TileTuneConfig:
             raise ValueError("trace_path must be a nonempty string or None")
         if self.specialization not in ("auto", "generic", "gemm", "attention"):
             raise ValueError("specialization must be auto, generic, gemm, or attention")
-        if self.ranking_metric not in ("traffic_waves", "pipeline_time"):
-            raise ValueError("ranking_metric must be traffic_waves or pipeline_time")
+        if self.ranking_metric not in ("memory", "traffic_waves", "pipeline_time"):
+            raise ValueError("ranking_metric must be memory, traffic_waves, or pipeline_time")
         if self.performance_model is not None:
             from .profiling.profile_schema import validate_performance_model
 
@@ -57,6 +58,12 @@ class TileTuneConfig:
                 raise ValueError("top_k must be a positive integer or None")
             if not self.ranking:
                 raise ValueError("top_k requires ranking=True")
+        if not isinstance(self.strict_top_k, bool):
+            raise ValueError("strict_top_k must be a bool")
+        if self.strict_top_k and self.top_k is None:
+            raise ValueError("strict_top_k requires top_k")
+        if self.strict_top_k and self.exploration_fraction:
+            raise ValueError("strict_top_k does not support exploration")
         if self.device_limits is not None:
             from .src.device import DEVICE_LIMIT_FIELDS
 
@@ -69,6 +76,10 @@ class TileTuneConfig:
         spill_budget = self.attention_spill_budget_registers_per_thread
         if isinstance(spill_budget, bool) or not isinstance(spill_budget, int) or spill_budget < 0:
             raise ValueError("attention_spill_budget_registers_per_thread must be a nonnegative integer")
+        if self.ranking_metric == "memory" and (self.specialization not in ("auto", "generic") or spill_budget):
+            raise ValueError(
+                "memory ranking is kernel-family independent; family specialization and attention spill allowances are unsupported"
+            )
         for name in ("register_cap", "max_spill_bytes", "max_local_bytes"):
             value = getattr(self, name)
             if value is None:

@@ -2,42 +2,58 @@
 
 BLOCK_M = 128
 BLOCK_K = 128
+NUM_STAGES = (2, 3, 4, 5, 6)
+GROUP_SIZES = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16)
+STORE_BLOCK_NS = (16, 32, 64, 128)
 
 
 def get_configs():
-    common = dict(block_M=BLOCK_M, block_N=256, block_K=BLOCK_K, num_stages=6)
+    common = dict(block_M=BLOCK_M, block_N=256, block_K=BLOCK_K)
     configs = [
         dict(
             common,
+            num_stages=num_stages,
             threads=128,
             implementation="tcgen05_2cta",
             group_size=1,
+            column_major=True,
             use_tma_store=True,
             store_block_N=64,
         )
+        for num_stages in NUM_STAGES
     ]
     configs += [
         dict(
             common,
+            num_stages=num_stages,
             threads=256,
             implementation="tcgen05_2cta_persistent",
             group_size=group_size,
+            column_major=column_major,
             use_tma_store=True,
             store_block_N=store_block_n,
         )
-        for group_size in (1, 2, 4)
-        for store_block_n in (64, 128)
+        for num_stages in NUM_STAGES
+        for group_size in GROUP_SIZES
+        for column_major in (True, False)
+        for store_block_n in STORE_BLOCK_NS
+        if not (num_stages == 6 and store_block_n == 128)
     ]
-    configs.append(
+    configs += [
         dict(
             common,
+            num_stages=num_stages,
             threads=256,
             implementation="tcgen05_2cta_persistent",
-            group_size=4,
+            group_size=group_size,
+            column_major=column_major,
             use_tma_store=False,
-            store_block_N=64,
+            store_block_N=16,
         )
-    )
+        for num_stages in NUM_STAGES
+        for group_size in GROUP_SIZES
+        for column_major in (True, False)
+    ]
     return configs
 
 

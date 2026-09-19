@@ -109,9 +109,11 @@ def test_grouped_gemm_outer_dispatch_does_not_hide_inner_blackwell_pipeline():
     from experiments.grouped_gemm.kernel import make_case
     from experiments.grouped_gemm.spaces import get_configs
 
-    case = make_case(cases(holdout=True)[0])
+    workload = cases(holdout=True)[0]
+    case = make_case(workload)
+    configs = get_configs()
     results = []
-    for candidate in get_configs():
+    for candidate in configs:
         func = case.build(**candidate)
         results.append(
             analyze_prim_func(
@@ -121,13 +123,22 @@ def test_grouped_gemm_outer_dispatch_does_not_hide_inner_blackwell_pipeline():
                 device_limits=LIMITS,
             )
         )
-    assert all(r["modules"]["waves"]["grid_blocks"] == 32 for r in results)
-    assert [r["modules"]["waves"]["launch_threads"] for r in results] == [128, 256]
-    assert all(
-        r["modules"]["pipeline_overlap"]["timing"]["schedule_model"] == "grouped GEMM per-buffer max-plus recurrence"
-        for r in results
-    )
-    assert all(r["tile_cost"]["score"] is not None for r in results)
+    n = workload.parameters["n"]
+    assert [r["modules"]["waves"]["grid_blocks"] for r in results] == [
+        (n + candidate["block_N"] - 1) // candidate["block_N"] for candidate in configs
+    ]
+    assert [r["modules"]["waves"]["launch_threads"] for r in results] == [
+        candidate["threads"] + (128 if candidate["num_stages"] else 0) for candidate in configs
+    ]
+    for candidate, result in zip(configs, results):
+        model = result["modules"]["pipeline_overlap"].get("timing", {}).get("schedule_model")
+        if candidate["num_stages"] == 0:
+            assert model == "grouped GEMM serial copy/consumer loop"
+        elif result["tile_cost"]["score"] is not None:
+            assert model == "grouped GEMM per-buffer max-plus recurrence"
+    rejected = [result for result in results if result["tile_cost"]["score"] is None]
+    assert len(rejected) == 2
+    assert all("estimated block resources exceed device limits" in result["tile_cost"]["unknown"] for result in rejected)
 
 
 def test_wgmma_participants_use_consumers_and_honor_pass_overrides():

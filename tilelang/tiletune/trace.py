@@ -162,6 +162,7 @@ def collector_snapshot(col):
         "serial_loops": [loop(node) for node in col.serial_loops],
         "bindings": {str(var): str(value) for var, value in col.bindings.items()},
         "unknown": list(col.unknown),
+        "memory_unknown": list(getattr(col, "memory_unknown", col.unknown)),
     }
 
 

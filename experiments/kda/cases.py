@@ -1,4 +1,4 @@
-"""Chunk-output KDA at the serving dimensions used by the example family."""
+"""Token-parallel KDA intra-chunk workloads at serving dimensions."""
 
 
 def cases(holdout=False):
@@ -14,9 +14,9 @@ def cases(holdout=False):
     )
     return [
         Workload(
-            "kda_chunk_" + role,
-            "kda_chunk_o",
-            dict(batch=batch, heads=heads, sequence=sequence, dim=128, value_dim=128, chunk_size=64),
+            "kda_intra_" + role,
+            "kda_chunk_intra_token_parallel",
+            dict(batch=batch, heads=heads, sequence=sequence, dim=128, chunk_size=64, sub_chunk_size=16),
             dtype="bfloat16",
             config_space="expanded",
         )
@@ -34,9 +34,9 @@ def training_cases():
     )
     return [
         Workload(
-            "kda_chunk_" + split,
-            "kda_chunk_o",
-            dict(batch=batch, heads=heads, sequence=sequence, dim=128, value_dim=128, chunk_size=64),
+            "kda_intra_" + split,
+            "kda_chunk_intra_token_parallel",
+            dict(batch=batch, heads=heads, sequence=sequence, dim=128, chunk_size=64, sub_chunk_size=16),
             dtype="bfloat16",
             config_space="expanded",
         )

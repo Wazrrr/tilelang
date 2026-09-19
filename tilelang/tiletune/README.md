@@ -24,7 +24,7 @@ package; native operator metadata continues to come from the compiler.
 | `src/device.py` | Target capabilities and explicit device-capacity queries |
 | `register_pressure.py` | Allocation descriptions, accumulator proof, budgets, and register policy |
 | `tile_liveness.py` | Simultaneous local storage and loop-carried state |
-| `global_memory.py` | Logical external traffic per tile visit |
+| `global_memory.py`, `memory.py` | Timing-model traffic and family-independent logical memory work |
 | `shared_memory.py` | Staged allocations, buffer lifetimes, and shared-storage reuse |
 | `occupancy.py`, `warp_specialization.py` | Residency/waves and producer/consumer policy prediction |
 | `compute.py` | Operation work, reduction ownership, and primitive service cycles |
@@ -120,7 +120,11 @@ liveness model is a separate algorithm change.
 `TileTuneSession` later enforces `keep=False` before lowering. `report_only`
 records violations without enforcing this gate. A positive `top_k` still
 excludes unscored and pressure-rejected entries and freezes selection before
-compilation. Failed selected candidates are never replaced.
+compilation. By default, selection includes the complete score group crossing
+`top_k`. Set `strict_top_k=True` to treat `top_k` as a hard budget: TileTune
+keeps a boundary group only when its conservative tail rank is at most the
+budget, so it never splits a tie and may select fewer than `top_k` candidates.
+Failed selected candidates are never replaced.
 
 For timing, read `compute.estimate_phase_cycles`,
 `schedule.buffer_transition`, `pipeline.estimate_pipeline_cycles`, then
@@ -207,3 +211,52 @@ python -m examples.gemm.example_gemm_tiletune_trace --output /tmp/gemm_trace.log
 The [example](../../examples/gemm/example_gemm_tiletune_trace.py) traces an
 actual GEMM PrimFunc with explicitly illustrative device limits and primitive
 rates. Use your measured `performance_model` for performance interpretation.
+
+## Family-independent memory ranking
+
+`TileTuneConfig(ranking_metric="memory", ...)` analyzes the supplied PrimFunc
+through common operator regions, loop visits, dependencies, storage facts, and
+backend inputs. This path does not recognize a whole kernel as GEMM, attention,
+softmax, or another family. It bypasses family selection, compute profiles,
+pipeline timing, warp-specialization prediction, and occupancy prediction.
+Explicit family hints are rejected so a new kernel cannot silently depend on a
+kernel-specific scoring adapter.
+
+The score is a lexicographic integer encoding of logical global byte-waves and
+the pipeline depth already present in the IR:
+
+```text
+logical_byte_waves = sum(access.bytes * access.visits)
+                   * ceil(grid_blocks / SM_count)
+score = logical_byte_waves * 65536 + (65535 - pipeline_depth)
+```
+
+Byte work therefore always dominates: pipeline depth only orders candidates
+with identical byte-waves. A memory-event count and original index provide a
+stable display order but do not split an equal-score group for pruning. Every
+member of such a group receives the group's last position as its conservative
+rank, and runtime top-K selection retains the whole boundary group. The report
+records `budget_excess` when that makes the actual shortlist larger than K.
+
+This is logical work rather than measured traffic: it does not model cache
+behavior, coalescing, bandwidth, transaction size, compute throughput, or
+physical occupancy. Opaque operations that may access a global buffer produce
+an explicit unknown score. Opaque control, barrier, and other local operations
+do not prevent known global accesses from being scored. A lowered `While` is
+counted only when its scalar initialization, constant limit, unconditional
+positive increment, and conservative maximum visits are provable. Manual
+pipeline depth can also be read from an asynchronous global-to-shared copy
+whose leading shared-buffer axis is indexed modulo that axis's extent. Other
+dynamic loops remain unknown and therefore cannot silently prune a candidate.
+
+The direct softmax test in
+[test_memory.py](../../testing/python/tiletune/test_memory.py) supplies a new
+PrimFunc with masked loads/stores and two reductions. The test disables family
+dispatch and timing/occupancy policy calls, checks that the IR is unchanged,
+and replays the exported `memory.v1` facts through the dependency-free core.
+That verifies the direct-analysis boundary for softmax; it is not a claim that
+all future opaque primitives or performance orderings are already supported.
+
+On the frozen B200 five-family pool, all 25 oracle winners have conservative
+tail rank within 50%; 18 are within 20%. No kernel or GPU experiment was rerun.
+See [the replay methodology and limitations](../../experiments/MEMORY_RANKING.md).

@@ -9,8 +9,8 @@ def get_configs():
         # query row. Larger M tiles can compile but deadlock for longer causal
         # sequences, so they are not meaningful members of the common pool.
         block_M=[32, 64, 128],
-        block_N=[16, 32, 48, 64, 96, 128, 192, 256],
-        num_stages=[0, 1, 2, 3],
+        block_N=list(range(16, 257, 16)),
+        num_stages=[0, 1, 2, 3, 4, 5],
         threads=[128, 256],
     )
 

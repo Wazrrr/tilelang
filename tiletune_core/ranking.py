@@ -1,4 +1,4 @@
-"""Deterministic ranking and explicit fixed-budget selection."""
+"""Conservative score ranks and selection that retains boundary ties."""
 
 from .pipeline import estimate_pipeline_cycles
 from .schedule import estimate_grid_cycles
@@ -60,15 +60,47 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
     return result
 
 
-def select_top_k(ranking, k):
-    """Select at most k finite, eligible scores; ties retain original grid order."""
+def select_top_k(ranking, k, *, include_ties=True, include_unknown=True, strict_budget=False):
+    """Keep the first k candidates and their complete boundary tie.
+
+    Fixed-budget historical comparisons can explicitly request
+    ``include_ties=False``. Runtime pruning retains equal primary scores because
+    a deterministic display key is not evidence that one tied config is worse.
+    With ``strict_budget=True``, a boundary group is excluded in full instead
+    of expanding beyond k; no equal-score group is ever split.
+    Permitted candidates without a resolved score form one conservative tail
+    group: if the requested budget reaches that group, all of it is retained.
+    Callers with an explicit exploration policy can reserve and sample that
+    group themselves with ``include_unknown=False``.
+    """
     import math
 
     if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
         raise ValueError("top_k must be a positive integer")
-    return [
-        entry["index"] for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])
-    ][:k]
+    if not isinstance(strict_budget, bool):
+        raise ValueError("strict_budget must be a bool")
+    if strict_budget and not include_ties:
+        raise ValueError("strict_budget and include_ties=False are mutually exclusive")
+    eligible = [
+        entry for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])
+    ]
+    unknown = [entry for entry in ranking if entry["tier"] == "unknown"]
+    if strict_budget:
+        selected = [entry["index"] for entry in eligible if entry["tie_last_rank"] <= k]
+        if include_unknown and unknown and unknown[-1]["tie_last_rank"] <= k:
+            selected.extend(entry["index"] for entry in unknown)
+        return selected
+    if len(eligible) >= k:
+        if not include_ties:
+            return [entry["index"] for entry in eligible[:k]]
+        boundary = eligible[k - 1]["score"]
+        return [entry["index"] for position, entry in enumerate(eligible) if position < k or entry["score"] == boundary]
+    selected = [entry["index"] for entry in eligible]
+    if not include_unknown:
+        return selected
+    remaining = k - len(selected)
+    selected.extend(entry["index"] for entry in (unknown if include_ties else unknown[:remaining]))
+    return selected
 
 
 def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
@@ -78,7 +110,7 @@ def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
     import math
     from collections import defaultdict, deque
 
-    ranked = select_top_k(ranking, k)
+    ranked = select_top_k(ranking, k, include_unknown=False)
     if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
         raise ValueError("exploration fraction must be in (0, 1]")
     if type(seed) is not int or seed < 0:
@@ -109,13 +141,30 @@ def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
             if queue:
                 pool.append(queue.popleft())
     reserved = min(len(pool), math.ceil(k * fraction))
-    selected = ranked[: k - reserved]
-    explored = pool[: k - len(selected)]
+    selected = ranked if not reserved else select_top_k(ranking, k - reserved, include_unknown=False) if k > reserved else []
+    explored = pool[: max(reserved, k - len(selected))]
     return selected + explored, explored
 
 
+def assign_tail_ranks(entries):
+    """Annotate an ordered report with positions and primary-score tie ranges."""
+    groups = {}
+    for position, entry in enumerate(entries, 1):
+        entry["position"] = position
+        groups.setdefault((entry["tier"], entry["score"]), []).append(position)
+    for entry in entries:
+        positions = groups[entry["tier"], entry["score"]]
+        entry.update(rank=positions[-1], tie_first_rank=positions[0], tie_last_rank=positions[-1])
+    return entries
+
+
 def rank_records(records):
-    """Return all original indices in score order, without reading measurements."""
+    """Order candidates and assign equal primary scores their group's tail rank.
+
+    Secondary keys only determine deterministic report order. ``position``
+    records that order separately from the conservative predicted ``rank``.
+    Measurements are never read.
+    """
     import math
 
     if len({r["index"] for r in records}) != len(records):
@@ -134,13 +183,43 @@ def rank_records(records):
         score = (record.get("tile_cost") or {}).get("score")
         if score is not None and (type(score) not in (float, int) or not math.isfinite(score)):
             score = None
-        tier = "pressure_rejected" if decision.get("would_reject") else "unknown" if score is None else "eligible"
+        unavailable = record.get("status") in ("elaboration_failed", "analysis_failed", "pre_lowering_rejected")
+        tier = (
+            "unavailable"
+            if unavailable
+            else "pressure_rejected"
+            if decision.get("would_reject")
+            else "unknown"
+            if score is None
+            else "eligible"
+        )
         uncertainty = (record.get("tile_cost") or {}).get("score_relative_uncertainty", 0)
-        if isinstance(uncertainty, bool) or not isinstance(uncertainty, int | float) or not math.isfinite(uncertainty) or not 0 <= uncertainty < 1:
+        if (
+            isinstance(uncertainty, bool)
+            or not isinstance(uncertainty, int | float)
+            or not math.isfinite(uncertainty)
+            or not 0 <= uncertainty < 1
+        ):
             uncertainty = 0
-        entries.append({"index": record["index"], "tier": tier, "score": score, "score_relative_uncertainty": uncertainty})
-    order = {"eligible": 0, "unknown": 1, "pressure_rejected": 2}
-    entries.sort(key=lambda e: (order[e["tier"]], e["score"] if e["score"] is not None else float("inf"), e["index"]))
+        entry = {"index": record["index"], "tier": tier, "score": score, "score_relative_uncertainty": uncertainty}
+        cost = record.get("tile_cost") or {}
+        if cost.get("ranking_metric") == "memory":
+            secondary = cost.get("tie_break_score")
+            if score is not None and (
+                type(secondary) not in (int, float) or not math.isfinite(secondary) or secondary < 0
+            ):
+                raise ValueError("memory ranking requires a finite nonnegative tie_break_score")
+            entry["tie_break_score"] = secondary
+        entries.append(entry)
+    order = {"eligible": 0, "unknown": 1, "pressure_rejected": 2, "unavailable": 3}
+    entries.sort(
+        key=lambda entry: (
+            order[entry["tier"]],
+            entry["score"] if entry["score"] is not None else float("inf"),
+            entry.get("tie_break_score") or 0,
+            entry["index"],
+        )
+    )
     eligible = [entry for entry in entries if entry["tier"] == "eligible"]
     grouped, group_id, cursor = [], 0, 0
     while cursor < len(eligible):
@@ -152,25 +231,18 @@ def rank_records(records):
             if candidate["score"] > first["score"] * (1 + tolerance):
                 break
             end += 1
-        group = sorted(eligible[cursor:end], key=lambda entry: entry["index"])
+        group = sorted(eligible[cursor:end], key=lambda entry: (entry.get("tie_break_score") or 0, entry["index"]))
         for entry in group:
             entry["uncertainty_group"] = group_id
         grouped.extend(group)
         group_id += 1
         cursor = end
     entries = grouped + [entry for entry in entries if entry["tier"] != "eligible"]
-    for i, entry in enumerate(entries):
-        entry["rank"] = i + 1
-    groups = {}
-    for entry in entries:
-        groups.setdefault((entry["tier"], entry["score"]), []).append(entry["rank"])
-    for entry in entries:
-        ranks = groups[entry["tier"], entry["score"]]
-        entry.update(tie_first_rank=min(ranks), tie_last_rank=max(ranks))
+    assign_tail_ranks(entries)
     uncertainty_groups = {}
     for entry in entries:
         if entry["tier"] == "eligible":
-            uncertainty_groups.setdefault(entry["uncertainty_group"], []).append(entry["rank"])
+            uncertainty_groups.setdefault(entry["uncertainty_group"], []).append(entry["position"])
     for entry in entries:
         if entry["tier"] == "eligible":
             ranks = uncertainty_groups[entry.pop("uncertainty_group")]

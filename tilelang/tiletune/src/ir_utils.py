@@ -87,7 +87,8 @@ def loop_visits(loops):
     expression = prod(r.extent for _, r, kind in loops if kind != "4")
     value = _int(expression)
     if value is not None:
-        return {"min": value, "max": value, "expression": str(expression), "precision": "exact"}
+        precision = "conservative" if any(kind == "while_bound" for _, _, kind in loops) else "exact"
+        return {"min": value, "max": value, "expression": str(expression), "precision": precision}
     bounds = Analyzer().int_set(expression, _domains(loops))
     lower, upper = _int(bounds.min_value), _int(bounds.max_value)
     return {

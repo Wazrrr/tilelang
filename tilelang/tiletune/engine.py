@@ -1,7 +1,7 @@
-"""Common analysis flow: recognize, estimate registers, model execution, rank.
+"""Capture program facts, estimate storage, and run the requested ranking model.
 
-Family policy lives in families/. Stages receive a resolved analysis context;
-unexpected errors propagate to the caller instead of producing partial reports.
+Memory ranking uses operator semantics and backend resource inputs only. The
+legacy timing path retains its family policies. Unexpected stage errors propagate.
 """
 
 from dataclasses import dataclass
@@ -36,17 +36,37 @@ def run_modules(context, pressure):
     from .ranking import apply_ranking_metric
 
     trace = context.trace
-    specialization = select_specialization(context.collector, context.config.specialization)
-    trace.record("specialization", lambda: specialization.to_dict())
+    memory_mode = context.config.ranking_metric == "memory"
+    if memory_mode:
+        specialization = None
+        specialization_info = {
+            "name": "generic",
+            "matched": True,
+            "loop": None,
+            "roles": {},
+            "evidence": ["IR operator facts and backend inputs; no kernel-family policy"],
+        }
+        phase_labels = {op.index: op.kind for op in context.collector.operations}
+        loop, spill_allowance = None, 0
+    else:
+        specialization = select_specialization(context.collector, context.config.specialization)
+        specialization_info = specialization.to_dict()
+        phase_labels = {op.index: specialization.phase(op) for op in context.collector.operations}
+        loop = specialization.loop
+        spill_allowance = specialization.register_spill_allowance(context.config)
+    trace.record("specialization", lambda: specialization_info)
 
-    phase_labels = {op.index: specialization.phase(op) for op in context.collector.operations}
-    pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=specialization.loop)
+    pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=loop)
     for phase in pressure["tile_liveness"]["phases"]:
         phase["phase"] = phase_labels[phase["operation"]]
     trace.record("pressure.tile_liveness", lambda: pressure["tile_liveness"])
     pressure.update(resolve_register_budget(context.config, context.target))
-    ws = predict_warp_specialization(
-        context.func, context.collector, pressure, context.pass_configs, policy=specialization.warp_specialization_policy()
+    ws = (
+        {"status": "not_modeled", "reason": "memory ordering does not require a compiler scheduling policy"}
+        if memory_mode
+        else predict_warp_specialization(
+            context.func, context.collector, pressure, context.pass_configs, policy=specialization.warp_specialization_policy()
+        )
     )
     pressure["warp_specialization"] = ws
     trace.record("pressure.warp_specialization", lambda: ws)
@@ -54,7 +74,8 @@ def run_modules(context, pressure):
 
     target_model = resolve_target(context.target)
     if (
-        ws.get("status") != "predicted"
+        not memory_mode
+        and ws.get("status") != "predicted"
         and target_model.kind == "cuda"
         and target_model.architecture in ("ampere", "blackwell")
     ):
@@ -63,11 +84,7 @@ def run_modules(context, pressure):
         pressure["mma_operand_registers"] = operand_registers(context.collector, context.target)
         if target_model.architecture == "ampere":
             pressure["ampere_mma_operand_registers"] = pressure["mma_operand_registers"]
-    pressure.update(
-        analyze_register_policy(
-            pressure, context.config, context.device_limits, spill_allowance=specialization.register_spill_allowance(context.config)
-        )
-    )
+    pressure.update(analyze_register_policy(pressure, context.config, context.device_limits, spill_allowance=spill_allowance))
     trace.record(
         "pressure.register_policy", lambda: {key: pressure[key] for key in ("physical_register_allocation", "register_demand", "decision")}
     )
@@ -75,7 +92,45 @@ def run_modules(context, pressure):
 
     tile_cost = {"score": None, "precision": "disabled"}
     modules.update({name: {"precision": "disabled"} for name in ("memory_traffic", "waves", "pipeline_overlap", "ranking")})
-    if context.config.ranking:
+    if context.config.ranking and memory_mode:
+        from .memory import analyze_memory_accesses
+        from tiletune_core.memory import score_memory
+
+        memory = analyze_memory_accesses(context.collector, context.buffer_facts)
+        shared = shared_memory.analyze_shared_memory(context.collector, context.buffer_facts, context.pass_configs)
+        ranking = score_memory(
+            memory["accesses"],
+            memory["grid_blocks"],
+            (context.device_limits or {}).get("sm_count"),
+            memory["pipeline_depth"],
+        )
+        if memory["unknown"]:
+            ranking.update(score=None, tie_break_score=None, precision="unknown")
+            ranking["unknown"].extend(memory["unknown"])
+        tile_cost = {
+            **memory,
+            **shared,
+            "score": ranking["score"],
+            "tie_break_score": ranking["tie_break_score"],
+            "logical_byte_waves": ranking["logical_byte_waves"],
+            "score_formula": ranking["formula"],
+            "ranking_metric": "memory",
+            "precision": ranking["precision"],
+            "unknown": ranking["unknown"],
+        }
+        modules.update(memory_traffic=memory, shared_memory=shared, ranking=ranking)
+        trace.record("memory", lambda: memory)
+        trace.record("shared_memory", lambda: shared)
+        trace.record("ranking", lambda: ranking)
+        if context.config.facts_path:
+            import json
+            from pathlib import Path
+
+            facts = {"version": 1, "backend": "memory.v1", **memory, "sm_count": (context.device_limits or {}).get("sm_count")}
+            path = Path(context.config.facts_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(facts, indent=2, allow_nan=False) + "\n")
+    elif context.config.ranking:
         memory = global_memory.analyze_global_memory(
             context.collector,
             context.tile_propagation,
@@ -164,11 +219,11 @@ def run_modules(context, pressure):
         trace.record("ranking", lambda: {"precision": "disabled", "reason": "config.ranking is False"})
 
     for name, result in modules.items():
-        result["implementation"] = specialization.name if name != "waves" else "generic"
+        result["implementation"] = specialization_info["name"] if name != "waves" else "generic"
     from .diagnostics import analysis_diagnostics
 
     return {
-        "specialization": specialization.to_dict(),
+        "specialization": specialization_info,
         "modules": modules,
         "pressure": pressure,
         "tile_cost": tile_cost,

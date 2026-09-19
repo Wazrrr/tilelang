@@ -338,6 +338,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     use_tma_store=True,
     store_block_N=64,
     group_size=16,
+    column_major=True,
 ):
     M, N, K = T.const("M, N, K")
 
@@ -358,7 +359,6 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     assert K % (2 * block_K) == 0  # for simplicity
     cluster_size = 2
     assert group_size > 0
-    assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
     with T.ClusterKernel(sm_num, threads=256, cluster_dims=cluster_size) as (block_id):
         cta_id = T.block_rank_in_cluster()
@@ -390,7 +390,13 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
         warp_idx = tx // 32
 
         if warp_idx == 0:
-            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(
+                m_blocks,
+                n_blocks,
+                swizzle_size=group_size,
+                column_major=column_major,
+                cluster_size=cluster_size,
+            )
             sched.init(block_id // cluster_size)
             while sched.valid():
                 bx = sched.m_idx * cluster_size + cta_id
@@ -440,7 +446,13 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                 sched.next_tile()
 
         elif warp_idx == 1 and cta_id == 0:
-            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(
+                m_blocks,
+                n_blocks,
+                swizzle_size=group_size,
+                column_major=column_major,
+                cluster_size=cluster_size,
+            )
             sched.init(block_id // cluster_size)
             while sched.valid():
                 T.mbarrier_wait_parity(tmem_empty, (sched.current_iter & 1) ^ 1)
@@ -470,7 +482,13 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                 sched.next_tile()
 
         elif warp_idx == 2:
-            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(
+                m_blocks,
+                n_blocks,
+                swizzle_size=group_size,
+                column_major=column_major,
+                cluster_size=cluster_size,
+            )
             sched.init(block_id // cluster_size)
             while sched.valid():
                 for k in T.serial(k_iters):
@@ -486,7 +504,13 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                 sched.next_tile()
 
         elif 128 <= tx < 256:
-            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched = T.PersistentTileScheduler(
+                m_blocks,
+                n_blocks,
+                swizzle_size=group_size,
+                column_major=column_major,
+                cluster_size=cluster_size,
+            )
             sched.init(block_id // cluster_size)
             while sched.valid():
                 bx = sched.m_idx * cluster_size + cta_id

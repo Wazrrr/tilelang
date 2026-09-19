@@ -218,7 +218,7 @@ class TileTuneSession:
                 # elaborate records the precise elaboration/analysis/pressure failure.
                 continue
         self.ranking = rank_records(self.records)
-        indices = select_top_k(self.ranking, self.config.top_k)
+        indices = select_top_k(self.ranking, self.config.top_k, strict_budget=self.config.strict_top_k)
         explored = []
         if self.config.exploration_fraction:
             from .ranking import select_with_exploration
@@ -237,12 +237,24 @@ class TileTuneSession:
             "selected_indices": indices,
             "selected_count": len(indices),
             "shortfall": max(0, self.config.top_k - len(indices)),
-            "tie_break": (
+            "budget_excess": max(0, len(indices) - self.config.top_k),
+            "tie_policy": "exclude_boundary_score_group"
+            if self.config.strict_top_k
+            else "include_boundary_score_group",
+            "rank_policy": "equal primary scores share the group's last rank",
+            "tie_break": "logical memory events, then original configuration index"
+            if self.config.ranking_metric == "memory"
+            else (
                 "fixed-primitive uncertainty group, then original configuration index"
                 if any(row.get("score_relative_uncertainty", 0) for row in self.ranking)
                 else "original configuration index"
             ),
-            "unknown_policy": "exclude unscored and pressure-rejected candidates",
+            "unknown_policy": (
+                "retain the complete permitted unscored tail group only when its tail rank is within the strict budget; exclude pressure-rejected and unavailable candidates"
+                if self.config.strict_top_k
+                else "retain the complete permitted unscored tail group when the requested budget reaches it; exclude pressure-rejected and unavailable candidates"
+            ),
+            "strict_budget": self.config.strict_top_k,
             "failure_policy": "no replacement after compilation or benchmark failure",
             "wall_time_ms": (time.perf_counter() - started) * 1000,
         }

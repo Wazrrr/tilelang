@@ -20,7 +20,7 @@ EXAMPLES = {
     "gemm_fp8": "examples/blockscaled_gemm_sm100/gemm_mxfp8_blockscaled_1d1d.py",
     "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
     "flash_attention": "examples/flash_attention_sm100/mha_fwd_bshd.py",
-    "kda": "examples/kda/chunk_o.py",
+    "kda": "examples/kda/chunk_intra_token_parallel.py",
 }
 
 

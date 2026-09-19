@@ -309,7 +309,7 @@ def run_native(request, output):
     analytical = settings["method"] in ("analyze", "exhaustive", "top_k", "smoke")
     performance_model = device.performance_model if analytical else None
     profile_identity = None
-    if device.profiles and analytical:
+    if device.profiles and analytical and settings["metric"] != "memory":
         from tilelang.tiletune import load_device_profile
 
         profile_path = device.profiles.get(workload.dtype)
@@ -599,7 +599,7 @@ def main():
         "--method", choices=["analyze", "exhaustive", "brute_force", "top_k", "carver", "xgboost", "random"], default="analyze"
     )
     parser.add_argument("--xgb-model", type=Path, help="Frozen model from python -m experiments.xgboost train")
-    parser.add_argument("--metric", choices=["traffic_waves", "pipeline_time"], default="pipeline_time")
+    parser.add_argument("--metric", choices=["memory", "traffic_waves", "pipeline_time"], default="pipeline_time")
     parser.add_argument("--exploration-fraction", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--memory-regime", choices=["cached", "streaming"], default="streaming")

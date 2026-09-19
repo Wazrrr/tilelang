@@ -124,10 +124,10 @@ assert not any(k.split('.')[0] in ('tilelang', 'torch', 'tvm', 'numpy') for k in
     subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)
 
 
-def test_nonfinite_scores_are_unknown_and_never_spend_a_ranked_attempt():
+def test_nonfinite_scores_form_a_conservative_unknown_tail():
     records = [dict(index=i, tile_cost=dict(score=score)) for i, score in enumerate((2, float("nan"), float("inf"), 2))]
     ranking = rank_records(records)
-    assert select_top_k(ranking, 20) == [0, 3]
+    assert select_top_k(ranking, 20) == [0, 3, 1, 2]
     assert [r["tier"] for r in ranking] == ["eligible", "eligible", "unknown", "unknown"]
     assert ranking[0]["tie_last_rank"] == 2
 

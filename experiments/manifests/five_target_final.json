@@ -210,75 +210,75 @@
       "config_space": "expanded"
     },
     {
-      "name": "kda_chunk_short",
-      "op": "kda_chunk_o",
+      "name": "kda_intra_short",
+      "op": "kda_chunk_intra_token_parallel",
       "parameters": {
         "batch": 1,
         "heads": 32,
         "sequence": 2048,
         "dim": 128,
-        "value_dim": 128,
-        "chunk_size": 64
+        "chunk_size": 64,
+        "sub_chunk_size": 16
       },
       "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
     {
-      "name": "kda_chunk_medium",
-      "op": "kda_chunk_o",
+      "name": "kda_intra_medium",
+      "op": "kda_chunk_intra_token_parallel",
       "parameters": {
         "batch": 1,
         "heads": 64,
         "sequence": 4096,
         "dim": 128,
-        "value_dim": 128,
-        "chunk_size": 64
+        "chunk_size": 64,
+        "sub_chunk_size": 16
       },
       "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
     {
-      "name": "kda_chunk_regular",
-      "op": "kda_chunk_o",
+      "name": "kda_intra_regular",
+      "op": "kda_chunk_intra_token_parallel",
       "parameters": {
         "batch": 1,
         "heads": 32,
         "sequence": 8192,
         "dim": 128,
-        "value_dim": 128,
-        "chunk_size": 64
+        "chunk_size": 64,
+        "sub_chunk_size": 16
       },
       "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
     {
-      "name": "kda_chunk_batched",
-      "op": "kda_chunk_o",
+      "name": "kda_intra_batched",
+      "op": "kda_chunk_intra_token_parallel",
       "parameters": {
         "batch": 2,
         "heads": 32,
         "sequence": 4096,
         "dim": 128,
-        "value_dim": 128,
-        "chunk_size": 64
+        "chunk_size": 64,
+        "sub_chunk_size": 16
       },
       "dtype": "bfloat16",
       "configs": null,
       "config_space": "expanded"
     },
     {
-      "name": "kda_chunk_long",
-      "op": "kda_chunk_o",
+      "name": "kda_intra_long",
+      "op": "kda_chunk_intra_token_parallel",
       "parameters": {
         "batch": 1,
         "heads": 64,
         "sequence": 16384,
         "dim": 128,
-        "value_dim": 128,
-        "chunk_size": 64
+        "chunk_size": 64,
+        "sub_chunk_size": 16
       },
       "dtype": "bfloat16",
       "configs": null,

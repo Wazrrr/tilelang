@@ -22,6 +22,31 @@ def _opaque_call(node):
     )
 
 
+def _uses_global_buffer(node, buffers):
+    """Return whether an opaque expression receives or loads a global buffer."""
+    found = False
+
+    def visit(value):
+        nonlocal found
+        if isinstance(value, tir.BufferLoad) and value.buffer.scope() == "global":
+            found = True
+        elif isinstance(value, tir.Var) and any(value.same_as(buffer.data) and buffer.scope() == "global" for buffer in buffers):
+            found = True
+
+    tir.stmt_functor.post_order_visit(node, visit)
+    return found
+
+
+def _same_scalar_slot(a, b):
+    """Return whether two scalar local-buffer accesses name the same slot."""
+    return (
+        a.buffer.same_as(b.buffer)
+        and len(a.indices) == len(b.indices) == 1
+        and _int(a.indices[0]) == _int(b.indices[0]) == 0
+        and a.buffer.scope().startswith("local")
+    )
+
+
 class _Collector:
     def __init__(self, func):
         self.operations = []
@@ -34,13 +59,18 @@ class _Collector:
         self.pipeline_loops = []
         self.serial_loops = []
         self.bindings = {}
+        # Latest straight-line values of scalar local buffers.  Eager TileLang
+        # lowers mutable scheduler counters to these one-element buffers.
+        self.scalar_values = {}
         self.unknown = []
+        self.memory_unknown = []
         self.parse = tvm_ffi.get_global_func("tl.tiletune.ParseOperator")
         self.access = tvm_ffi.get_global_func("tl.tiletune.GetAccessRegions")
         self.visit(func.body)
         for i, buffer in enumerate(self.buffers):
             if any(buffer.data.same_as(other.data) and not buffer.same_as(other) for other in self.buffers[:i]):
                 self.unknown.append("multiple buffer views share a data variable")
+                self.memory_unknown.append("multiple buffer views share a data variable")
         # Reaching writers: kill only proven complete, unconditional overwrites.
         reaching = []
         for op in self.operations:
@@ -65,7 +95,7 @@ class _Collector:
             ]
             reaching.append(op)
 
-    def add(self, kind, reads, writes, metadata, loops, predicates, branches, unknown=False):
+    def add(self, kind, reads, writes, metadata, loops, predicates, branches, unknown=False, memory_unknown=False):
         op = Operation(len(self.operations), kind, reads, writes, metadata, loops, predicates, branches, unknown=unknown)
         op.launch_threads = dict(self.active_threads)
         op.pipeline_stages = self.active_pipeline_stages
@@ -74,7 +104,10 @@ class _Collector:
             if r.buffer not in self.buffers:
                 self.buffers.append(r.buffer)
         if unknown:
-            self.unknown.append(f"operation {op.index}: {kind}")
+            reason = f"operation {op.index}: {kind}"
+            self.unknown.append(reason)
+            if memory_unknown:
+                self.memory_unknown.append(reason)
 
     def visit(self, node, loops=(), predicates=(), branches=(), annotations=None):
         annotations = dict(annotations or {})
@@ -102,6 +135,14 @@ class _Collector:
             )
             if unsafe:
                 self.unknown.append("unresolved data-dependent binding")
+                # A loaded scalar may make addresses data-dependent without
+                # making memory volume unknown. Region extents, enclosing-loop
+                # visits, and the launch grid are validated independently by
+                # the memory scorer; any unresolved one still disables the
+                # score. Opaque calls remain unknown memory effects.
+                opaque = [item for item in unsafe if not isinstance(item, tir.BufferLoad)]
+                if any(_uses_global_buffer(item, self.buffers) for item in opaque):
+                    self.memory_unknown.append("unresolved data-dependent binding reads global memory")
             else:
                 # Substitute pure SSA index expressions in the analysis view;
                 # the original PrimFunc is retained unchanged for compilation.
@@ -139,9 +180,60 @@ class _Collector:
         elif isinstance(node, tir.IfThenElse):
             ident = len(self.operations), id(node)
             condition = resolve(node.condition)
+            previous_scalars = dict(self.scalar_values)
             visit(node.then_case, predicates=predicates + (condition,), branches=branches + ((ident, True),))
+            self.scalar_values = dict(previous_scalars)
             if node.else_case is not None:
                 visit(node.else_case, predicates=predicates + (tir.Not(condition),), branches=branches + ((ident, False),))
+            self.scalar_values = previous_scalars
+        elif isinstance(node, tir.While):
+            # Prove the common lowered form
+            #   scalar = nonnegative_start
+            #   while scalar < stop: ...; scalar = scalar + positive_step
+            # and charge every enclosed access its conservative maximum visit
+            # count.  This is derived solely from the PrimFunc; an arbitrary
+            # or data-dependent while loop remains unknown.
+            condition = resolve(node.condition)
+            load = condition.a if isinstance(condition, tir.LT) and isinstance(condition.a, tir.BufferLoad) else None
+            stop = _int(condition.b) if load is not None else None
+            initial = self.scalar_values.get(load.buffer) if load is not None else None
+            updates = []
+            if load is not None:
+                tir.stmt_functor.post_order_visit(
+                    node.body,
+                    lambda value: updates.append(value)
+                    if isinstance(value, tir.BufferStore) and _same_scalar_slot(value, load)
+                    else None,
+                )
+            step = None
+            if len(updates) == 1 and isinstance(updates[0].value, tir.Add):
+                terms = (updates[0].value.a, updates[0].value.b)
+                increment = next((value for value in terms if not isinstance(value, tir.BufferLoad)), None)
+                recurrence = next((value for value in terms if isinstance(value, tir.BufferLoad)), None)
+                body_statements = node.body.seq if isinstance(node.body, tir.SeqStmt) else (node.body,)
+                unconditional = any(updates[0].same_as(statement) for statement in body_statements)
+                if recurrence is not None and _same_scalar_slot(recurrence, load) and unconditional:
+                    step = _int(resolve(increment))
+            visits = None
+            if initial is not None and stop is not None and step is not None and step > 0:
+                analyzer = tvm.arith.Analyzer()
+                for var, domain in self.block_domains.values():
+                    analyzer.bind(var, domain)
+                for var, domain, _ in loops:
+                    analyzer.bind(var, domain)
+                lower = _int(analyzer.const_int_bound(resolve(initial)).min_value)
+                if lower is not None and lower >= 0:
+                    visits = max(0, (stop - int(lower) + step - 1) // step)
+            if visits is None:
+                reason = "unmodeled scope: While"
+                self.unknown.append(reason)
+                self.memory_unknown.append(reason)
+                visit(node.body)
+            else:
+                previous_scalars = dict(self.scalar_values)
+                loop_var = tir.Var(f"tiletune_while_{len(self.operations)}", "int32")
+                visit(node.body, loops=loops + ((loop_var, Range.from_min_extent(0, visits), "while_bound"),))
+                self.scalar_values = previous_scalars
         elif isinstance(node, tir.SBlockRealize):
             pred = () if _int(node.predicate) == 1 else (node.predicate,)
             visit(node.block, predicates=predicates + pred)
@@ -151,6 +243,7 @@ class _Collector:
             self.buffers.extend(b for b in node.alloc_buffers if b not in self.buffers)
             if node.match_buffers:
                 self.unknown.append("unresolved match-buffer aliases")
+                self.memory_unknown.append("unresolved match-buffer aliases")
             if node.init is not None:
                 visit(node.init, annotations=annotations)
             visit(node.body, annotations=annotations)
@@ -170,7 +263,19 @@ class _Collector:
             tir.stmt_functor.post_order_visit(node.value, lambda n: opaque.append(n) if _opaque_call(n) else None)
             for index in node.indices:
                 tir.stmt_functor.post_order_visit(index, lambda n: opaque.append(n) if isinstance(n, tir.BufferLoad | tir.Call) else None)
-            self.add("elementwise", reads, writes, node, loops, predicates, branches, bool(opaque))
+            self.add(
+                "elementwise",
+                reads,
+                writes,
+                node,
+                loops,
+                predicates,
+                branches,
+                bool(opaque),
+                memory_unknown=any(_uses_global_buffer(value, self.buffers) for value in opaque),
+            )
+            if node.buffer.scope().startswith("local") and len(node.indices) == 1 and _int(node.indices[0]) == 0:
+                self.scalar_values[node.buffer] = node.value
         elif isinstance(node, tir.Evaluate) and isinstance(node.value, tir.Call):
             call = resolve(node.value)
             op = self.parse(call, annotations)
@@ -182,7 +287,17 @@ class _Collector:
                 if name == "tl.mbarrier_wait_parity":
                     self.add("barrier", [], [], None, loops, predicates, branches)
                 else:
-                    self.add(name, [], [], None, loops, predicates, branches, True)
+                    self.add(
+                        name,
+                        [],
+                        [],
+                        call,
+                        loops,
+                        predicates,
+                        branches,
+                        True,
+                        memory_unknown=_uses_global_buffer(call, self.buffers),
+                    )
             else:
                 reads, writes = self.access(op)
                 self.add(
@@ -196,7 +311,11 @@ class _Collector:
                 )
         elif hasattr(node, "body"):
             # Let/Bind substitutions and unusual scopes require conservative handling.
-            self.unknown.append(f"unmodeled scope: {type(node).__name__}")
+            reason = f"unmodeled scope: {type(node).__name__}"
+            self.unknown.append(reason)
+            self.memory_unknown.append(reason)
             visit(node.body)
         elif not isinstance(node, tir.Evaluate):
-            self.unknown.append(f"unmodeled statement: {type(node).__name__}")
+            reason = f"unmodeled statement: {type(node).__name__}"
+            self.unknown.append(reason)
+            self.memory_unknown.append(reason)

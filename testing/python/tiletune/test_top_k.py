@@ -23,17 +23,67 @@ def test_top_k_requires_ranking_and_changes_cache_identity():
         TileTuneConfig(top_k=2, ranking=False)
     keys = [TileTuneConfig(top_k=k).to_cache_key_dict() for k in (None, 1, 2)]
     assert keys[0] != keys[1] != keys[2]
+    with pytest.raises(ValueError, match="requires top_k"):
+        TileTuneConfig(strict_top_k=True)
+    with pytest.raises(ValueError, match="does not support exploration"):
+        TileTuneConfig(top_k=2, strict_top_k=True, exploration_fraction=0.5)
 
 
 def test_top_k_ties_unknowns_and_shortfall():
     records = [dict(index=i, tile_cost={"score": score}) for i, score in enumerate([None, 20, 10, 10, float("inf")])]
     records.append(dict(index=5, tile_cost={"score": 1}, pre_lowering={"would_reject": True}))
     ranking = rank_records(records)
-    assert select_top_k(ranking, 1) == [2]
-    assert select_top_k(ranking, 8) == [2, 3, 1]
+    assert select_top_k(ranking, 1) == [2, 3]
+    assert select_top_k(ranking, 1, include_ties=False) == [2]
+    assert [row["rank"] for row in ranking[:3]] == [2, 2, 3]
+    assert select_top_k(ranking, 8) == [2, 3, 1, 0, 4]
     for record in records:
         record["latency_ms"] = 1 / (record["index"] + 1)
     assert select_top_k(rank_records(records), 2) == [2, 3]
+
+
+def test_strict_top_k_drops_the_complete_boundary_group():
+    records = [
+        dict(index=i, status="analyzed", tile_cost={"score": score})
+        for i, score in enumerate([10, 10, 20, None, None])
+    ]
+    ranking = rank_records(records)
+    assert select_top_k(ranking, 1, strict_budget=True) == []
+    assert select_top_k(ranking, 2, strict_budget=True) == [0, 1]
+    assert select_top_k(ranking, 4, strict_budget=True) == [0, 1, 2]
+    assert select_top_k(ranking, 5, strict_budget=True) == [0, 1, 2, 3, 4]
+
+
+def test_preparation_keeps_the_whole_boundary_tie(monkeypatch):
+    session = TileTuneSession(TileTuneConfig(top_k=1), [{"id": i} for i in range(3)])
+
+    def analyze(program, *args, **kwargs):
+        return dict(tile_cost={"score": 10}, pressure={"decision": {"keep": True}})
+
+    monkeypatch.setattr("tilelang.tiletune.runtime.analyze_prim_func", analyze)
+    selected = session.prepare_top_k([(i, {"id": i}, {}) for i in range(3)], lambda id: id)
+    assert selected == [0, 1, 2]
+    assert set(session.prepared_programs) == {0, 1, 2}
+    assert session.selection["requested_k"] == 1
+    assert session.selection["selected_count"] == 3
+    assert session.selection["budget_excess"] == 2
+    assert session.selection["tie_policy"] == "include_boundary_score_group"
+
+
+def test_strict_preparation_drops_a_boundary_tie(monkeypatch):
+    session = TileTuneSession(TileTuneConfig(top_k=2, strict_top_k=True), [{"id": i} for i in range(4)])
+
+    def analyze(program, *args, **kwargs):
+        return dict(tile_cost={"score": 10 if program < 3 else 20}, pressure={"decision": {"keep": True}})
+
+    monkeypatch.setattr("tilelang.tiletune.runtime.analyze_prim_func", analyze)
+    selected = session.prepare_top_k([(i, {"id": i}, {}) for i in range(4)], lambda id: id)
+    assert selected == []
+    assert session.selection["selected_count"] == 0
+    assert session.selection["shortfall"] == 2
+    assert session.selection["budget_excess"] == 0
+    assert session.selection["strict_budget"]
+    assert session.selection["tie_policy"] == "exclude_boundary_score_group"
 
 
 def test_preparation_retains_failures_and_never_refills(monkeypatch):
@@ -51,15 +101,30 @@ def test_preparation_retains_failures_and_never_refills(monkeypatch):
 
     monkeypatch.setattr("tilelang.tiletune.runtime.analyze_prim_func", analyze)
     chosen = session.prepare_top_k([(i, cfg, {}) for i, cfg in enumerate([{"id": i} for i in range(4)])], elaborate)
-    assert chosen == [3]
+    assert chosen == [3, 1, 2]
     assert calls == [0, 1, 2, 3]
     assert session.elaborate(3, {"id": 3}, elaborate) == 3
     assert calls == [0, 1, 2, 3]
     session.compilation_result(3, RuntimeError("compiler failed"))
     result = session.finish()
-    assert result["selection"]["shortfall"] == 1
-    assert result["selection"]["selected_indices"] == [3]
-    assert [r["status"] for r in result["configs"]] == ["elaboration_failed", "not_selected", "not_selected", "compilation_failed"]
+    assert result["selection"]["shortfall"] == 0
+    assert result["selection"]["budget_excess"] == 1
+    assert result["selection"]["selected_indices"] == [3, 1, 2]
+    assert [r["status"] for r in result["configs"]] == ["elaboration_failed", "analyzed", "analyzed", "compilation_failed"]
+
+
+def test_permitted_unknown_boundary_is_retained_but_unavailable_is_not():
+    records = [
+        dict(index=0, status="analyzed", tile_cost={"score": 1}),
+        dict(index=1, status="analyzed", tile_cost={"score": None}),
+        dict(index=2, status="analyzed", tile_cost={"score": None}),
+        dict(index=3, status="analysis_failed", tile_cost={"score": None}),
+    ]
+    ranking = rank_records(records)
+    assert [row["tier"] for row in ranking] == ["eligible", "unknown", "unknown", "unavailable"]
+    assert [row["rank"] for row in ranking] == [1, 3, 3, 4]
+    assert select_top_k(ranking, 1) == [0]
+    assert select_top_k(ranking, 2) == [0, 1, 2]
 
 
 def scored_kernel(block=32, score=10):

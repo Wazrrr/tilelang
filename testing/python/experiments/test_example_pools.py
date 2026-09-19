@@ -10,7 +10,12 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 192, "kda_chunk_o": 720, "gemm_fp8": 8, "grouped_gemm": 192}
+COUNTS = {
+    "attention": 576,
+    "kda_chunk_intra_token_parallel": 512,
+    "gemm_fp8": 533,
+    "grouped_gemm": 576,
+}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 
@@ -46,21 +51,21 @@ def test_explicit_native_configs_must_select_from_same_pool(w):
 
 
 def test_every_example_config_and_explicit_default_is_included():
-    from examples.kda.chunk_o import get_configs as kda_configs
+    from examples.kda.chunk_intra_token_parallel import get_configs as kda_configs
 
     fa = family_module("attention", "spaces").get_configs()
-    kda = family_module("kda_chunk_o", "spaces").get_configs()
+    kda = family_module("kda_chunk_intra_token_parallel", "spaces").get_configs()
     fp8 = family_module("gemm_fp8", "spaces").get_configs()
     assert dict(block_M=128, block_N=128, num_stages=1, threads=128) in fa
-    assert len(kda_configs()) == 90 and len(kda) == 8 * len(kda_configs())
+    assert len(kda_configs()) == 32 and len(kda) == 16 * len(kda_configs())
     assert all(c in kda for c in kda_configs())
-    assert dict(block_DK=64, block_DV=64, num_stages=0, threads=256) in kda
-    assert len(fp8) == 8
+    assert dict(block_H=16, num_stages=7, threads=256) in kda
+    assert len(fp8) == 533
     assert fp8[0]["implementation"] == "tcgen05_2cta" and fp8[0]["threads"] == 128
     assert all(c["block_M"] == 128 and c["block_N"] == 256 and c["block_K"] == 128 for c in fp8)
-    assert {c["group_size"] for c in fp8[1:]} == {1, 2, 4}
+    assert {c["group_size"] for c in fp8[5:]} == {1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16}
     grouped = family_module("grouped_gemm", "spaces").get_configs()
-    assert len(grouped) == 192
+    assert len(grouped) == 576
     assert dict(block_M=64, block_N=128, block_K=64, num_stages=2, threads=256) in grouped
 
 
