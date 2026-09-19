@@ -75,7 +75,7 @@ def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
     from collections import defaultdict, deque
 
     ranked = select_top_k(ranking, k)
-    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction <= 1:
+    if isinstance(fraction, bool) or not isinstance(fraction, int | float) or not 0 < fraction <= 1:
         raise ValueError("exploration fraction must be in (0, 1]")
     if type(seed) is not int or seed < 0:
         raise ValueError("exploration seed must be a nonnegative integer")
@@ -131,16 +131,30 @@ def rank_records(records):
         if score is not None and (type(score) not in (float, int) or not math.isfinite(score)):
             score = None
         tier = "pressure_rejected" if decision.get("would_reject") else "unknown" if score is None else "eligible"
-        entries.append({"index": record["index"], "tier": tier, "score": score})
+        entry = {"index": record["index"], "tier": tier, "score": score}
+        cost = record.get("tile_cost") or {}
+        if cost.get("ranking_metric") == "memory":
+            secondary = cost.get("tie_break_score")
+            if score is not None and (type(secondary) not in (int, float) or not math.isfinite(secondary) or secondary < 0):
+                raise ValueError("memory ranking requires a finite nonnegative tie_break_score")
+            entry["tie_break_score"] = secondary
+        entries.append(entry)
     order = {"eligible": 0, "unknown": 1, "pressure_rejected": 2}
-    entries.sort(key=lambda e: (order[e["tier"]], e["score"] if e["score"] is not None else float("inf"), e["index"]))
+    entries.sort(
+        key=lambda e: (
+            order[e["tier"]],
+            e["score"] if e["score"] is not None else float("inf"),
+            e.get("tie_break_score") or 0,
+            e["index"],
+        )
+    )
     for i, entry in enumerate(entries):
         entry["rank"] = i + 1
     groups = {}
     for entry in entries:
-        groups.setdefault((entry["tier"], entry["score"]), []).append(entry["rank"])
+        groups.setdefault((entry["tier"], entry["score"], entry.get("tie_break_score")), []).append(entry["rank"])
     for entry in entries:
-        ranks = groups[entry["tier"], entry["score"]]
+        ranks = groups[entry["tier"], entry["score"], entry.get("tie_break_score")]
         entry.update(tie_first_rank=min(ranks), tie_last_rank=max(ranks))
     return entries
 

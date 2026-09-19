@@ -36,7 +36,13 @@ def run_modules(context, pressure):
     from .ranking import apply_ranking_metric
 
     trace = context.trace
-    specialization = select_specialization(context.collector, context.config.specialization)
+    memory_mode = context.config.ranking_metric == "memory"
+    if memory_mode:
+        from .families.base import KernelSpecialization
+
+        specialization = KernelSpecialization()
+    else:
+        specialization = select_specialization(context.collector, context.config.specialization)
     trace.record("specialization", lambda: specialization.to_dict())
 
     phase_labels = {op.index: specialization.phase(op) for op in context.collector.operations}
@@ -49,8 +55,12 @@ def run_modules(context, pressure):
         phase["phase"] = phase_labels[phase["operation"]]
     trace.record("pressure.tile_liveness", lambda: pressure["tile_liveness"])
     pressure.update(resolve_register_budget(context.config, context.target))
-    ws = predict_warp_specialization(
-        context.func, context.collector, pressure, context.pass_configs, policy=specialization.warp_specialization_policy()
+    ws = (
+        {"status": "not_modeled", "reason": "memory ordering does not require a compiler scheduling policy"}
+        if memory_mode
+        else predict_warp_specialization(
+            context.func, context.collector, pressure, context.pass_configs, policy=specialization.warp_specialization_policy()
+        )
     )
     pressure["warp_specialization"] = ws
     trace.record("pressure.warp_specialization", lambda: ws)
@@ -66,7 +76,40 @@ def run_modules(context, pressure):
 
     tile_cost = {"score": None, "precision": "disabled"}
     modules.update({name: {"precision": "disabled"} for name in ("memory_traffic", "waves", "pipeline_overlap", "ranking")})
-    if context.config.ranking:
+    if context.config.ranking and memory_mode:
+        from .memory import analyze_memory_accesses
+        from tiletune_core.memory import score_memory
+
+        memory = analyze_memory_accesses(context.collector, context.buffer_facts)
+        shared = shared_memory.analyze_shared_memory(context.collector, context.buffer_facts, context.pass_configs)
+        ranking = score_memory(memory["accesses"], memory["grid_blocks"], (context.device_limits or {}).get("sm_count"))
+        # An opaque operation may hide memory effects not present in the ledger.
+        if memory["unknown"]:
+            ranking.update(score=None, tie_break_score=None, precision="unknown")
+            ranking["unknown"].extend(memory["unknown"])
+        tile_cost = dict(
+            **memory,
+            **shared,
+            score=ranking["score"],
+            tie_break_score=ranking["tie_break_score"],
+            score_formula=ranking["formula"],
+            ranking_metric="memory",
+            precision=ranking["precision"],
+        )
+        tile_cost["unknown"] = ranking["unknown"]
+        modules.update(memory_traffic=memory, shared_memory=shared, ranking=ranking)
+        trace.record("memory", lambda: memory)
+        trace.record("shared_memory", lambda: shared)
+        trace.record("ranking", lambda: ranking)
+        if context.config.facts_path:
+            import json
+            from pathlib import Path
+
+            facts = dict(version=1, backend="memory.v1", **memory, sm_count=(context.device_limits or {}).get("sm_count"))
+            path = Path(context.config.facts_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(facts, indent=2, allow_nan=False) + "\n")
+    elif context.config.ranking:
         memory = global_memory.analyze_global_memory(
             context.collector,
             context.tile_propagation,

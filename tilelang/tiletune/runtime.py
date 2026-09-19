@@ -237,7 +237,9 @@ class TileTuneSession:
             "selected_indices": indices,
             "selected_count": len(indices),
             "shortfall": max(0, self.config.top_k - len(indices)),
-            "tie_break": "original configuration index",
+            "tie_break": "logical memory events, then original configuration index"
+            if self.config.ranking_metric == "memory"
+            else "original configuration index",
             "unknown_policy": "exclude unscored and pressure-rejected candidates",
             "failure_policy": "no replacement after compilation or benchmark failure",
             "wall_time_ms": (time.perf_counter() - started) * 1000,

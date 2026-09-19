@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 24
+ANALYSIS_VERSION = 25
 
 
 @dataclass(frozen=True)
@@ -55,8 +55,8 @@ class TileTuneConfig:
             raise ValueError("trace_path must be a nonempty string or None")
         if self.specialization not in ("auto", "generic", "gemm", "attention"):
             raise ValueError("specialization must be auto, generic, gemm, or attention")
-        if self.ranking_metric not in ("traffic_waves", "pipeline_time"):
-            raise ValueError("ranking_metric must be traffic_waves or pipeline_time")
+        if self.ranking_metric not in ("memory", "traffic_waves", "pipeline_time"):
+            raise ValueError("ranking_metric must be memory, traffic_waves or pipeline_time")
         if self.performance_model is not None:
             from .profiling.profile_schema import validate_performance_model
 

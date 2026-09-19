@@ -1,5 +1,11 @@
 # TileTune Core
 
+`tiletune_core.memory.score_memory` provides a profile-free ordering over resolved
+logical memory accesses and launch size. It returns logical byte-waves plus a
+memory-event tie break, without estimating compute cycles or physical occupancy.
+See the [memory-ranking study](../experiments/MEMORY_RANKING.md) for its fixed-pool
+coverage and small-budget tradeoffs.
+
 Install independently of TileLang, TVM, PyTorch, and accelerator runtimes:
 
 ```bash

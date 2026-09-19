@@ -207,3 +207,16 @@ python -m examples.gemm.example_gemm_tiletune_trace --output /tmp/gemm_trace.log
 The [example](../../examples/gemm/example_gemm_tiletune_trace.py) traces an
 actual GEMM PrimFunc with explicitly illustrative device limits and primitive
 rates. Use your measured `performance_model` for performance interpretation.
+
+## Memory-only ranking
+
+Use `TileTuneConfig(ranking_metric="memory", ...)` to rank by logical memory
+work without compute profiles, pipeline timing, or occupancy prediction. The
+target's SM count is required. Equal byte-work scores are ordered by fewer
+memory operations, then original configuration index. Storage and dependency
+facts remain available; unresolved scheduling or a soft register estimate does
+not prevent a memory score. Explicit resource policies still apply.
+
+This opt-in path scores every oracle winner within the first half of its pool
+in the saved 25-case H200 study. It has lower quality at small budgets than the
+existing timing model. See [the implementation, results and limitations](../../experiments/MEMORY_RANKING.md).
