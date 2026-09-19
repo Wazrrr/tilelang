@@ -43,7 +43,7 @@ def cyclic_buffer_depth(col):
     return max([1, *depths])
 
 
-def analyze_memory_accesses(col, buffer_facts):
+def analyze_memory_accesses(col, buffer_facts, *, include_dependencies=True):
     """Count requested accesses before clipping away masks or partial tiles.
 
     A partial final tile keeps its requested extent instead of independently
@@ -89,6 +89,11 @@ def analyze_memory_accesses(col, buffer_facts):
         "grid_blocks": grid,
         "pipeline_depth": pipeline_depth,
         "pipeline_depth_precision": "lower_bound" if unresolved_stages else "exact",
-        "dependencies": [{"operation": op.index, "predecessors": op.dependencies} for op in col.operations],
+        "dependencies": (
+            [{"operation": op.index, "predecessors": op.dependencies} for op in col.operations]
+            if include_dependencies
+            else None
+        ),
+        "dependency_precision": "exact" if include_dependencies else "disabled",
         "unknown": memory_unknowns(col),
     }

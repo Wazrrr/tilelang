@@ -5,6 +5,7 @@ legacy timing path retains its family policies. Unexpected stage errors propagat
 """
 
 from dataclasses import dataclass
+from math import prod
 
 from . import global_memory, shared_memory, occupancy, pipeline, register_pressure
 from .register_pressure import resolve_register_budget, analyze_register_policy
@@ -31,12 +32,83 @@ class AnalysisContext:
     trace: object
 
 
+def _strict_register_analysis(config):
+    """Return whether a proven accumulator bound may reject before lowering."""
+    return config.register_cap is not None or config.max_spill_bytes == 0 or config.max_local_bytes == 0
+
+
+def _launch_only_liveness(col):
+    """Retain the hard launch-size check without computing register intervals."""
+    from .src.ir_utils import _int
+
+    dimensions = [_int(value) for name, value in col.threads.items() if name.startswith("threadIdx.")]
+    threads = prod(dimensions) if dimensions and all(value is not None and value > 0 for value in dimensions) else None
+    return {
+        "precision": "disabled",
+        "phases": [],
+        "peak_registers_per_block_estimate": None,
+        "computing_threads_estimate": threads,
+        "loop_carried_buffers": [],
+        "assumptions": [
+            "register tile liveness is disabled in lean memory mode",
+            "launch threads remain available for the hard device block limit",
+            "set memory_diagnostics=True to report register tile intervals",
+        ],
+    }
+
+
+def _disabled_register_pressure():
+    return {
+        "logical_storage": [],
+        "modeled_lower_bound": None,
+        "modeled_accumulator_registers_per_block": None,
+        "total_register_upper_bound": None,
+        "evidence": [],
+        "assumptions": [
+            "register storage analysis is disabled because no strict pre-lowering register policy was requested",
+            "compiler allocation and physical limits remain subject to post-compile validation",
+            "set memory_diagnostics=True to report logical register storage",
+        ],
+    }
+
+
+def _disabled_shared_memory():
+    return {
+        "precision": "disabled",
+        "shared_allocations": [],
+        "shared_memory_bytes_estimate": None,
+        "shared_memory_allocated_sum_bytes": None,
+        "shared_storage_plan": {
+            "precision": "disabled",
+            "allocated_sum_bytes": None,
+            "arena_bytes_estimate": None,
+            "intervals": [],
+            "reuse_bytes_estimate": None,
+            "method": "disabled in lean memory mode",
+            "unknown": [],
+        },
+        "assumptions": ["set memory_diagnostics=True to report shared-memory allocation lifetimes"],
+    }
+
+
+def _disabled_tile_propagation():
+    return {
+        "precision": "disabled",
+        "operations": [],
+        "per_iteration_inputs": [],
+        "full_loop_inputs": [],
+        "unknown": [],
+        "reason": "not required by lean memory ranking; set memory_diagnostics=True to report it",
+    }
+
+
 def run_modules(context, pressure):
     """Run the common stages and make one final register decision."""
     from .ranking import apply_ranking_metric
 
     trace = context.trace
     memory_mode = context.config.ranking_metric == "memory"
+    detailed_memory = memory_mode and context.config.memory_diagnostics
     if memory_mode:
         specialization = None
         specialization_info = {
@@ -56,7 +128,11 @@ def run_modules(context, pressure):
         spill_allowance = specialization.register_spill_allowance(context.config)
     trace.record("specialization", lambda: specialization_info)
 
-    pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=loop)
+    pressure["tile_liveness"] = (
+        analyze_live_tiles(context.collector, context.buffer_facts, loop=loop)
+        if not memory_mode or detailed_memory
+        else _launch_only_liveness(context.collector)
+    )
     for phase in pressure["tile_liveness"]["phases"]:
         phase["phase"] = phase_labels[phase["operation"]]
     trace.record("pressure.tile_liveness", lambda: pressure["tile_liveness"])
@@ -96,8 +172,14 @@ def run_modules(context, pressure):
         from .memory import analyze_memory_accesses
         from tiletune_core.memory import score_memory
 
-        memory = analyze_memory_accesses(context.collector, context.buffer_facts)
-        shared = shared_memory.analyze_shared_memory(context.collector, context.buffer_facts, context.pass_configs)
+        memory = analyze_memory_accesses(
+            context.collector, context.buffer_facts, include_dependencies=detailed_memory
+        )
+        shared = (
+            shared_memory.analyze_shared_memory(context.collector, context.buffer_facts, context.pass_configs)
+            if detailed_memory
+            else _disabled_shared_memory()
+        )
         ranking = score_memory(
             memory["accesses"],
             memory["grid_blocks"],
@@ -245,7 +327,10 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
             },
         )
         trace.record("prim_func", lambda: func.script())
-        col = _Collector(func)
+        memory_mode = config.ranking_metric == "memory"
+        detailed_memory = memory_mode and config.memory_diagnostics
+        strict_registers = memory_mode and _strict_register_analysis(config)
+        col = _Collector(func, track_dependencies=not memory_mode or detailed_memory)
         trace.record("col", lambda: collector_snapshot(col))
         from .ampere import is_ampere, prepare_analysis
 
@@ -258,10 +343,25 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
                 from .ampere import prepare_ownership_analysis
 
                 prepare_ownership_analysis(func, col, target, pass_configs)
-        tile_propagation = _propagate_tiles(col, _kernel_outputs(col))
-        trace.record("tile_propagation", lambda: propagation_snapshot(tile_propagation))
+        tile_propagation = (
+            _propagate_tiles(col, _kernel_outputs(col))
+            if not memory_mode or detailed_memory or strict_registers
+            else None
+        )
+        trace.record(
+            "tile_propagation",
+            lambda: (
+                propagation_snapshot(tile_propagation)
+                if tile_propagation is not None
+                else _disabled_tile_propagation()
+            ),
+        )
         buffer_facts = collect_buffer_facts(col)
-        pressure = register_pressure.analyze_register_pressure(col, buffer_facts)
+        pressure = (
+            register_pressure.analyze_register_pressure(col, buffer_facts)
+            if not memory_mode or detailed_memory or strict_registers
+            else _disabled_register_pressure()
+        )
         trace.record("pressure.accumulator", lambda: pressure)
         context = AnalysisContext(
             func=func,
@@ -278,7 +378,11 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
         trace.record("tile_cost", lambda: results["tile_cost"])
         return {
             **results,
-            "tile_propagation": tile_propagation.to_dict(),
+            "tile_propagation": (
+                tile_propagation.to_dict()
+                if tile_propagation is not None and (not memory_mode or detailed_memory)
+                else _disabled_tile_propagation()
+            ),
             "ir_context": {
                 "launch_threads": {k: str(v) for k, v in col.threads.items()},
                 "explicit_layouts": {str(k): str(v) for k, v in col.layouts.items()},

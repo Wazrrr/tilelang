@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 33
+ANALYSIS_VERSION = 34
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,9 @@ class TileTuneConfig:
     performance_model: dict | None = None
     trace_path: str | None = None  # Append intermediate analysis snapshots for manual review.
     facts_path: str | None = None  # Optional portable compiler-fact artifact.
+    # Memory ranking needs only the access ledger. Enable this to additionally
+    # report dependency, tile-propagation, register-liveness and shared-lifetime facts.
+    memory_diagnostics: bool = False
 
     def __post_init__(self):
         if self.facts_path is not None and (not isinstance(self.facts_path, str) or not self.facts_path.strip()):
@@ -47,6 +50,8 @@ class TileTuneConfig:
             raise ValueError("specialization must be auto, generic, gemm, or attention")
         if self.ranking_metric not in ("memory", "traffic_waves", "pipeline_time"):
             raise ValueError("ranking_metric must be memory, traffic_waves, or pipeline_time")
+        if not isinstance(self.memory_diagnostics, bool):
+            raise ValueError("memory_diagnostics must be a bool")
         if self.performance_model is not None:
             from .profiling.profile_schema import validate_performance_model
 

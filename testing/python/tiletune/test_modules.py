@@ -126,6 +126,7 @@ def test_profiles_and_specializations_are_in_cache_identity():
     default = TileTuneConfig().to_cache_key_dict()
     assert default == TileTuneConfig(ranking_metric="pipeline_time").to_cache_key_dict()
     assert default != TileTuneConfig(ranking_metric="traffic_waves").to_cache_key_dict()
+    assert default != TileTuneConfig(memory_diagnostics=True).to_cache_key_dict()
     assert default != TileTuneConfig(specialization="attention").to_cache_key_dict()
     assert default != TileTuneConfig(ranking_metric="pipeline_time", performance_model=PROFILE).to_cache_key_dict()
     assert TileTuneConfig(report_path="one").to_cache_key_dict() == TileTuneConfig(report_path="two").to_cache_key_dict()

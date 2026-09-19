@@ -161,6 +161,7 @@ def collector_snapshot(col):
         "pipeline_loops": [loop(node) for node in col.pipeline_loops],
         "serial_loops": [loop(node) for node in col.serial_loops],
         "bindings": {str(var): str(value) for var, value in col.bindings.items()},
+        "dependencies_tracked": col.dependencies_tracked,
         "unknown": list(col.unknown),
         "memory_unknown": list(getattr(col, "memory_unknown", col.unknown)),
     }

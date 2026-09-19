@@ -48,7 +48,7 @@ def _same_scalar_slot(a, b):
 
 
 class _Collector:
-    def __init__(self, func):
+    def __init__(self, func, *, track_dependencies=True):
         self.operations = []
         self.buffers = list(func.buffer_map.values())
         self.layouts = {}
@@ -64,6 +64,7 @@ class _Collector:
         self.scalar_values = {}
         self.unknown = []
         self.memory_unknown = []
+        self.dependencies_tracked = track_dependencies
         self.parse = tvm_ffi.get_global_func("tl.tiletune.ParseOperator")
         self.access = tvm_ffi.get_global_func("tl.tiletune.GetAccessRegions")
         self.visit(func.body)
@@ -71,6 +72,8 @@ class _Collector:
             if any(buffer.data.same_as(other.data) and not buffer.same_as(other) for other in self.buffers[:i]):
                 self.unknown.append("multiple buffer views share a data variable")
                 self.memory_unknown.append("multiple buffer views share a data variable")
+        if not track_dependencies:
+            return
         # Reaching writers: kill only proven complete, unconditional overwrites.
         reaching = []
         for op in self.operations:

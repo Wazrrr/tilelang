@@ -23,7 +23,9 @@ def test_logical_tail_accesses_do_not_expand_to_whole_tensor():
                 T.copy(tile, B[k * 96])
 
     before = kernel.script()
-    result = analyze_prim_func(kernel, dict(ranking_metric="memory"), target=TARGET, device_limits=LIMITS)
+    result = analyze_prim_func(
+        kernel, dict(ranking_metric="memory", memory_diagnostics=True), target=TARGET, device_limits=LIMITS
+    )
     assert kernel.script() == before
     accesses = result["modules"]["memory_traffic"]["accesses"]
     assert [access["bytes"] for access in accesses] == [96 * 2, 96 * 2]
@@ -45,7 +47,12 @@ def test_memory_mode_skips_timing_occupancy_and_family_policies(monkeypatch, tmp
     monkeypatch.setattr("tilelang.tiletune.families.base.KernelSpecialization.__init__", fail)
     func = gemm(stages=3) if kernel_kind == "gemm" else attention()
     path = tmp_path / "memory.json"
-    result = analyze_prim_func(func, dict(ranking_metric="memory", facts_path=str(path)), target=TARGET, device_limits=LIMITS)
+    result = analyze_prim_func(
+        func,
+        dict(ranking_metric="memory", memory_diagnostics=True, facts_path=str(path)),
+        target=TARGET,
+        device_limits=LIMITS,
+    )
     facts = json.loads(path.read_text())
     assert facts["backend"] == "memory.v1"
     assert score_memory(facts["accesses"], facts["grid_blocks"], facts["sm_count"], facts["pipeline_depth"])["score"] == result[
@@ -96,7 +103,7 @@ def test_new_softmax_prim_func_is_analyzed_directly(monkeypatch, tmp_path):
     path = tmp_path / "softmax-memory.json"
     result = analyze_prim_func(
         softmax,
-        dict(ranking_metric="memory", facts_path=str(path)),
+        dict(ranking_metric="memory", memory_diagnostics=True, facts_path=str(path)),
         target={"kind": "cuda", "arch": "sm_100a"},
         device_limits={**LIMITS, "sm_count": 148},
     )
@@ -121,6 +128,44 @@ def test_new_softmax_prim_func_is_analyzed_directly(monkeypatch, tmp_path):
 def test_memory_mode_rejects_kernel_family_hints(settings):
     with pytest.raises(ValueError, match="kernel-family independent"):
         TileTuneConfig(ranking_metric="memory", **settings)
+
+
+def test_lean_memory_mode_skips_score_independent_analysis(monkeypatch):
+    func = attention()
+    settings = dict(ranking_metric="memory", max_spill_bytes=None, max_local_bytes=None)
+
+    detailed = analyze_prim_func(
+        func, dict(settings, memory_diagnostics=True), target=TARGET, device_limits=LIMITS
+    )
+
+    def fail(*args, **kwargs):
+        pytest.fail("lean memory mode must not invoke score-independent detailed analysis")
+
+    monkeypatch.setattr("tilelang.tiletune.engine._propagate_tiles", fail)
+    monkeypatch.setattr("tilelang.tiletune.engine.register_pressure.analyze_register_pressure", fail)
+    monkeypatch.setattr("tilelang.tiletune.engine.analyze_live_tiles", fail)
+    monkeypatch.setattr("tilelang.tiletune.engine.shared_memory.analyze_shared_memory", fail)
+    lean = analyze_prim_func(func, settings, target=TARGET, device_limits=LIMITS)
+
+    assert lean["tile_cost"]["score"] == detailed["tile_cost"]["score"]
+    assert lean["tile_cost"]["tie_break_score"] == detailed["tile_cost"]["tie_break_score"]
+    assert lean["tile_propagation"]["precision"] == "disabled"
+    assert lean["pressure"]["tile_liveness"]["precision"] == "disabled"
+    assert lean["pressure"]["tile_liveness"]["computing_threads_estimate"] == 128
+    assert lean["modules"]["memory_traffic"]["dependencies"] is None
+    assert lean["modules"]["shared_memory"]["precision"] == "disabled"
+
+
+def test_lean_memory_mode_retains_hard_launch_limit():
+    result = analyze_prim_func(
+        gemm(threads=2048),
+        dict(ranking_metric="memory", max_spill_bytes=None, max_local_bytes=None),
+        target=TARGET,
+        device_limits=LIMITS,
+    )
+    assert result["pressure"]["tile_liveness"]["precision"] == "disabled"
+    assert result["pressure"]["decision"]["would_reject"]
+    assert result["pressure"]["decision"]["classification"] == "resource_violation"
 
 
 @pytest.mark.parametrize("target", [TARGET, {"kind": "hip", "mcpu": "gfx950"}])
