@@ -1,13 +1,13 @@
-"""One 320-config pool using the example's native scheduling parameters."""
+"""One 576-config pool using the example's native scheduling parameters."""
 
 from experiments.utils.grid import grid
 
 
 def get_configs():
     return grid(
-        block_M=[32, 64, 128, 192, 256],
-        block_N=[16, 32, 48, 64, 96, 128, 192, 256],
-        num_stages=[0, 1, 2, 3],
+        block_M=[32, 64, 128],
+        block_N=[16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256],
+        num_stages=[0, 1, 2, 3, 4, 5, 6, 7],
         threads=[128, 256],
     )
 

@@ -1,7 +1,7 @@
 # H200 results
 
-The current experiment uses the 720-config `expanded` example pool (space
-version 5). A complete sweep and winner validation have not yet been recorded
+The current experiment uses the 1,296-config `expanded` example pool (space
+version 7). A complete sweep and winner validation have not yet been recorded
 for this update.
 
 Earlier JSON records were moved to

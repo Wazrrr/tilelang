@@ -16,7 +16,7 @@ def test_every_final_workload_has_a_scored_native_configuration(workload):
 
     configs = {
         "gemm": dict(block_M=128, block_N=128, block_K=64, thread_num=128, num_stages=0, enable_rasteration=False),
-        "gemm_fp8": dict(block_M=128, block_N=128, block_K=64, threads=128, num_stages=0, enable_rasteration=False),
+        "gemm_fp8": dict(block_M=64, block_N=64, block_K=128, threads=128, num_stages=0),
         "attention": dict(block_M=64, block_N=64, threads=128, num_stages=0),
         "kda_chunk_o": dict(block_DK=64, block_DV=64, threads=128, num_stages=0),
         "grouped_gemm": dict(block_M=64, block_N=128, block_K=64, threads=128, num_stages=0),
@@ -29,7 +29,7 @@ def test_every_final_workload_has_a_scored_native_configuration(workload):
                 rates=dict(gemm_flops_per_cycle=2048),
             )
             for instruction in ("cuda.mma", "cuda.wgmma")
-            for dtype in ("float16", "float8_e4m3fn")
+            for dtype in ("float16", "bfloat16", "float8_e4m3fn")
         ],
     )
     case = make_workload(workload)
@@ -38,15 +38,31 @@ def test_every_final_workload_has_a_scored_native_configuration(workload):
         dict(performance_model=rates, input_values=case.input_values or None),
         target=TARGET,
         device_limits=LIMITS,
+        pass_configs=case.pass_configs,
     )
     assert result["tile_cost"]["score"] is not None, result["diagnostics"]
     assert not result["pressure"]["decision"]["would_reject"]
+    if workload.op == "gemm_fp8":
+        matrix_phases = [p for p in result["modules"]["pipeline_overlap"]["phases"] if p["work"]["gemm_flops"]]
+        assert matrix_phases
+        # The common FP8 builder permits Hopper WGMMA (the previous
+        # DeepGEMM adapter forced MMA through a different pass configuration).
+        assert all(p["compute_participants"]["instruction"] == "cuda.wgmma" for p in matrix_phases)
 
 
-@pytest.mark.parametrize("sizes,transpose_b", [([64, 128], False), ([63, 77, 111, 280], True)])
-def test_grouped_work_counts_executed_padding_and_exact_output(sizes, transpose_b):
+@pytest.mark.parametrize(
+    "sizes,transpose_b,n,k,bn,bk",
+    [
+        ([64, 128], False, 128, 96, 64, 32),
+        ([63, 77, 111, 280], True, 128, 96, 64, 32),
+        ([63, 77, 111, 280], True, 127, 95, 64, 32),
+        ([63, 77, 111, 280], False, 127, 95, 64, 32),
+        ([1, 65], True, 33, 33, 64, 32),
+    ],
+)
+def test_grouped_work_counts_executed_padding_and_exact_output(sizes, transpose_b, n, k, bn, bk):
     # Enumerate the example's global addresses independently of the analyzer.
-    n, k, bm, bn, bk = 128, 96, 64, 64, 32
+    bm = 64
     w = Workload("metadata", "grouped_gemm", dict(batch_sizes=sizes, n=n, k=k, transpose_b=transpose_b))
     case = make_case(w)
     func = case.build(block_M=bm, block_N=bn, block_K=bk, threads=128, num_stages=0)
@@ -65,13 +81,14 @@ def test_grouped_work_counts_executed_padding_and_exact_output(sizes, transpose_
             rows += sum(start + offset + row < sum(sizes) for row in range(bm))
             tiles += 1
         start += size
-    blocks = tiles * (n // bn)
+    columns, reductions = (n + bn - 1) // bn, (k + bk - 1) // bk
+    blocks = tiles * columns
     # The example loads full A tiles, even across group boundaries. Only the
     # end of the packed allocation is masked; output stores mask every group.
     metadata_bytes = (len(sizes) + 4) * 4 * blocks
-    assert totals["read_bytes"] == rows * k * 2 * (n // bn) + blocks * bn * k * 2 + metadata_bytes
+    assert totals["read_bytes"] == rows * k * 2 * columns + tiles * n * k * 2 + metadata_bytes
     assert totals["write_bytes"] == sum(sizes) * n * 2
-    assert totals["gemm_flops"] == blocks * 2 * bm * bn * k
+    assert totals["gemm_flops"] == blocks * 2 * bm * bn * reductions * bk
 
 
 def metadata_copy():
@@ -128,10 +145,10 @@ def test_experiment_verifies_actual_metadata_before_execution():
 
 
 def test_kda_tails_count_both_products_padded_compute_and_masked_traffic():
-    from experiments.kda.cases import cases
     from experiments.kda.kernel import make_case as make_kda
 
-    case = make_kda(cases(holdout=True)[1])
+    workload = Workload("kda_tail", "kda_chunk_o", dict(batch=1, sequence=768, heads=4, dim=96, value_dim=80, chunk_size=48), "float16")
+    case = make_kda(workload)
     func = case.build(block_DK=64, block_DV=64, num_stages=0, threads=128)
     result = analyze_prim_func(func, dict(performance_model=PROFILE), target=TARGET, device_limits=LIMITS)
     assert result["tile_cost"]["score"] is not None, result["diagnostics"]

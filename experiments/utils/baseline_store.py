@@ -20,7 +20,7 @@ EXAMPLES = {
     "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
     "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
     "kda": "examples/kda/chunk_o.py",
-    "gemm_fp8": "examples/deepseek_deepgemm/example_deepgemm_fp8_2xAcc.py",
+    "gemm_fp8": "examples/gemm_fp8/example_blockscaled_gemm.py",
 }
 
 
@@ -45,6 +45,7 @@ def measurement_sources(families, root=ROOT):
         root / p
         for p in (
             "CMakeLists.txt",
+            "experiments/backend.py",
             "experiments/utils/kernel.py",
             "experiments/utils/cli.py",
             "experiments/families.py",
@@ -136,6 +137,7 @@ def identities(plan, device, settings, runtime, baseline_seed=123):
     families = sorted({FAMILIES[w.op] for w in workloads})
     measurement = dict(
         version=1,
+        kernel_contract_version=2,
         sources=measurement_sources(families),
         runtime=runtime,
         timing={k: settings[k] for k in ("warmup", "rep", "timeout", "workers", "case_timeout")},
@@ -195,7 +197,11 @@ def reuse_identity(identity):
             dtype=workload.dtype,
             configs=sorted(config_key(config) for config in identity["pools"][workload.name]),
         )
-    return dict(gpu={key: runtime.get(key) for key in ("device", "target")}, cases=cases)
+    return dict(
+        gpu={key: runtime.get(key) for key in ("device", "target")},
+        cases=cases,
+        kernel_contract_version=identity.get("measurement", {}).get("kernel_contract_version"),
+    )
 
 
 def storage_root(family, device, runtime, override=None):
@@ -223,9 +229,13 @@ def load_bundle(root, identity, *, reference=None):
     if "identity_sha256" in reference and reference["identity_sha256"] != digest(recorded):
         raise ValueError(f"baseline identity reference changed: {path}")
     saved, requested = reuse_identity(recorded), reuse_identity(identity)
-    if saved["gpu"] != requested["gpu"] or any(saved["cases"].get(name) != case for name, case in requested["cases"].items()):
+    if (
+        saved["kernel_contract_version"] != requested["kernel_contract_version"]
+        or saved["gpu"] != requested["gpu"]
+        or any(saved["cases"].get(name) != case for name, case in requested["cases"].items())
+    ):
         raise ValueError(
-            f"Saved baselines in {root} do not match the workload, GPU or configuration pool; explicitly rerun with --run-baselines"
+            f"Saved baselines in {root} do not match the kernel contract, workload, GPU or configuration pool; explicitly rerun with --run-baselines"
         )
     verify_bundle(path, recorded)
     return path, True

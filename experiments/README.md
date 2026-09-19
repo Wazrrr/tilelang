@@ -1,3 +1,5 @@
+> The current cross-branch contract is [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md): five families, five operations and 25 final workloads. It supersedes older pool and FP8/KDA descriptions below.
+
 # Autotuning experiments
 
 Each kernel family owns its cases, implementations, references, configuration
@@ -17,11 +19,11 @@ start in the family folder:
 | --- | --- | --- |
 | GEMM | Five continuous-batch decode/prefill projection and FFN shapes | [gemm/](gemm/README.md) |
 | FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
-| KDA | Five 2K–16K and batched chunk-output shapes at DK=DV=128 | [kda/](kda/README.md) |
+| KDA | Chunk output: five 2K–16K and batched shapes, DK=DV=128 | [kda/](kda/README.md) |
 | FP8 GEMM | Five block-scaled E4M3-input, BF16-output projection and FFN shapes | [gemm_fp8/](gemm_fp8/README.md) |
 | Grouped GEMM | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
 
-The default matrix contains these five families and twenty-five cases. FP8 GEMM
+The default matrix contains these five families, five operations and twenty-five cases. FP8 GEMM
 replaces softmax; historical softmax results and its archived source remain available.
 
 ## Layout
@@ -31,7 +33,7 @@ experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
 ├── grouped_gemm/            Concatenated grouped forward GEMM study
 ├── flash_attention/         Same family conventions
-├── kda/                     Direct chunk-output example study
+├── kda/                     Chunk-output study
 ├── gemm_fp8/                Direct FP8 GEMM example study
 ├── common/                  Shared execution and comparison protocol
 ├── utils/                   Monitoring, baseline storage, result I/O and shared helpers
@@ -40,6 +42,38 @@ experiments/
 ├── manifests/               Canonical frozen study/device manifests
 └── results/                 Generated artifacts, ignored by Git
 ```
+
+## Fill missing records and compare all families
+
+```bash
+python -m experiments.cached_study --device hopper \
+  --output experiments/results/studies/h200-bf16-v2-pool7
+```
+
+This cache-first command uses all idle, matching visible GPUs. It skips compatible
+complete baseline bundles, resumes completed per-shape workers, and collects only
+missing records. Run the same command to resume an interruption. Use a new output
+for a later TileTune revision: valid baseline bundles remain fixed. Optional
+`--families`, `--gpus`, and `--seeds` restrict the experiment; defaults cover all
+five families and TileTune seeds 123, 456 and 789. `--plan` performs no GPU work.
+
+The command collects the complete oracle, Carver's top 20, and XGBoost's top 20.
+XGBoost uses two training shapes and one validation shape per family, sampling
+10% of each pool. Training data, validation data, model parameters, early stopping,
+validation error and fit time are saved. Final shapes are never training labels.
+The immutable family bundle records every oracle outcome, each method's selected
+configurations, measured winner and original tuning cost. TileTune's revision,
+shape, pool, primitive profile, seed and budget identify its cached result.
+
+Each invocation records GPU process observations. Observed contention rejects
+its measurements and queues a retry on an idle GPU. Failed candidates consume
+budget without replacement. The generated `report.md`, `comparison.json` and
+`comparison.csv` include per-shape best configurations, Oracle@1/5/10/20/50,
+actual shortlist quality, online tuning cost and reusable preparation cost.
+Oracle@K uses one saved oracle table for every method; winner remeasurements
+are recorded separately. Polling once per second cannot exclude shorter overlap.
+
+The commands below remain available for explicit family collection and refresh.
 
 ## Start with one family
 
@@ -54,12 +88,12 @@ python -m experiments.gemm_fp8.tiletune.run --suite development --device hopper 
 python -m experiments.grouped_gemm.tiletune.run --suite development --device hopper --plan
 ```
 
-A development run uses five test cases per family, up to 256 configurations per
-pool, and seed 123. Smoke uses the first case and up to 16 configurations.
+A development run uses five test cases per operation, up to 256 configurations per
+pool, and seed 123. Smoke uses the first case per operation and up to 16 configurations.
 All five families call their example builders directly; each family README identifies its source.
-Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, FP8 GEMM 4, and grouped GEMM 192 configs per case. There is no cap or structural
-prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
+Each operation has one complete `expanded` pool: GEMM 3,456, FlashAttention 576,
+FP8 GEMM 576, grouped GEMM 576, and KDA chunk output
+1,296 configs per case. There is no cap or structural prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
 ```bash
@@ -190,6 +224,20 @@ cannot exclude overlap shorter than one second. The sharded brute-force runner
 additionally retries contaminated shards automatically.
 
 ## Compare saved selections against the oracle
+
+For a completed cross-family study, sweep larger budgets and find the exact
+first-hit oracle rank for every case:
+
+```bash
+python -m experiments.topk_study --study /path/to/completed/study \
+  --top-k 20 50 100 200 500 1000 --pool-percent 5 10 20 25 50 75 100
+```
+
+This writes `topk-study/report.md`, `topk.json` and `topk.csv` without GPU work.
+Percentage budgets round up using the entire declared pool. Unknown/rejected
+candidates remain excluded; an oracle absent from the eligible ranking is
+explicitly unreachable at any K. Source hashes and the original Oracle@20 values
+are checked. See the [H200 larger-top-K results](TOPK_RESULTS.md).
 
 The offline script uses result JSONs only; it requires Python 3.10+ and no
 TileLang, accelerator runtime, GPU, or XGBoost installation.

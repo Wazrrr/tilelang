@@ -1,7 +1,5 @@
 """Final workloads must elaborate the example programs, not parallel rewrites."""
 
-from dataclasses import replace
-
 import pytest
 
 from experiments.suite import core_cases
@@ -11,7 +9,7 @@ EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=64, block_N=64, num_stages=1, threads=128),
     "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
-    "gemm_fp8": dict(block_M=64, block_N=128, block_K=128, num_stages=4, threads=128),
+    "gemm_fp8": dict(block_M=64, block_N=128, block_K=128, num_stages=1, threads=128),
     "grouped_gemm": dict(block_M=64, block_N=128, block_K=64, num_stages=0, threads=128),
 }
 
@@ -57,11 +55,18 @@ def example_program(w, c):
             num_stages=c["num_stages"],
         )
     if w.op == "gemm_fp8":
-        from examples.deepseek_deepgemm.example_deepgemm_fp8_2xAcc import tl_gemm
+        from examples.gemm_fp8.example_blockscaled_gemm import blockscaled_gemm
+        from experiments.backend import FP8_COMPUTE_DTYPE
 
-        return tl_gemm.get_tir(
-            M=p["m"], N=p["n"], K=p["k"], block_N=c["block_N"],
-            in_dtype=w.dtype, out_dtype="bfloat16", accum_dtype="float32"
+        return blockscaled_gemm.get_tir(
+            M=p["m"],
+            N=p["n"],
+            K=p["k"],
+            block_M=c["block_M"],
+            block_N=c["block_N"],
+            num_stages=c["num_stages"],
+            threads=c["threads"],
+            compute_dtype=FP8_COMPUTE_DTYPE,
         )
     from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
 
@@ -70,7 +75,7 @@ def example_program(w, c):
     )
 
 
-@pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)
+@pytest.mark.parametrize("w", [w for w in core_cases("final") if w.op in EXAMPLE_CONFIGS], ids=lambda w: w.name)
 def test_final_programs_are_structurally_identical_to_examples(w):
     from tilelang import tvm
     from experiments.common.kernels import make_case
@@ -88,12 +93,12 @@ def test_expanded_retains_every_advanced_example_configuration(target):
     d = Device(target, TARGETS[target])
     for w in core_cases("final")[:2]:
         pool = configurations(w, d)
-        assert len(pool) == 2304
+        assert len(pool) == 3456
         for c in get_configs(w.parameters["m"], w.parameters["n"], w.parameters["k"]):
             assert c in pool
 
 
-@pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)
+@pytest.mark.parametrize("w", [w for w in core_cases("final") if w.op in EXAMPLE_CONFIGS], ids=lambda w: w.name)
 def test_final_example_kernels_on_gpu(w):
     import torch
     import tilelang

@@ -17,7 +17,16 @@ import subprocess
 import sys
 import time
 
-from experiments.utils.monitor import snapshot, foreign_processes, stop_worker, visible_gpus, matches_cuda_device
+from experiments.utils.monitor import (
+    snapshot,
+    foreign_processes,
+    stop_worker,
+    visible_gpus,
+    matches_cuda_device,
+    host_overloaded,
+    poll_gap,
+    MAX_POLL_GAP_SECONDS,
+)
 from .run import make_request, validate_result
 from experiments.utils.io import write_json
 from .spec import configuration_space, load_manifest
@@ -196,6 +205,7 @@ def main():
     clean = {g["uuid"]: 0 for g in gpus}
     validating = set()
     last_progress = 0
+    previous_poll = None
 
     def event(value):
         with (root / "events.jsonl").open("a") as stream:
@@ -205,7 +215,14 @@ def main():
     try:
         with (root / "gpu_observations.jsonl").open("a") as monitor:
             while pending or active or len(exported) < len(workloads):
+                poll_started = time.monotonic()
                 observed = snapshot()
+                poll_finished = time.monotonic()
+                gap = poll_gap(previous_poll, poll_started, poll_finished)
+                previous_poll = poll_finished
+                delayed = gap > MAX_POLL_GAP_SECONDS
+                overloaded = host_overloaded(observed)
+                observed["poll_gap_seconds"] = gap
                 observed["workers"] = {
                     uuid: dict(pid=a["process"].pid, workload=a["job"]["workload"].name, attempt=str(a["directory"]))
                     for uuid, a in active.items()
@@ -217,11 +234,15 @@ def main():
                     task = active.get(uuid)
                     foreign = foreign_processes(observed, uuid, task["process"].pid if task else None)
                     gpu_now = next(g for g in observed["gpus"] if g["uuid"] == uuid)
-                    clean[uuid] = clean[uuid] + 1 if not foreign and (task or float(gpu_now["utilization.gpu"]) <= 5) else 0
+                    clean[uuid] = (
+                        clean[uuid] + 1
+                        if not foreign and not delayed and not overloaded and (task or float(gpu_now["utilization.gpu"]) <= 5)
+                        else 0
+                    )
                     if task:
                         process, job, directory = task["process"], task["job"], task["directory"]
                         timeout = time.monotonic() - task["started"] > settings["case_timeout"]
-                        if foreign or timeout:
+                        if foreign or timeout or delayed or overloaded:
                             stop_worker(process)
                         if process.poll() is None:
                             continue
@@ -236,13 +257,25 @@ def main():
                             worker_pid=process.pid,
                             observed_foreign_processes=foreign,
                             timeout=timeout,
+                            monitor_gap=delayed,
+                            host_contended=overloaded,
+                            observed_poll_gap_seconds=gap,
+                            max_poll_gap_seconds=MAX_POLL_GAP_SECONDS,
                             exit_code=process.returncode,
                             worker_seconds=time.monotonic() - task["started"],
                         )
                         write_json(directory / "monitor.json", audit)
-                        if foreign:
+                        if foreign or delayed or overloaded:
                             pending.appendleft(job)
-                            event(dict(event="discard_contended", workload=w.name, gpu=gpu["index"], foreign=foreign))
+                            event(
+                                dict(
+                                    event="discard_contended" if foreign else "discard_monitor_gap" if delayed else "discard_host_pressure",
+                                    workload=w.name,
+                                    gpu=gpu["index"],
+                                    foreign=foreign,
+                                    poll_gap_seconds=gap,
+                                )
+                            )
                             continue
                         result_path = directory / "result.json"
                         result = (

@@ -12,16 +12,16 @@ requests are unsupported by this experiment.
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 2,304 configurations:
-exactly eight times the example's 288 configurations. Tile sizes are sampled more
-finely; the other parameters keep the example's ranges.
+[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 3,456 configurations:
+twelve times the example's 288 configurations. Tile sizes are sampled more
+finely and pipeline depths extend through five stages.
 
 | Parameter | Values |
 | --- | --- |
 | `block_M` | 32, 64, 96, 128, 192, 256 |
 | `block_N` | 32, 64, 96, 128, 192, 256 |
 | `block_K` | 16, 32, 48, 64 |
-| `num_stages` | 0, 1, 2, 3 |
+| `num_stages` | 0, 1, 2, 3, 4, 5 |
 | `thread_num` | 128, 256 |
 | `enable_rasteration` | True, False |
 
@@ -34,7 +34,7 @@ select recorded indices from this pool. Explicit CUDA/HIP configs must also be
 members of it.
 
 The pool is identical across target devices. All declared candidates are
-attempted; compilation and correctness failures are recorded. The 2,304 count
+attempted; compilation and correctness failures are recorded. The 3,456 count
 does not assert that every candidate compiles or yields distinct device code.
 
 ## Files and cases

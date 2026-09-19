@@ -15,7 +15,7 @@ def test_gemm_pool_is_complete_and_identical_across_targets(target):
     space = configuration_space(w, Device(target, TARGETS[target]))
     assert space["preset"] == "expanded"
     assert space["configs"] == get_configs()
-    assert space["candidate_count"] == len(set(space["config_ids"])) == 2304
+    assert space["candidate_count"] == len(set(space["config_ids"])) == 3456
     assert space["rejected_count"] == space["alias_count"] == space["budget_omitted_count"] == 0
     assert "selection" not in space
 
@@ -54,10 +54,10 @@ def test_unsupported_gemm_never_selects_another_kernel(parameters, dtype):
         make_case(w)
 
 
-def test_final_study_uses_all_2304_and_smoke_records_a_subset():
+def test_final_study_uses_all_3456_and_smoke_records_a_subset():
     device = Device("hopper", TARGETS["hopper"])
     final = study_plan("final", [device], families=["gemm"])
     smoke = study_plan("smoke", [device], families=["gemm"])
-    assert all(len(c["indices"]) == 2304 for c in final["subsets"]["hopper"].values())
+    assert all(len(c["indices"]) == 3456 for c in final["subsets"]["hopper"].values())
     assert all(len(c["indices"]) == 16 for c in smoke["subsets"]["hopper"].values())
     assert all(w["config_space"] == "expanded" for split in final["splits"].values() for w in split)

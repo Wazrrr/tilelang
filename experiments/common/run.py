@@ -541,7 +541,12 @@ def run_case(request, output):
 
         (output / "error.log").write_text(traceback.format_exc())
         monitor_path = output / "monitor.json"
-        if monitor_path.exists() and json.loads(monitor_path.read_text())["status"] in ("contended", "timeout"):
+        if monitor_path.exists() and json.loads(monitor_path.read_text())["status"] in (
+            "contended",
+            "timeout",
+            "monitor_gap",
+            "host_contended",
+        ):
             for name in ("outcomes.json", "brute_force.json", "carver.json", "xgboost.json", "tiletune.json", "validation.json"):
                 path = output / name
                 if path.exists():

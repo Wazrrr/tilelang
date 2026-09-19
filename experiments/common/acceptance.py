@@ -120,13 +120,10 @@ def aggregate_study(plan, root):
             accepted=bool(seeds) and all(s["accepted"] for s in seeds.values()), seeds=seeds, unavailable=plan["unavailable"].get(name)
         )
     complete_matrix = set(targets) == {"ampere", "hopper", "blackwell", "mi355x", "ascend910b"}
-    complete_families = case_count == 25 and {c["op"] for c in plan["splits"]["test"]} == {
-        "gemm",
-        "attention",
-        "kda_chunk_o",
-        "gemm_fp8",
-        "grouped_gemm",
-    }
+    from experiments.suite import core_cases
+
+    complete_families = {c["name"]: c for c in plan["splits"]["test"]} == {w.name: w.to_dict() for w in core_cases("final")}
+
     return dict(
         version=1,
         suite=plan["suite"],

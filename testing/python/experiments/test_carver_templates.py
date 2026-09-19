@@ -61,9 +61,7 @@ def test_each_experiment_family_selects_its_canonical_template(workload, expecte
     ("kernel_dtype", "model_dtype"),
     [("float8_e4m3fn", "float8_e4m3"), ("float8_e5m2", "float8_e5m2")],
 )
-def test_fp8_template_preserves_kernel_dtype_and_uses_tensorizable_model_dtype(kernel_dtype, model_dtype):
-    from tilelang.carver.matmul_analysis import get_tensorized_func_and_tags
-
+def test_fp8_template_preserves_kernel_dtype_and_explicit_scales(kernel_dtype, model_dtype):
     workload = _workload(
         "fp8",
         "gemm_fp8",
@@ -74,10 +72,10 @@ def test_fp8_template_preserves_kernel_dtype_and_uses_tensorizable_model_dtype(k
     assert template.kernel_dtype == kernel_dtype
     assert template.in_dtype == model_dtype
     assert template.out_dtype == "bfloat16"
-    _, tags = get_tensorized_func_and_tags(
-        template.equivalent_function(), template.arch.target, allow_gemv=True
-    )
-    assert tags
+    func = template.equivalent_function()
+    assert len(func.params) == 5
+    assert {str(b.name) for b in func.buffer_map.values()} >= {"ScaleA", "ScaleB"}
+    assert "Partial" in func.script() and "Scaled" in func.script()
 
 
 def test_fused_templates_model_the_full_semantic_graph():

@@ -1,28 +1,13 @@
-"""Explicit block-scaled E4M3 GEMM using the Hopper FP8 example."""
+"""One block-scale contract, with exact BF16 operand conversion on Ampere."""
 
 from threading import Lock
 
+from experiments.backend import FP8_COMPUTE_DTYPE
 from experiments.utils.kernel import KernelCase, _random
 from .reference import reference
-from .spaces import BLOCK_K, BLOCK_M, NUM_STAGES, THREADS, support_reason
+from .spaces import BLOCK_K, support_reason
 
 _BUILD_LOCK = Lock()
-
-
-class BlockScaledFP8KernelCase(KernelCase):
-    def check(self, actuals, references):
-        if len(actuals) != len(references):
-            raise AssertionError("wrong number of kernel outputs")
-        if any(actual.shape != expected.shape or actual.dtype != expected.dtype for actual, expected in zip(actuals, references)):
-            raise AssertionError("block-scaled FP8 GEMM must return the declared BF16 output")
-        super().check(actuals, references)
-
-
-def _program(**kwargs):
-    from examples.deepseek_deepgemm.example_deepgemm_fp8_2xAcc import tl_gemm
-
-    with _BUILD_LOCK:
-        return tl_gemm.get_tir(**kwargs)
 
 
 def make_case(workload):
@@ -32,23 +17,27 @@ def make_case(workload):
     m, n, k = (workload.parameters[key] for key in ("m", "n", "k"))
 
     def build(block_M, block_N, block_K, num_stages, threads):
-        if (block_M, block_K, num_stages, threads) != (BLOCK_M, BLOCK_K, NUM_STAGES, THREADS):
-            raise ValueError("Hopper block-scaled FP8 fixes block_M=64, block_K=128, num_stages=4, and threads=128")
-        return _program(
-            M=m,
-            N=n,
-            K=k,
-            block_N=block_N,
-            in_dtype="float8_e4m3fn",
-            out_dtype="bfloat16",
-            accum_dtype="float32",
-        )
+        from examples.gemm_fp8.example_blockscaled_gemm import blockscaled_gemm
+
+        if block_K != BLOCK_K:
+            raise ValueError("the common FP8 scale layout fixes block_K=128")
+        with _BUILD_LOCK:
+            return blockscaled_gemm.get_tir(
+                M=m,
+                N=n,
+                K=k,
+                block_M=block_M,
+                block_N=block_N,
+                num_stages=num_stages,
+                threads=threads,
+                compute_dtype=FP8_COMPUTE_DTYPE,
+            )
 
     def inputs(device, generator):
-        from examples.deepseek_deepgemm.example_deepgemm_fp8_2xAcc import per_block_cast_to_fp8, per_token_cast_to_fp8
+        from examples.gemm_fp8.example_blockscaled_gemm import quantize_e4m3
 
-        a, scale_a = per_token_cast_to_fp8(_random((m, k), "bfloat16", device, generator))
-        b, scale_b = per_block_cast_to_fp8(_random((n, k), "bfloat16", device, generator))
+        a, scale_a = quantize_e4m3(_random((m, k), "bfloat16", device, generator))
+        b, scale_b = quantize_e4m3(_random((n, k), "bfloat16", device, generator))
         return [a, b, scale_a, scale_b]
 
-    return BlockScaledFP8KernelCase(build, inputs, reference, None, rtol=0.03, atol=0.03)
+    return KernelCase(build, inputs, reference, None, rtol=0.03, atol=0.03)

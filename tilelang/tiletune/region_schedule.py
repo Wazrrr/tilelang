@@ -59,6 +59,47 @@ def _split(domain, evaluate, budget):
     return [(sum(n for n, _ in group), value) for value, group in groupby(runs, key=lambda pair: pair[1])]
 
 
+def _grid_schedule(variables, domains, evaluate, budget):
+    """Split interacting CTA axes, retaining CUDA's x-fastest launch order.
+
+    An inner pattern must be valid over the complete enclosing axis interval
+    before that pattern can be repeated. This distinguishes a column tail in
+    every row from one tail at the end of the entire grid.
+    """
+
+    def axis(index, current):
+        if index < 0:
+            return [(1, evaluate(current))]
+        var = variables[index]
+        lo, count = current[var]
+        runs = _split(
+            (var, lo, count),
+            lambda v, start, length: axis(index - 1, {**current, v: (start, length)}),
+            budget,
+        )
+        # The outermost repeated pattern has a direct representation. In
+        # particular, do not expand a batch/head axis into a launch-sized list.
+        if index == len(variables) - 1 and len(runs) == 1:
+            repetitions, pattern = runs[0]
+            return pattern, repetitions
+        schedules = []
+        for repetitions, pattern in runs:
+            if len(pattern) == 1:
+                count, body = pattern[0]
+                pattern, repetitions = [(count * repetitions, body)], 1
+            if len(schedules) + repetitions * len(pattern) > 4096:
+                raise UnresolvedRegion("unsupported_scheduling", "bounded CTA schedule exceeded 4096 runs")
+            for _ in range(repetitions):
+                for count, body in pattern:
+                    if schedules and schedules[-1][1] == body:
+                        schedules[-1] = (schedules[-1][0] + count, body)
+                    else:
+                        schedules.append((count, body))
+        return (schedules, 1) if index == len(variables) - 1 else schedules
+
+    return axis(len(variables) - 1, domains)
+
+
 def region_tree(col):
     """Lexical loop identity retains sequential siblings and nested serial work."""
     loops = {loop.loop_var: loop for loop in col.serial_loops + col.pipeline_loops}
@@ -210,15 +251,58 @@ def build_region_schedule(col, phases, pressure):
     tree = region_tree(col)
     phase_map = {p["operation"]: p for p in phases}
     plans = getattr(col, "ampere_plans", {})
+
+    def check_plans(nodes):
+        for node in nodes:
+            if "loop" not in node:
+                continue
+            depth = _int(node["loop"].annotations.get("num_stages", 0))
+            if depth and (node["var"] not in plans or plans[node["var"]]["status"] != "predicted"):
+                raise UnresolvedRegion("unsupported_scheduling", "independent pipeline has no verified compiler plan")
+            if depth and any("loop" in child for child in node["children"]):
+                raise UnresolvedRegion("unsupported_scheduling", "nested software pipelines are not modeled")
+            check_plans(node["children"])
+
+    # Grid subdivision cannot resolve a missing compiler scheduling plan.
+    check_plans(tree)
     liveness = {p["operation"]: p["buffers"] for p in pressure["tile_liveness"]["phases"]}
     budget = [4096]
+    operation_variables = {}
+    operation_cache = {}
+    for op in col.operations:
+        variables = set()
+        expressions = [*op.predicates]
+        for region in op.reads + op.writes:
+            expressions.extend(region.buffer.shape)
+            expressions.extend(value for r in region.ranges for value in (r.min, r.extent))
+        expressions.extend(value for _, r, kind in op.loops if kind == "1" for value in (r.min, r.extent))
+        for expression in expressions:
+            tir.stmt_functor.post_order_visit(
+                expression, lambda n, variables=variables: variables.add(n) if isinstance(n, tir.Var) else None
+            )
+        operation_variables[op.index] = variables
+
+    def operation(op, domains):
+        # A row-only access has the same work for every column partition, and
+        # setup/epilogue work does not change with an unrelated reduction axis.
+        # Cache proofs over exactly the variables used by each access/guard.
+        key = (op.index, tuple((var, bounds) for var, bounds in domains.items() if var in operation_variables[op.index]))
+        if key not in operation_cache:
+            try:
+                operation_cache[key] = _operation(op, phase_map[op.index], domains, col)
+            except UnresolvedRegion as error:
+                operation_cache[key] = (error.code, str(error))
+        value = operation_cache[key]
+        if isinstance(value, tuple):
+            raise UnresolvedRegion(*value)
+        return value
 
     def sequence(nodes, domains):
         result = []
         for node in nodes:
             if "operation" in node:
                 op = col.operations[node["operation"]]
-                result.append(_operation(op, phase_map[op.index], domains, col))
+                result.append(operation(op, domains))
                 continue
             loop, var = node["loop"], node["var"]
             lo = _constant(loop.min, domains, "unsupported_scheduling")
@@ -226,10 +310,6 @@ def build_region_schedule(col, phases, pressure):
             if n < 0:
                 raise UnresolvedRegion("unsupported_scheduling", "negative serial loop extent")
             depth = _int(loop.annotations.get("num_stages", 0))
-            if depth and (var not in plans or plans[var]["status"] != "predicted"):
-                raise UnresolvedRegion("unsupported_scheduling", "independent pipeline has no verified compiler plan")
-            if depth and any("loop" in child for child in node["children"]):
-                raise UnresolvedRegion("unsupported_scheduling", "nested software pipelines are not modeled")
             runs = _split(
                 (var, lo, n),
                 lambda v, start, length, children=node["children"], domains=domains: sequence(children, {**domains, v: (start, length)}),
@@ -256,12 +336,13 @@ def build_region_schedule(col, phases, pressure):
     domains = {v: (_int(r.min), _int(r.extent)) for v, r in col.block_domains.values()}
     if any(lo is None or n is None or n <= 0 for lo, n in domains.values()):
         raise UnresolvedRegion("unsupported_scheduling", "symbolic CTA launch domain")
-    # First try the entire grid. Otherwise split one varying axis and compress
-    # the other launch axes as repetitions in CUDA's x-fastest order.
+    # Uniform and single-axis cases stay compact. Interacting axes (for
+    # example ragged group rows plus column tails) need an ordered rectangle
+    # decomposition, not a sum of independent marginal work distributions.
     try:
         schedules = [(prod(n for _, n in domains.values()), sequence(tree, domains))]
         repetitions = 1
-    except UnresolvedRegion as original:
+    except UnresolvedRegion:
         for axis_index, axis in enumerate(axes):
             var, _ = col.block_domains[axis]
             lo, n = domains[var]
@@ -274,7 +355,9 @@ def build_region_schedule(col, phases, pressure):
             except UnresolvedRegion:
                 continue
         else:
-            raise original
+            schedules, repetitions = _grid_schedule(
+                [col.block_domains[a][0] for a in axes], domains, lambda current: sequence(tree, current), budget
+            )
     variants, groups = [], []
     for count, body in schedules:
         if body not in variants:

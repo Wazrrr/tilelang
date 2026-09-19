@@ -28,6 +28,8 @@ def test_original_carver_ranks_common_grid(dtype):
         record = result["configs"][index]
         assert record["model"]["valid"]
         assert record["tile_cost"]["score"] == (record["model"]["traffic_bytes"] + 1) * record["model"]["waves"]
+
+
 @pytest.mark.parametrize("op", ["gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"])
 def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     if not torch.cuda.is_available():
@@ -47,7 +49,10 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     }[op]
     for workload in family_module(op, "cases").cases(holdout=True):
         all_configs = configurations(workload, device)
-        configs = all_configs[:8] + all_configs[64:72] if op == "attention" else all_configs[:8]
+        configs = all_configs[:8]
+        if op == "attention":
+            # Select the second tile by value: pool expansion changes indices.
+            configs += [c for c in all_configs if c["block_M"] == 64][:8]
         assert carver_support_reason(workload, device) is None
         result = carver_rank(workload, device, configs, top_k=2)
         assert result["template"] == expected_template

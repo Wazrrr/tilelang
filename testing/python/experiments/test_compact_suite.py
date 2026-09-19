@@ -14,7 +14,13 @@ from experiments.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
 
 def test_smoke_uses_same_cases_and_three_fixed_budgets():
     assert len(core_cases("smoke")) == 5
-    assert {w.op for w in core_cases("smoke")} == {"gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"}
+    assert {w.op for w in core_cases("smoke")} == {
+        "gemm",
+        "attention",
+        "kda_chunk_o",
+        "gemm_fp8",
+        "grouped_gemm",
+    }
     assert all(w in core_cases("development") for w in core_cases("smoke"))
     assert len(core_cases("final")) == len(core_cases("development")) == 25
     assert all(sum(w.op == op for w in core_cases("final")) == 5 for op in {w.op for w in core_cases("final")})
@@ -30,10 +36,7 @@ def test_smoke_uses_same_cases_and_three_fixed_budgets():
 
 
 def test_final_cases_use_five_common_serving_shapes_per_family():
-    by_op = {
-        op: [w for w in core_cases("final") if w.op == op]
-        for op in ("gemm", "gemm_fp8", "attention", "kda_chunk_o")
-    }
+    by_op = {op: [w for w in core_cases("final") if w.op == op] for op in ("gemm", "gemm_fp8", "attention", "kda_chunk_o")}
     dense_shapes = [
         (256, 4096, 4096),
         (1024, 4096, 4096),
@@ -60,10 +63,7 @@ def test_final_cases_use_five_common_serving_shapes_per_family():
         (2, 32, 4096),
         (1, 64, 16384),
     ]
-    assert all(
-        (w.parameters["dim"], w.parameters["value_dim"], w.parameters["chunk_size"]) == (128, 128, 64)
-        for w in by_op["kda_chunk_o"]
-    )
+    assert all((w.parameters["dim"], w.parameters["value_dim"], w.parameters["chunk_size"]) == (128, 128, 64) for w in by_op["kda_chunk_o"])
 
 
 def test_pairwise_is_deterministic_and_preserves_indices():

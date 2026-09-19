@@ -19,7 +19,7 @@ from experiments.utils.subsets import pairwise_subset
 from experiments.common.spaces import PRESETS
 
 CORE_OPS = DEFAULT_OPS
-CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
+CORE_FAMILIES = tuple(dict.fromkeys(FAMILIES[op] for op in CORE_OPS))
 CORE_TARGETS = ("ampere", "hopper", "blackwell", "mi355x", "ascend910b")
 BUDGETS = {
     "smoke": dict(cases=5, configurations=16, seeds=[123], compare=False),
@@ -58,7 +58,7 @@ def core_cases(suite, families=None):
 
 def study_plan(suite, devices=None, *, families=None, config_space=None):
     tests = core_cases(suite, families)
-    families = [FAMILIES[op] for op in FAMILIES if any(w.op == op for w in tests)]
+    families = list(dict.fromkeys(FAMILIES[op] for op in FAMILIES if any(w.op == op for w in tests)))
     if suite in ("final", "full") and config_space is not None and any(w.config_space != config_space for w in tests):
         raise ValueError("final/full suites require each family's frozen configuration space")
     budget = dict(BUDGETS[suite], cases=len(tests))
@@ -143,7 +143,11 @@ def _existing_or_run(request, output):
             raise ValueError("resumed case request differs from the frozen request")
         result = validate_result(json.loads((output / "result.json").read_text()), request)
         monitor = output / "monitor.json"
-        retry = result["status"] == "failed" and monitor.exists() and json.loads(monitor.read_text())["status"] in ("contended", "timeout")
+        retry = (
+            result["status"] == "failed"
+            and monitor.exists()
+            and json.loads(monitor.read_text())["status"] in ("contended", "timeout", "monitor_gap", "host_contended")
+        )
         if not retry:
             return result
     if output.exists():

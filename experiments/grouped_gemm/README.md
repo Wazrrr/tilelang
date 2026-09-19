@@ -21,20 +21,20 @@ results retain their original scope.
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) declares 192 configurations in one deterministic
+[`spaces.py`](spaces.py) declares 576 configurations in one deterministic
 `expanded` pool:
 
 | Parameter | Values |
 | --- | --- |
 | `block_M` | 64 |
 | `block_N` | 32, 64, 96, 128, 192, 256 |
-| `block_K` | 16, 32, 48, 64 |
-| `num_stages` | 0, 1, 2, 3 |
+| `block_K` | 16, 32, 48, 64, 96, 128 |
+| `num_stages` | 0, 1, 2, 3, 4, 5, 6, 7 |
 | `threads` | 128, 256 |
 
-The example has no autotuning grid, so this is an absolute 192-candidate
+The example has no autotuning grid, so this is an absolute 576-candidate
 expansion. It includes the example's 64×64×64, 2-stage, 128-thread test launch
-(index 60) and 64×128×64, 2-stage, 256-thread CLI launch (index 125).
+(index 148) and 64×128×64, 2-stage, 256-thread CLI launch (index 341).
 
 `block_M` is fixed because the example receives padded group offsets as an input.
 Those offsets depend on the M tile. The shared runners reuse identical tensors

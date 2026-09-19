@@ -12,7 +12,7 @@ def test_fp8_inputs_have_fixed_scale_layout_and_bf16_reference():
     a, b, scale_a, scale_b = inputs
     assert a.dtype == b.dtype == torch.float8_e4m3fn
     assert scale_a.shape == (a.shape[0], a.shape[1] // 128)
-    assert scale_b.shape == (b.shape[0] // 128, b.shape[1] // 128)
+    assert scale_b.shape == (b.shape[0], b.shape[1] // 128)
     expected = case.reference(*inputs)
     assert expected.dtype == torch.bfloat16
     case.check([expected], [expected])

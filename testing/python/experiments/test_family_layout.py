@@ -101,7 +101,9 @@ def test_xgboost_fingerprints_family_implementation_sources():
     sources = source_hashes("experiments/common/kernels.py")
     args = (w, "portable.gemm", TARGETS["ampere"], "A100", "event")
     before = make_context(*args, sources)
-    example = "examples/gemm/example_gemm_advanced_autotune.py"
+    from experiments.backend import NAME
+
+    example = "examples/gemm_sm100/gemm_tcgen5mma.py" if NAME == "blackwell" else "examples/gemm/example_gemm_advanced_autotune.py"
     assert example in before["kernel_sha256"]
     sources[example] = "changed example implementation"
     assert domain(before) != domain(make_context(*args, sources))

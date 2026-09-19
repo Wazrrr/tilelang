@@ -1,47 +1,29 @@
 # FP8 GEMM
 
-This family calls `tl_gemm.get_tir` from
-[`example_deepgemm_fp8_2xAcc.py`](../../examples/deepseek_deepgemm/example_deepgemm_fp8_2xAcc.py).
-It preserves A=(M,K), pretransposed B=(N,K), uses E4M3 inputs, explicit FP32
-scales, FP32 accumulation, and BF16 output. A scales are per row and K=128
-block; B scales use a fixed 128x128 block layout.
+All three CUDA branches call
+[example_blockscaled_gemm.py](../../examples/gemm_fp8/example_blockscaled_gemm.py).
+A=(M,K) and pretransposed B=(N,K) contain E4M3 values. Explicit FP32 scales have
+shapes (M,K/128) and (N,K/128), independent of the candidate tile. Partial products
+and the scaled total accumulate in FP32; the output is BF16.
 
-The five final cases cover 256-token continuous-batch decode, 1024-token prefill, FFN contraction,
-a 4096-token projection, and a 4096-token FFN expansion. All five use E4M3 on
-this branch. Training and validation
-use the same serving dimensions at disjoint token counts. This branch uses the
-Hopper-specific source kernel and pool.
+A100 converts E4M3 values exactly to BF16 in shared memory because Ampere has no
+native FP8 matrix instruction. H200/B200 use E4M3 shared operands. Input generation,
+scale layout, mathematical reference, shapes and pool are identical. The native
+choice is explicit in `experiments/backend.py`.
 
-Training shapes (768,4096,4096) and (512,14336,4096), and validation shape
-(3072,4096,4096), are disjoint from the test shapes.
+The single 576-config pool varies block_M/block_N over 32/64/96/128/192/256,
+stages over 0/1/2/3/4/5/6/7 and threads over 128/256. block_K=128 is fixed by the scale layout. Final
+shapes match BF16 GEMM, including small-M, square, rectangular and long-reduction
+cases. Training/validation shapes remain separate from final holdouts.
 
-The single expanded pool contains four native Hopper schedules:
+Carver uses one traffic/wave adapter across architectures. It counts E4M3 global
+loads, FP32 scale loads, BF16 output stores, actual shared-operand dtype and two
+FP32 accumulator tiles. Scale arithmetic is reported without an invented latency.
+The old three architecture-specific FP8 pools are retired from experiments.
 
-| Parameter | Values |
-| --- | --- |
-| `block_M` | 64 |
-| `block_N` | 16, 32, 64, 128 |
-| `block_K` | 128 |
-| `num_stages` | 4 |
-| `threads` | 128 |
-
-Candidate failures remain recorded. The native path requires CUDA SM89 or
-later. The independent reference dequantizes both operands, performs FP32
-matmul, and casts to BF16. Shape, dtype, finite-output, and numerical checks all
-apply.
-
-TileTune uses the lowered matrix instruction and exact operand/accumulator
-dtypes to select measured primitive rates. Version-6 Hopper profiles include
-both MMA and WGMMA measurements. Missing signatures stay unscored. Carver uses
-the dedicated `FP8MatmulTemplate`; it retains the kernel dtype and lowers
-E4M3FN to Carver's tensorizable E4M3 spelling internally.
+See [the common contract](../BENCHMARK_CONTRACT.md) for complete shapes,
+provenance and validation limits. For example:
 
 ```bash
-python -m experiments.gemm_fp8.system.run --plan
 python -m experiments.gemm_fp8.tiletune.run --suite full --device hopper --plan
-python -m experiments.gemm_fp8.tiletune.run --suite full --device hopper --run-baselines
-python -m experiments.gemm_fp8.tiletune.run --suite full --device hopper --top-k 20
 ```
-
-Baselines live under `results/<GPU>/baselines/`. See the
-[shared protocol](../README.md) for monitoring, cache reuse and comparison.

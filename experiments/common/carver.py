@@ -29,6 +29,8 @@ def workload_template(workload, configs=None, *, arch=None):
             **common,
         )
     if workload.op == "gemm_fp8":
+        from experiments.backend import FP8_COMPUTE_DTYPE
+
         return FP8MatmulTemplate(
             M=p["m"],
             N=p["n"],
@@ -36,6 +38,7 @@ def workload_template(workload, configs=None, *, arch=None):
             trans_A=p.get("transpose_a", False),
             trans_B=p.get("transpose_b", False),
             kernel_dtype=workload.dtype,
+            compute_dtype=FP8_COMPUTE_DTYPE,
             **common,
         )
     if workload.op == "attention":
@@ -112,7 +115,7 @@ def _rank_records(configs, top_k, *, arch, template, evaluate):
     return dict(
         model="legacy_carver_common_grid",
         model_target=str(arch.target),
-        template=type(template).__name__,
+        template=type(template).__name__ if template is not None else None,
         formula="(traffic_bytes_per_cta + 1) * num_waves",
         ranking=ranking,
         configs=records,
@@ -189,14 +192,8 @@ def attention_rank(workload, device, configs, top_k):
         traffic = element_bytes * (2 * bm * dim + average_iterations * 2 * bn * dim)
         shared = element_bytes * (2 * bm * dim + 2 * bn * dim * depth)
         register_words = math.ceil((bm * bn * 6 + bm * dim * 4 + bm * 5 * 4) / 4)
-        valid, blocks, waves = _occupancy(
-            arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"]
-        )
-        valid = (
-            valid
-            and _full_row_gemm_supported(bm, bn, c["threads"])
-            and _full_row_gemm_supported(bm, dim, c["threads"])
-        )
+        valid, blocks, waves = _occupancy(arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"])
+        valid = valid and _full_row_gemm_supported(bm, bn, c["threads"]) and _full_row_gemm_supported(bm, dim, c["threads"])
         return dict(
             valid=valid,
             traffic_bytes_per_cta=traffic,
@@ -227,9 +224,7 @@ def kda_rank(workload, device, configs, top_k):
         traffic = iterations * repeated + once
         shared = depth * repeated + once
         register_words = chunk * bdv
-        valid, blocks, waves = _occupancy(
-            arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"]
-        )
+        valid, blocks, waves = _occupancy(arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"])
         return dict(
             valid=valid,
             traffic_bytes_per_cta=traffic,

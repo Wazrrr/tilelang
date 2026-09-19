@@ -72,6 +72,30 @@ def test_data_dependent_guard_remains_unknown():
     assert result["modules"]["pipeline_overlap"]["diagnostics"][0]["code"] == "unsupported_scheduling"
 
 
+@pytest.mark.parametrize("batches", [5, 1_000_000])
+def test_two_axis_tails_preserve_cta_order_and_compress_batches(batches):
+    @T.prim_func
+    def kernel(X: T.Tensor((batches, 7, 13), "float32"), Y: T.Tensor((batches, 7, 13), "float32")):
+        with T.Kernel(3, 4, batches, threads=128) as (bx, by, bz):
+            tile = T.alloc_fragment((2, 5), "float32")
+            T.copy(X[bz, by * 2 : by * 2 + 2, bx * 5 : bx * 5 + 5], tile)
+            for i, j in T.Parallel(2, 5):
+                if by * 2 + i < 7 and bx * 5 + j < 13:
+                    Y[bz, by * 2 + i, bx * 5 + j] = tile[i, j]
+
+    result = analyze(kernel)
+    assert result["tile_cost"]["score"] is not None, result["diagnostics"]
+    p = result["modules"]["pipeline_overlap"]
+    distribution = p["cta_work"]
+    assert distribution["repetitions"] == batches
+    ordered = [p["region_work"][g["iterations"]] for g in distribution["groups"] for _ in range(g["count"])]
+    expected = [sum(4 for i in range(2) for j in range(5) if by * 2 + i < 7 and bx * 5 + j < 13) for by in range(4) for bx in range(3)]
+    assert [work["read_bytes"] for work in ordered] == expected
+    assert [work["write_bytes"] for work in ordered] == expected
+    assert sum(expected) == 7 * 13 * 4
+    assert distribution["grid_blocks"] == 12 * batches
+
+
 def test_independent_pipelines_drain_in_program_order():
     from tilelang.tiletune.ampere import schedule_cycles
 

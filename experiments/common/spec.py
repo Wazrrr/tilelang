@@ -192,14 +192,11 @@ def support_reason(workload, device):
     if workload.op in ("gemm", "gemm_fp8", "grouped_gemm"):
         from experiments.families import family_module
 
-        reason = family_module(workload.op, "spaces").support_reason(workload)
+        support = family_module(workload.op, "spaces").support_reason
+        reason = support(workload, device) if workload.op == "gemm_fp8" else support(workload)
         if reason:
             return reason
     kind = device.target["kind"]
-    if workload.op == "gemm_fp8" and kind == "cuda":
-        version = device.target["arch"].removeprefix("sm_").rstrip("af")
-        if not version.isdigit() or int(version) < 89:
-            return "FP8 GEMM requires native FP8 tensor cores (CUDA sm_89 or newer)"
     if kind not in ("cuda", "hip"):
         return (
             None

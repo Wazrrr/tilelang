@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from experiments.backend import FP8_COMPUTE_DTYPE
 from experiments.common.baselines import carver_support_reason
 from experiments.common.run import make_request, run_native
 from experiments.common.smoke import instruction_evidence
@@ -20,7 +21,7 @@ def test_all_cuda_targets_preserve_final_cases_and_complete_pools(op):
     for name in ("ampere", "hopper", "blackwell"):
         device = Device(name, TARGETS[name])
         spaces = [configuration_space(w, device) for w in workloads]
-        if op == "gemm_fp8" and name == "ampere":
+        if op == "gemm_fp8" and name == "ampere" and FP8_COMPUTE_DTYPE == "float8_e4m3fn":
             assert all("FP8" in support_reason(w, device) for w in workloads)
         else:
             assert all(support_reason(w, device) is None for w in workloads)
@@ -54,6 +55,9 @@ def test_smoke_records_alternative_native_matrix_instructions(instruction):
 def test_unsupported_fp8_carver_architecture_is_recorded_before_gpu_or_model_execution(tmp_path):
     workload = family_module("gemm_fp8", "cases").cases(holdout=True)[0]
     device = Device("ampere", TARGETS["ampere"])
+    if FP8_COMPUTE_DTYPE == "bfloat16":
+        assert carver_support_reason(workload, device) is None
+        return
     assert "sm_89" in carver_support_reason(workload, device)
     result = run_native(make_request(workload, device, dict(method="carver")), tmp_path)
     assert result["status"] == "unsupported"

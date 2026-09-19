@@ -15,6 +15,15 @@ def _chunk_program(**kwargs):
         return tilelang_chunk_fwd_o.jit_impl.get_tir(**kwargs)
 
 
+def _gate(shape, chunk, device, generator):
+    """FP32 base-2 cumulative log gates, reset at each chunk boundary."""
+    import torch
+
+    b, s, h, d = shape
+    increments = -(torch.rand(shape, device=device, generator=generator) + 0.1) / chunk
+    return increments.reshape(b, s // chunk, chunk, h, d).cumsum(2).reshape(shape)
+
+
 def make_case(w):
     """The example's BSHD chunk-output kernel, without a rewritten algorithm."""
     p, dtype = w.parameters, w.dtype
@@ -48,6 +57,8 @@ def make_case(w):
         )
 
     def inputs(device, generator):
-        return [_random(shape, "float32" if i == 2 else dtype, device, generator) for i, shape in enumerate(shapes)]
+        return [
+            _gate(shape, chunk, device, generator) if i == 2 else _random(shape, dtype, device, generator) for i, shape in enumerate(shapes)
+        ]
 
     return KernelCase(build, inputs, chunk_reference(w), [5])

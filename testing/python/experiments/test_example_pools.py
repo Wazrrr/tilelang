@@ -10,7 +10,12 @@ from experiments.common.spec import Device, TARGETS, Workload, configuration_spa
 from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
-COUNTS = {"attention": 320, "kda_chunk_o": 720, "gemm_fp8": 4, "grouped_gemm": 192}
+COUNTS = {
+    "attention": 576,
+    "kda_chunk_o": 1296,
+    "gemm_fp8": 576,
+    "grouped_gemm": 576,
+}
 CASES = [w for w in core_cases("final") if w.op in COUNTS]
 REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 
@@ -20,6 +25,7 @@ REPRESENTATIVES = [next(w for w in CASES if w.op == op) for op in COUNTS]
 def test_complete_pool_has_stable_ids_without_cap_or_prefilter(w, target):
     space = configuration_space(w, Device(target, TARGETS[target]))
     assert space["preset"] == "expanded"
+    assert space["candidate_count"] >= 500
     assert space["configs"] == family_module(w.op, "spaces").get_configs()
     assert len(set(space["config_ids"])) == space["candidate_count"] == COUNTS[w.op]
     assert space["retained_current_count"] == space["rejected_count"] == space["alias_count"] == space["budget_omitted_count"] == 0
@@ -55,13 +61,12 @@ def test_every_example_config_and_explicit_default_is_included():
 
     assert len(fa_configs()) == 1 and all(c in fa for c in fa_configs())
     assert dict(block_M=128, block_N=128, num_stages=1, threads=128) in fa
-    assert len(kda_configs()) == 90 and len(kda) == 8 * len(kda_configs())
+    assert len(kda_configs()) == 90 and len(kda) == COUNTS["kda_chunk_o"]
     assert all(c in kda for c in kda_configs())
     assert dict(block_DK=64, block_DV=64, num_stages=0, threads=256) in kda
-    assert fp8 == [
-        dict(block_M=64, block_N=block_n, block_K=128, num_stages=4, threads=128)
-        for block_n in (16, 32, 64, 128)
-    ]
+    assert len(fp8) == COUNTS["gemm_fp8"]
+    assert {c["block_K"] for c in fp8} == {128}
+    assert dict(block_M=64, block_N=128, block_K=128, num_stages=1, threads=128) in fp8
 
 
 def test_every_case_split_and_frozen_manifest_use_the_single_pool():
@@ -75,7 +80,7 @@ def test_every_case_split_and_frozen_manifest_use_the_single_pool():
         assert len(plan["subsets"]["hopper"][w.name]["indices"]) == COUNTS[w.op]
     smoke = study_plan("smoke", [Device("hopper", TARGETS["hopper"])])
     for w in core_cases("smoke"):
-        assert len(smoke["subsets"]["hopper"][w.name]["indices"]) == min(16, COUNTS.get(w.op, 2304))
+        assert len(smoke["subsets"]["hopper"][w.name]["indices"]) == min(16, COUNTS.get(w.op, 3456))
 
 
 def test_recurrent_kda_is_not_silently_substituted_by_chunk_output():

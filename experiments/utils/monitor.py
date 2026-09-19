@@ -13,7 +13,34 @@ import time
 from experiments.utils.io import write_json
 
 
+MAX_POLL_GAP_SECONDS = 5
+MAX_HOST_LOAD_PER_CPU = 2
+
+
 def snapshot():
+    """Observe occupancy without starting a CUDA context or a subprocess per poll."""
+    from .nvml import snapshot as nvml_snapshot
+
+    started = time.monotonic()
+    try:
+        observation = nvml_snapshot()
+    except (OSError, AttributeError):
+        observation = _snapshot_smi()
+    observation["duration_seconds"] = time.monotonic() - started
+    observation["host_load_1m"] = os.getloadavg()[0]
+    observation["host_cpu_count"] = len(os.sched_getaffinity(0))
+    return observation
+
+
+def host_overloaded(observation):
+    return observation.get("host_load_1m", 0) > MAX_HOST_LOAD_PER_CPU * observation.get("host_cpu_count", os.cpu_count() or 1)
+
+
+def poll_gap(previous, started, finished):
+    return max(finished - started, finished - previous if previous is not None else 0)
+
+
+def _snapshot_smi():
     def query(flag, fields):
         output = subprocess.check_output(["nvidia-smi", f"--{flag}={','.join(fields)}", "--format=csv,noheader,nounits"], text=True)
         return [dict(zip(fields, (v.strip() for v in row.split(",")))) for row in output.splitlines() if row.strip()]
@@ -34,9 +61,9 @@ def foreign_processes(observation, gpu_uuid, worker_pid=None):
         if row["gpu_uuid"] != gpu_uuid:
             continue
         try:
-            owned = worker_pid is not None and os.getpgid(int(row["pid"])) == worker_pid
+            owned = worker_pid is not None and (int(row["pid"]) == worker_pid or os.getpgid(int(row["pid"])) == worker_pid)
         except ProcessLookupError:
-            continue
+            owned = False  # A process observed on the GPU cannot be ignored just because it exited.
         if not owned:
             foreign.append(row)
     return foreign
@@ -62,6 +89,8 @@ def visible_gpus(observation):
 
 
 def idle_gpus(observation, *, ignore_pid=None):
+    if host_overloaded(observation) or observation.get("duration_seconds", 0) > MAX_POLL_GAP_SECONDS:
+        return []
     return [
         g
         for g in visible_gpus(observation)
@@ -114,11 +143,19 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
     output.mkdir(parents=True, exist_ok=True)
     process = None
     started = time.monotonic()
-    audit = dict(gpus=gpus, poll_interval_seconds=1, status="waiting")
+    previous_poll = None
+    audit = dict(gpus=gpus, poll_interval_seconds=1, max_poll_gap_seconds=MAX_POLL_GAP_SECONDS, status="waiting")
     try:
         with (output / "gpu_observations.jsonl").open("a") as observations, (output / "worker.log").open("w") as log:
             while True:
+                poll_started = time.monotonic()
                 observed = snapshot()
+                poll_finished = time.monotonic()
+                gap = poll_gap(previous_poll, poll_started, poll_finished)
+                previous_poll = poll_finished
+                delayed = gap > MAX_POLL_GAP_SECONDS
+                overloaded = host_overloaded(observed)
+                observed["poll_gap_seconds"] = gap
                 foreign = [
                     p
                     for gpu in gpus
@@ -129,7 +166,7 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
                 observations.flush()
                 if process is None:
                     busy = any(float(next(g for g in observed["gpus"] if g["uuid"] == gpu["uuid"])["utilization.gpu"]) > 5 for gpu in gpus)
-                    if foreign or busy:
+                    if foreign or busy or delayed or overloaded:
                         if not wait_idle:
                             raise RuntimeError("requested GPU is busy")
                         time.sleep(1)
@@ -137,6 +174,13 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
                     process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                     started = time.monotonic()
                     audit.update(status="running", worker_pid=process.pid)
+                elif delayed or overloaded:
+                    audit.update(
+                        status="monitor_gap" if delayed else "host_contended",
+                        observed_poll_gap_seconds=gap,
+                        host_load_1m=observed.get("host_load_1m"),
+                    )
+                    raise RuntimeError("monitoring gap or host overload; discard this invocation's measurements")
                 elif foreign:
                     audit.update(status="contended", foreign_processes=foreign)
                     raise RuntimeError("foreign GPU process observed; discard this invocation's measurements")

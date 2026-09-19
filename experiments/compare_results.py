@@ -23,6 +23,32 @@ from experiments.utils.results import (
 )
 
 
+def oracle_hits(indices, records, oracle, ranking):
+    """Find exact oracle hits in the evaluated order, including tied optima."""
+    positions = {index: rank for rank, index in enumerate(indices, 1)}
+    by_config = {config_key(row["config"]): row for row in records.values()}
+    ranked = {row["index"]: row for row in ranking}
+    candidates = []
+    for key, measured in oracle["records"].items():
+        if measured["status"] != "benchmarked" or measured["latency_ms"] != oracle["winner"]["latency_ms"]:
+            continue
+        row = by_config.get(key, {})
+        index = row.get("index")
+        candidates.append(
+            dict(
+                oracle_index=measured["index"],
+                config=measured["config"],
+                index=index,
+                position=positions.get(index),
+                tier=ranked.get(index, {}).get("tier"),
+                diagnostics=row.get("diagnostics", []),
+                model_unknown=(row.get("tile_cost") or {}).get("unknown", []),
+            )
+        )
+    first = min((c["position"] for c in candidates if c["position"] is not None), default=None)
+    return dict(first_oracle_hit_k=first, oracle_candidates=candidates)
+
+
 def compare_method(name, path, oracle, ks, order):
     path = Path(path).resolve()
     if path.is_dir():
@@ -58,7 +84,9 @@ def compare_method(name, path, oracle, ks, order):
     return dict(
         result,
         status="evaluated",
+        candidate_count=len(records),
         available_count=len(indices),
+        **oracle_hits(indices, records, oracle, report.get("ranking") or []),
         curves=[measure_prefix(indices, records, oracle, k, order) for k in ks],
         saved_selection=measure_prefix(selected, records, oracle, budget, "saved") if selected is not None else None,
     )
@@ -78,6 +106,7 @@ def compare(oracle_path, methods, ks, order="ranking"):
             failures="consume K; no replacement; no successful config yields null, not zero latency",
             shortfall="fewer than K available configs; percentage describes only the reported selected_count",
             curves="retrospective prefix evaluation; saved_selection separately evaluates the actual recorded shortlist",
+            first_oracle_hit_k="first position in the evaluated order with exactly the oracle minimum latency; any tied optimum counts; null means unreachable",
         ),
         oracle=dict(
             sources=oracle["sources"],

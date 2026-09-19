@@ -1,3 +1,5 @@
+> The current cross-branch contract is [BENCHMARK_CONTRACT.md](../BENCHMARK_CONTRACT.md): five families, five operations and 25 final workloads. It supersedes older pool and FP8/KDA descriptions below.
+
 # Shared experiment runner reference
 
 Named family suites now use `study.py`: it collects one immutable baseline bundle
@@ -33,17 +35,17 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 5 gives each final family exactly one `expanded` pool. Each pool
-uses the example's native parameters and includes its original configs/defaults.
-The same complete domain is used for both cases and all native targets.
+Space version 7 gives each final operation exactly one `expanded` pool. Each pool
+uses the parameters declared in the common benchmark contract.
+The same complete domain is used for all cases and all native targets.
 
 | Family | Configs per case | Example coverage |
 | --- | ---: | --- |
-| [GEMM](../gemm/README.md) | 2,304 | All 288 autotune configs; 8× expansion |
-| [FlashAttention](../flash_attention/README.md) | 320 | Single autotune config and explicit 128/128 launch |
-| [KDA chunk output](../kda/README.md) | 720 | All 90 autotune configs; 8× expansion |
-| [FP8 GEMM](../gemm_fp8/README.md) | 2,304 | All 288 example schedules; 8× expansion |
-| [Grouped GEMM](../grouped_gemm/README.md) | 192 | Fixed 64-row tiles and native example knobs |
+| [GEMM](../gemm/README.md) | 3,456 | All 288 autotune configs; 12× expansion |
+| [FlashAttention](../flash_attention/README.md) | 576 | Single autotune config and explicit 128/128 launch |
+| [KDA chunk output](../kda/README.md) | 1,296 | Includes all 90 example autotune configs |
+| [FP8 GEMM](../gemm_fp8/README.md) | 576 | Fixed 128-K blocks and explicit row scales |
+| [Grouped GEMM](../grouped_gemm/README.md) | 576 | Fixed 64-row tiles and native example knobs |
 
 Shapes, dtype, causal mode and chunk size are workload properties. They do not
 multiply the config count. Full sweeps have no cap, protected subset or
@@ -498,9 +500,9 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 ## Compact five-target suites
 
 `python -m experiments.suite --suite smoke --plan` plans five families
-with one representative shape per family. Development uses twenty-five cases and up to 256
-configurations; final uses the complete `expanded` pools (GEMM 2,304,
-FlashAttention 320, KDA 720, FP8 GEMM 2,304 and grouped GEMM 192 per case) and three seeds. See
+with one representative shape per operation (five cases). Development uses twenty-five cases and up to 256
+configurations; final uses the complete `expanded` pools (GEMM 3,456,
+FlashAttention 576, KDA chunk output 1,296, FP8 GEMM 576 and grouped GEMM 576 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 
@@ -517,9 +519,10 @@ GEMM uses serving projection/FFN matrices with pretransposed B=(N,K):
 Smoke uses the 64-token continuous-batch decode case. The final dimensions are recorded in
 [`five_target_final.json`](../manifests/five_target_final.json).
 
-Analysis version 23 accepts verified read-only integer `input_values`, resolves
+Analysis version 24 accepts verified read-only integer `input_values`, resolves
 metadata-dependent addresses without rewriting the executable, and preserves
-actual loads and masked stores. Profile version 6 measures both MMA and WGMMA on
-Hopper and selects rates by exact instruction and dtype. See
+actual loads and masked stores across interacting grid-axis tails. Profile
+version 6 measures both MMA and WGMMA on Hopper and selects rates by exact
+instruction and dtype. See
 [model contracts](../model_contracts.md) for the distinction between exact work
 counts, estimated latency and unsupported scheduling.

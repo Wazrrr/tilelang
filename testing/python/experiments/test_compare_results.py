@@ -54,6 +54,38 @@ def test_failed_configs_consume_k_and_actual_shortlist_is_separate(inputs):
     assert "100.00%" in render(result) and "N/A" in render(result)
 
 
+def test_first_oracle_hit_preserves_failures_and_excluded_candidates(inputs):
+    oracle, method, _, report = inputs
+    result = compare(oracle, {"tiletune": method}, [2])["methods"][0]
+    assert result["first_oracle_hit_k"] is None
+    assert result["oracle_candidates"][0]["tier"] == "unknown"
+    assert result["oracle_candidates"][0]["position"] is None
+    # The saved exploratory selection can reach an optimum excluded by ranking.
+    selected = compare(oracle, {"tiletune": method}, [2], "selected")["methods"][0]
+    assert selected["first_oracle_hit_k"] == 2
+    report["ranking"][-1].update(tier="eligible", score=3)
+    write(method, report)
+    result = compare(oracle, {"tiletune": method}, [3, 4])["methods"][0]
+    assert result["first_oracle_hit_k"] == 4
+    assert result["curves"][0]["oracle_at_k"] < 1
+    assert result["curves"][1]["oracle_at_k"] == 1
+
+
+def test_any_exactly_tied_optimum_counts_but_rounded_near_hits_do_not(inputs):
+    oracle, method, records, _ = inputs
+    records[2]["latency_ms"] = 1.000000001
+    write(oracle, records)
+    result = compare(oracle, {"tiletune": method}, [2])
+    assert "100.00%" in render(result)
+    assert result["methods"][0]["first_oracle_hit_k"] is None
+    records[2]["latency_ms"] = 1.0
+    write(oracle, records)
+    result = compare(oracle, {"tiletune": method}, [2])["methods"][0]
+    assert result["first_oracle_hit_k"] == 2
+    assert len(result["oracle_candidates"]) == 2
+    assert result["curves"][0]["best_oracle_index"] == 2
+
+
 def test_selection_only_reports_and_negative_xgboost_scores(inputs):
     oracle, method, _, report = inputs
     report["ranking"][0]["score"] = -5.0
@@ -167,6 +199,18 @@ def test_null_selection_budget_has_a_clear_error(inputs):
     write(method, report)
     with pytest.raises(ValueError, match="invalid saved selection budget"):
         compare(oracle, {"tiletune": method}, [2])
+
+
+def test_analysis_only_metadata_has_no_observed_gpu(inputs):
+    oracle, method, records, report = inputs
+    workload = dict(op="gemm_fp8", dtype="float8_e4m3fn", parameters=dict(m=4096, n=4096, k=4096))
+    target = dict(kind="cuda", arch="sm_90a")
+    write(oracle, dict(records=records, identity=dict(workload=workload, target=target, device="NVIDIA H200")))
+    method = write(method.parent / "offline" / "tiletune.json", report)
+    write(method.parent / "experiment.json", dict(workload=workload, device=dict(target=target), device_observation=None))
+    result = compare(oracle, {"tiletune": method}, [2])
+    assert result["methods"][0]["metadata_check"] == "matched shared workload fields, target"
+    assert result["methods"][0]["curves"][0]["oracle_at_k"] == 0.25
 
 
 def test_shell_entrypoint_runs_outside_repo_without_backend_packages(inputs, tmp_path):

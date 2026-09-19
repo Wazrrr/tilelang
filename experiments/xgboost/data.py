@@ -47,7 +47,7 @@ def make_context(workload, implementation, target, device_name, backend, source_
 
     # Keep the serialized implementation label stable across module cleanup.
     family = FAMILIES[implementation.removeprefix("portable.")] if implementation.startswith("portable.") else implementation
-    paths = ["experiments/utils/kernel.py", "experiments/families.py", f"experiments/{family}/kernel.py"]
+    paths = ["experiments/backend.py", "experiments/utils/kernel.py", "experiments/families.py", f"experiments/{family}/kernel.py"]
     if implementation.startswith("portable."):
         paths.append("experiments/common/kernels.py")
     paths.append(f"experiments/{family}/reference.py")
@@ -56,7 +56,7 @@ def make_context(workload, implementation, target, device_name, backend, source_
         "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
         "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
         "kda": "examples/kda/chunk_o.py",
-        "gemm_fp8": "examples/deepseek_deepgemm/example_deepgemm_fp8_2xAcc.py",
+        "gemm_fp8": "examples/gemm_fp8/example_blockscaled_gemm.py",
     }
     if family in examples:
         paths.append(examples[family])

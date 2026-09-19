@@ -1,14 +1,19 @@
+> The current cross-branch contract is [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md): five families, five operations and 25 final workloads. It supersedes older pool and FP8/KDA descriptions below.
+
 # Current workload and model contracts
 
 The active matrix has five families and twenty-five final cases: FP16 GEMM, FP8 GEMM,
 FlashAttention, chunk-KDA output and grouped GEMM. Softmax source is archived in
 `results/archive/softmax-source-20260917/`; existing measurements keep their
 original meaning. All experiment kernels call their authoritative example
-builders. The FP8 family uses FP32 accumulation and FP8 output.
+builders. The FP8 family uses FP32 accumulation and FP8 output. Its explicit
+`tl.disable_wgmma=True` compiler policy keeps the existing per-element accuracy
+check; long WGMMA accumulation failed that check on the final H200 shapes.
+Every method uses this policy, and TileTune uses the measured MMA profile.
 
 ## TileTune
 
-Analysis version 23 separates the following inputs and assumptions:
+Analysis version 24 separates the following inputs and assumptions:
 
 - Matrix work comes from the kernel's lowered matrix operation, including padded
   tiles and both KDA products. Attention retains its causal iteration bounds,
@@ -22,7 +27,10 @@ Analysis version 23 separates the following inputs and assumptions:
   loads still contribute traffic and scalar work. The compiled PrimFunc is intact.
 - Ragged groups have separate CTA work classes. Full padded GEMM work, A loads
   that cross a group boundary, the packed allocation's final mask, and every
-  group's output mask are counted separately.
+  group's output mask are counted separately. Interacting row and column tails
+  are partitioned together in CUDA's x-fastest launch order; repeated batch/head
+  patterns remain compressed. The bounded analysis leaves excessively complex
+  or unresolved domains unscored rather than assuming uniform CTA work.
 - Profile version 6 measures both WGMMA and MMA on Hopper. Matrix rates are
   selected per operation by instruction, A dtype, B dtype and accumulator dtype.
   Older cached profiles remain readable but cannot supply missing signatures.

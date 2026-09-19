@@ -30,13 +30,13 @@ All named-suite cases use BF16. Smoke uses the first development case.
 
 ## Configuration space
 
-Every case uses the same complete **320-config `expanded` pool**:
+Every case uses the same complete **576-config `expanded` pool**:
 
 | Parameter | Values |
 | --- | --- |
-| `block_M` | 32, 64, 128, 192, 256 |
-| `block_N` | 16, 32, 48, 64, 96, 128, 192, 256 |
-| `num_stages` | 0, 1, 2, 3 |
+| `block_M` | 32, 64, 128 |
+| `block_N` | 16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256 |
+| `num_stages` | 0, 1, 2, 3, 4, 5, 6, 7 |
 | `threads` | 128, 256 |
 
 The example's `get_configs()` contains one config: 64/64/1/128.
@@ -44,7 +44,7 @@ Its explicit 128/128/1/128 launch is also included. The pool expands these
 native tile, stage and thread parameters; it preserves the example's causal
 loop, fragment recurrence, FullRow GEMMs and shared output.
 
-Space version 5 has no alternative `current`, `large` or `exhaustive` presets
+Space version 7 has no alternative `current`, `large` or `exhaustive` presets
 for this family. There is no cap, protected subset, target-dependent domain or
 structural prefilter. Every declared candidate is attempted in a full sweep;
 compilation and correctness failures remain recorded. Counts describe candidate
@@ -105,7 +105,7 @@ for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparison
 ## Carver baseline
 
 `carver.py` adapts the repository's original `FlashAttentionTemplate` and
-`TensorCorePolicy` to all 320 configs for CUDA FP16/BF16 attention. Nothing under
+`TensorCorePolicy` to all 192 configs for CUDA FP16/BF16 attention. Nothing under
 `tilelang/carver/` is modified. Selected configs execute the same BSHD example
 kernel, including softmax and causal behavior, used by every other method.
 
@@ -129,7 +129,7 @@ for Carver; compilation keeps the actual target.
 
 On H200, the unchanged policy's 49,152-byte shared-memory limit rejects every
 config in both final pools: the minimum estimates are 52,224 bytes (noncausal)
-and 78,848 bytes (causal). Such a run saves all 320 rejections and an empty
+and 78,848 bytes (causal). Such a run saves all 192 rejections and an empty
 selection, returns `model_unavailable`, and reports N/A Oracle@K. It is a recorded
 baseline outcome that can be cached and reused. Smaller development cases
 selected 16 noncausal and 4 causal configs at K=20; all failed compilation in
@@ -142,5 +142,5 @@ attention winner latency was measured in this adapter validation; see the
 python -m experiments.common.run --devices hopper --method carver \
   --workloads attention_noncausal attention_causal --top-k 20 \
   --output experiments/flash_attention/results/carver-final
-# Add --smoke to run the two development shapes with the same 320-config pool.
+# Add --smoke to run the two development shapes with the same 576-config pool.
 ```

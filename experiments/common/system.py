@@ -18,23 +18,22 @@ VARIANTS = {
     "multi_gpu": (False, False, True),
     "combined": (True, True, True),
 }
-OPS = {family: op for op, family in FAMILIES.items()}
+OPS = {family: [op for op in FAMILIES if FAMILIES[op] == family] for family in dict.fromkeys(FAMILIES.values())}
 
 
 def system_plan(family, *, workloads=None, variants=None, indices=None):
-    cases = family_module(OPS[family], "cases").cases(holdout=True)
+    cases = [w for op in OPS[family] for w in family_module(op, "cases").cases(holdout=True)]
     if workloads:
         if set(workloads) - {w.name for w in cases}:
             raise ValueError("unknown final workload name for this family")
         cases = [w for w in cases if w.name in workloads]
     from experiments.utils.cli import select_configs
 
-    pool = family_module(OPS[family], "spaces").get_configs()
     return [
         dict(
             workload=w.to_dict(),
             variant=v,
-            indices=select_configs(pool, indices)[0],
+            indices=select_configs(family_module(w.op, "spaces").get_configs(), indices)[0],
         )
         for w in cases
         for v in (variants or VARIANTS)

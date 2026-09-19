@@ -47,7 +47,7 @@ def write(path, data):
 
 
 @pytest.mark.parametrize(
-    "family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 4), ("grouped_gemm", 192)]
+    "family,count", [("gemm", 3456), ("flash_attention", 576), ("kda", 1296), ("gemm_fp8", 576), ("grouped_gemm", 576)]
 )
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
@@ -94,7 +94,9 @@ def test_baseline_identity_ignores_tiletune_seed_and_k_but_includes_baseline_see
     settings = dict(warmup=1, rep=2, timeout=30, case_timeout=300, workers=1)
     monkeypatch.setattr(baseline_store, "measurement_sources", lambda families: {"kernel": "hash"})
     _, first = baseline_store.identities(plan, device, settings, {"device": "test"})
-    assert "experiments/flash_attention/carver.py" in first["sources"]
+    for family in ("gemm", "flash_attention", "gemm_fp8", "kda", "grouped_gemm"):
+        assert f"experiments/{family}/carver.py" in first["sources"]
+    assert "experiments/common/carver.py" in first["sources"]
     plan["top_k"] = 50
     plan["budget"]["seeds"] = [456]
     _, second = baseline_store.identities(plan, device, settings, {"device": "test"})
@@ -265,7 +267,7 @@ def test_missing_or_changed_baselines_are_read_only_and_failed_refresh_keeps_cur
     assert baseline_store.load_bundle(root, identity) == (bundle, True)
 
 
-@pytest.mark.parametrize("change", ["provenance", "order", "training", "pool", "workload", "gpu"])
+@pytest.mark.parametrize("change", ["provenance", "order", "training", "pool", "workload", "gpu", "contract"])
 def test_baseline_reuse_depends_only_on_requested_case_gpu_and_pool(tmp_path, change):
     plan, _, configs = fixture_plan()
     workload = plan["splits"]["test"][0]
@@ -290,13 +292,15 @@ def test_baseline_reuse_depends_only_on_requested_case_gpu_and_pool(tmp_path, ch
     elif change == "training":
         changed["splits"]["train"] = []
         changed["splits"]["validation"] = []
+    elif change == "contract":
+        changed["measurement"]["kernel_contract_version"] = 2
     elif change == "pool":
         changed["pools"][workload["name"]] = configs[:1]
     elif change == "workload":
         changed["splits"]["test"][0]["parameters"]["m"] += 1
     else:
         changed["measurement"]["runtime"]["device"] = "H100"
-    if change in ("pool", "workload", "gpu"):
+    if change in ("pool", "workload", "gpu", "contract"):
         with pytest.raises(ValueError, match="explicitly rerun"):
             baseline_store.load_bundle(tmp_path, changed)
     else:

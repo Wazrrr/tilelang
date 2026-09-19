@@ -1,4 +1,4 @@
-"""One 192-config pool; fixed M tiles keep group metadata identical across it."""
+"""One 576-config pool; fixed M tiles keep group metadata identical across it."""
 
 from experiments.utils.grid import grid
 
@@ -9,8 +9,8 @@ def get_configs():
     return grid(
         block_M=[BLOCK_M],
         block_N=[32, 64, 96, 128, 192, 256],
-        block_K=[16, 32, 48, 64],
-        num_stages=[0, 1, 2, 3],
+        block_K=[16, 32, 48, 64, 96, 128],
+        num_stages=[0, 1, 2, 3, 4, 5, 6, 7],
         threads=[128, 256],
     )
 

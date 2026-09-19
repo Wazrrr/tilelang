@@ -50,6 +50,7 @@ def write_run(path, rows, *, name="gemm", failed=(), sample_fraction=None):
             p: "same-kernel-source"
             for p in (
                 "experiments/common/kernels.py",
+                "experiments/backend.py",
                 "experiments/utils/kernel.py",
                 "experiments/families.py",
                 "experiments/gemm/kernel.py",
@@ -118,6 +119,7 @@ def test_split_is_semantic_not_run_name_or_configuration_subset(tmp_path):
         train(training, validation, tmp_path / "bad.json")
     sources = dict.fromkeys(
         [
+            "experiments/backend.py",
             "experiments/utils/kernel.py",
             "experiments/families.py",
             "experiments/gemm/kernel.py",
