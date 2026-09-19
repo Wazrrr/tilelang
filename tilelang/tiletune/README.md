@@ -223,6 +223,13 @@ rank; memory operations and original index only order report entries. Storage
 and dependency facts remain available; unresolved scheduling or a soft register estimate does
 not prevent a memory score. Explicit resource policies still apply.
 
+Memory mode uses primitive operator semantics and backend hardware inputs,
+without family-policy objects or GEMM/attention recognition. It rejects explicit
+GEMM/attention specialization and nonzero attention-specific spill allowances.
+Rules for an MMA accumulator or a reduction's source region apply uniformly in
+every kernel that contains that operator. The current byte score does not use
+the dependency graph or live-storage estimates as a timing prediction.
+
 This opt-in path scores every oracle winner in the saved 25-case H200 study.
 Conservative tie ranks reach 20/25 within 50% and all 25 at a ceil-rounded 58%
 budget. It has lower quality at small budgets than the existing timing model.

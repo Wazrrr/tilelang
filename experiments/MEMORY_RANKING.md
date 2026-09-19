@@ -10,6 +10,39 @@ The source is the completed `h200-25shape-20260917T080241Z` FP16/E4M3 study.
 These are retrospective results on that fixed pool, not measurements of the
 newer BF16 kernels or a claim of generalization.
 
+## Kernel-family-independent model contract
+
+The new memory path derives facts from the supplied PrimFunc and combines them
+with backend hardware inputs. It does not instantiate a family-policy object or
+dispatch through GEMM/attention recognition. `specialization="gemm"`,
+`specialization="attention"`, and nonzero attention-specific spill allowances
+are rejected in memory mode. The legacy timing path keeps its separate policies.
+
+The boundary is:
+
+```text
+PrimFunc → generic operator/access/dependency/storage facts
+        → backend hardware interpretation → score and conservative tie ranks
+```
+
+Primitive semantics are part of the common analysis: a copy's read/write
+regions, a reduction's source axis, and an MMA operation's accumulator storage
+apply wherever that operator appears. The enclosing kernel family does not
+select those rules. Backend differences belong in hardware inputs and rules for
+execution units, subgroups, memory spaces, instruction semantics, and resource
+limits. Device capacities remain explicit inputs. Future scoring refinements
+must use these program facts and backend properties, without per-family weights,
+spill exceptions, or whole-kernel shape templates.
+
+The current scorer uses logical global bytes and launch size. Dependency graphs,
+live register tiles, and shared-memory lifetimes remain reported facts and
+resource-policy inputs; they do not contribute a critical-path or spill-service
+cost to the byte score. Consequently, "deeper byte modeling than Carver" is too
+broad a claim: Carver already propagates tile shapes and models transaction sizes
+and storage lifetimes. TileTune's distinction in this experiment is reading the
+actual tiled TileLang implementation, including its explicit accesses and loop
+visits, instead of the comparison baseline's hand-written family adapters.
+
 ## Scoring rule
 
 For each captured global read/write, count its requested tile bytes and loop
@@ -119,8 +152,9 @@ config = TileTuneConfig(
 Existing AutoTuner calls can use
 `.set_tiletune_args(True, ranking_metric="memory", top_k=100)`.
 The common experiment CLI also accepts `--metric memory` and skips primitive
-profile loading in that mode. Analysis version 26 includes conservative tie
-ranks and runtime selection that retains whole boundary groups.
+profile loading in that mode. Analysis version 27 enforces the family-independent
+memory-mode contract, retaining version 26's conservative tie ranks and whole
+boundary-group selection.
 Optional `facts_path` output for this mode uses the explicit `memory.v1` schema
 and can be replayed with `score_memory(accesses, grid_blocks, sm_count)`; its
 `unknown` field must be checked before treating a partial ledger as complete.
@@ -175,3 +209,10 @@ conservative-rank and boundary-selection change had **94 passes and 13 GPU
 skips**, including exploration, saved-selection accounting, and Carver adapter
 compatibility. The standalone softmax check additionally analyzed 24 PrimFuncs;
 its eight large-shape candidates all receive tail rank 8/8.
+
+The backend-only policy boundary was checked separately: **68 tests passed and
+8 GPU tests were skipped**. GEMM, attention, and softmax analysis passed with
+family dispatch and policy construction disabled by test assertions. A shared
+copy PrimFunc was analyzed against CUDA and HIP target descriptions with
+synthetic execution-unit counts to verify that supplied backend inputs control
+the wave term. These checks do not establish GPU performance on either backend.

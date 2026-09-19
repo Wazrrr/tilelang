@@ -1,7 +1,7 @@
-"""Common analysis flow: recognize, estimate registers, model execution, rank.
+"""Capture program facts, estimate storage, and run the requested ranking model.
 
-Family policy lives in families/. Stages receive a resolved analysis context;
-unexpected errors propagate to the caller instead of producing partial reports.
+Memory ranking uses operator semantics and backend resource inputs only. The
+legacy timing path retains its family policies. Unexpected stage errors propagate.
 """
 
 from dataclasses import dataclass
@@ -38,15 +38,21 @@ def run_modules(context, pressure):
     trace = context.trace
     memory_mode = context.config.ranking_metric == "memory"
     if memory_mode:
-        from .families.base import KernelSpecialization
-
-        specialization = KernelSpecialization()
+        specialization = None
+        specialization_info = dict(
+            name="generic", matched=True, loop=None, roles={}, evidence=["IR operator facts and backend inputs; no kernel-family policy"]
+        )
+        phase_labels = {op.index: op.kind for op in context.collector.operations}
+        loop, spill_allowance = None, 0
     else:
         specialization = select_specialization(context.collector, context.config.specialization)
-    trace.record("specialization", lambda: specialization.to_dict())
+        specialization_info = specialization.to_dict()
+        phase_labels = {op.index: specialization.phase(op) for op in context.collector.operations}
+        loop = specialization.loop
+        spill_allowance = specialization.register_spill_allowance(context.config)
+    trace.record("specialization", lambda: specialization_info)
 
-    phase_labels = {op.index: specialization.phase(op) for op in context.collector.operations}
-    pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=specialization.loop)
+    pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=loop)
     if hasattr(context.collector, "ampere_plan"):
         from .ampere import operand_registers
 
@@ -64,11 +70,7 @@ def run_modules(context, pressure):
     )
     pressure["warp_specialization"] = ws
     trace.record("pressure.warp_specialization", lambda: ws)
-    pressure.update(
-        analyze_register_policy(
-            pressure, context.config, context.device_limits, spill_allowance=specialization.register_spill_allowance(context.config)
-        )
-    )
+    pressure.update(analyze_register_policy(pressure, context.config, context.device_limits, spill_allowance=spill_allowance))
     trace.record(
         "pressure.register_policy", lambda: {key: pressure[key] for key in ("physical_register_allocation", "register_demand", "decision")}
     )
@@ -176,11 +178,11 @@ def run_modules(context, pressure):
         trace.record("ranking", lambda: {"precision": "disabled", "reason": "config.ranking is False"})
 
     for name, result in modules.items():
-        result["implementation"] = specialization.name if name != "waves" else "generic"
+        result["implementation"] = specialization_info["name"] if name != "waves" else "generic"
     from .diagnostics import analysis_diagnostics
 
     return {
-        "specialization": specialization.to_dict(),
+        "specialization": specialization_info,
         "modules": modules,
         "pressure": pressure,
         "tile_cost": tile_cost,

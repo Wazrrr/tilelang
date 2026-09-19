@@ -32,7 +32,11 @@ def test_logical_tail_accesses_do_not_expand_to_whole_tensor():
     assert any(d["predecessors"] for d in result["modules"]["memory_traffic"]["dependencies"])
 
 
-def test_memory_mode_skips_timing_occupancy_and_warp_policy(monkeypatch, tmp_path):
+@pytest.mark.parametrize("kernel_kind", ["gemm", "attention", "softmax"])
+def test_memory_mode_skips_timing_occupancy_and_family_policies(monkeypatch, tmp_path, kernel_kind):
+    from experiments.softmax.analyze import softmax
+    from test_modules import attention
+
     def fail(*args, **kwargs):
         pytest.fail("memory mode must not invoke a timing/occupancy/specialization model")
 
@@ -40,14 +44,43 @@ def test_memory_mode_skips_timing_occupancy_and_warp_policy(monkeypatch, tmp_pat
     monkeypatch.setattr("tilelang.tiletune.occupancy.analyze_waves", fail)
     monkeypatch.setattr("tilelang.tiletune.engine.predict_warp_specialization", fail)
     monkeypatch.setattr("tilelang.tiletune.engine.select_specialization", fail)
+    monkeypatch.setattr("tilelang.tiletune.families.base.KernelSpecialization.__init__", fail)
+    func = gemm(stages=3) if kernel_kind == "gemm" else attention() if kernel_kind == "attention" else softmax(257, 1000, 2, 128)
     path = tmp_path / "memory.json"
-    result = analyze_prim_func(gemm(stages=3), dict(ranking_metric="memory", facts_path=str(path)), target=TARGET, device_limits=LIMITS)
+    result = analyze_prim_func(func, dict(ranking_metric="memory", facts_path=str(path)), target=TARGET, device_limits=LIMITS)
     facts = json.loads(path.read_text())
     assert facts["backend"] == "memory.v1"
     assert score_memory(facts["accesses"], facts["grid_blocks"], facts["sm_count"])["score"] == result["tile_cost"]["score"]
     assert result["modules"]["pipeline_overlap"]["precision"] == "disabled"
     assert result["modules"]["waves"]["precision"] == "disabled"
     assert result["pressure"]["tile_liveness"]["peak_registers_per_block_estimate"] > 0
+    assert result["specialization"]["name"] == "generic"
+    assert not result["specialization"]["roles"]
+
+
+@pytest.mark.parametrize(
+    "settings", [dict(specialization="gemm"), dict(specialization="attention"), dict(attention_spill_budget_registers_per_thread=32)]
+)
+def test_memory_mode_rejects_kernel_family_hints(settings):
+    with pytest.raises(ValueError, match="kernel-family independent"):
+        TileTuneConfig(ranking_metric="memory", **settings)
+
+
+@pytest.mark.parametrize("target", [TARGET, {"kind": "hip", "mcpu": "gfx950"}])
+def test_memory_model_uses_backend_inputs_without_kernel_family_rules(target):
+    @T.prim_func
+    def copy(A: T.Tensor((125, 8), "float32"), B: T.Tensor((125, 8), "float32")):
+        with T.Kernel(125, threads=128) as block:
+            tile = T.alloc_fragment((8,), "float32")
+            T.copy(A[block, :], tile)
+            T.copy(tile, B[block, :])
+
+    # Synthetic unit counts test the input contract, not either device's speed.
+    for units, expected in ((132, 64), (64, 128)):
+        result = analyze_prim_func(copy, dict(ranking_metric="memory"), target=target, device_limits={"sm_count": units})
+        assert result["tile_cost"]["score"] == expected
+        assert result["specialization"]["name"] == "generic"
+        assert result["pressure"]["target_model"]["kind"] == target["kind"]
 
 
 def test_soft_register_overflow_does_not_remove_memory_score():

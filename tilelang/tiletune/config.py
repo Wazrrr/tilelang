@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 26
+ANALYSIS_VERSION = 27
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,10 @@ class TileTuneConfig:
         spill_budget = self.attention_spill_budget_registers_per_thread
         if isinstance(spill_budget, bool) or not isinstance(spill_budget, int) or spill_budget < 0:
             raise ValueError("attention_spill_budget_registers_per_thread must be a nonnegative integer")
+        if self.ranking_metric == "memory" and (self.specialization not in ("auto", "generic") or spill_budget):
+            raise ValueError(
+                "memory ranking is kernel-family independent; family specialization and attention spill allowances are unsupported"
+            )
         for name in ("register_cap", "max_spill_bytes", "max_local_bytes"):
             value = getattr(self, name)
             if value is None:
