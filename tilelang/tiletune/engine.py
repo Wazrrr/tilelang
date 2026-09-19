@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from . import global_memory, shared_memory, occupancy, pipeline, register_pressure
 from .register_pressure import resolve_register_budget, analyze_register_policy
-from .tile_liveness import analyze_live_tiles
+from .tile_liveness import analyze_live_tiles, launch_threads
 from .warp_specialization import predict_warp_specialization
 from .ranking import combine_tile_cost
 from .src.collector import _Collector
@@ -37,6 +37,7 @@ def run_modules(context, pressure):
 
     trace = context.trace
     memory_mode = context.config.ranking_metric == "memory"
+    diagnostics = not memory_mode or context.config.memory_diagnostics
     if memory_mode:
         specialization = None
         specialization_info = dict(
@@ -52,7 +53,17 @@ def run_modules(context, pressure):
         spill_allowance = specialization.register_spill_allowance(context.config)
     trace.record("specialization", lambda: specialization_info)
 
-    pressure["tile_liveness"] = analyze_live_tiles(context.collector, context.buffer_facts, loop=loop)
+    pressure["tile_liveness"] = (
+        analyze_live_tiles(context.collector, context.buffer_facts, loop=loop)
+        if diagnostics
+        else dict(
+            precision="disabled",
+            reason="enable memory_diagnostics for live tile estimates",
+            computing_threads_estimate=launch_threads(context.collector),
+            peak_registers_per_block_estimate=None,
+            phases=[],
+        )
+    )
     if hasattr(context.collector, "ampere_plan"):
         from .ampere import operand_registers
 
@@ -83,8 +94,17 @@ def run_modules(context, pressure):
         from tiletune_core.memory import score_memory
 
         memory = analyze_memory_accesses(context.collector, context.buffer_facts)
-        shared = shared_memory.analyze_shared_memory(context.collector, context.buffer_facts, context.pass_configs)
-        ranking = score_memory(memory["accesses"], memory["grid_blocks"], (context.device_limits or {}).get("sm_count"))
+        shared = (
+            shared_memory.analyze_shared_memory(context.collector, context.buffer_facts, context.pass_configs)
+            if diagnostics
+            else dict(
+                shared_memory_bytes_estimate=None,
+                shared_storage_plan=dict(precision="disabled", reason="enable memory_diagnostics for shared tile lifetimes"),
+            )
+        )
+        ranking = score_memory(
+            memory["accesses"], memory["grid_blocks"], (context.device_limits or {}).get("sm_count"), memory["pipeline_depth"]
+        )
         # An opaque operation may hide memory effects not present in the ledger.
         if memory["unknown"]:
             ranking.update(score=None, tie_break_score=None, precision="unknown")
@@ -94,6 +114,8 @@ def run_modules(context, pressure):
             **shared,
             score=ranking["score"],
             tie_break_score=ranking["tie_break_score"],
+            logical_byte_waves=ranking["logical_byte_waves"],
+            logical_memory_access_waves=ranking["logical_memory_access_waves"],
             score_formula=ranking["formula"],
             ranking_metric="memory",
             precision=ranking["precision"],
@@ -107,7 +129,7 @@ def run_modules(context, pressure):
             import json
             from pathlib import Path
 
-            facts = dict(version=1, backend="memory.v1", **memory, sm_count=(context.device_limits or {}).get("sm_count"))
+            facts = dict(version=3, backend="memory.v3", **memory, sm_count=(context.device_limits or {}).get("sm_count"))
             path = Path(context.config.facts_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(facts, indent=2, allow_nan=False) + "\n")
@@ -204,14 +226,34 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
             },
         )
         trace.record("prim_func", lambda: func.script())
-        col = _Collector(func, input_values=config.input_values)
+        diagnostics = config.ranking_metric != "memory" or config.memory_diagnostics
+        col = _Collector(func, input_values=config.input_values, collect_dependencies=diagnostics)
         trace.record("col", lambda: collector_snapshot(col))
         from .ampere import is_ampere, prepare_analysis
 
         if config.ranking and config.ranking_metric == "pipeline_time" and is_ampere(target):
             prepare_analysis(func, col, target, pass_configs)
-        tile_propagation = _propagate_tiles(col, _kernel_outputs(col))
-        trace.record("tile_propagation", lambda: propagation_snapshot(tile_propagation))
+        # Backward demands prove dense MMA accumulator bounds used by strict
+        # register policies. Other memory-only paths need no propagation.
+        strict_demand = config.register_cap is not None or config.max_spill_bytes == 0 or config.max_local_bytes == 0
+        accumulator_check = strict_demand and any(
+            hasattr(op.metadata, "cRegion") and not bool(getattr(op.metadata, "isTcgen05", False)) for op in col.operations
+        )
+        tile_propagation = None
+        if diagnostics or accumulator_check:
+            tile_propagation = _propagate_tiles(col, _kernel_outputs(col))
+        elif not any(region.buffer.scope() == "global" for op in col.operations for region in op.writes):
+            raise ValueError("TileTune requires at least one captured global output write")
+        propagation_report = (
+            tile_propagation.to_dict()
+            if diagnostics
+            else dict(
+                precision="disabled",
+                reason="enable memory_diagnostics for the propagation report",
+                resource_demands_computed=tile_propagation is not None,
+            )
+        )
+        trace.record("tile_propagation", lambda: propagation_snapshot(tile_propagation) if diagnostics else propagation_report)
         buffer_facts = collect_buffer_facts(col)
         pressure = register_pressure.analyze_register_pressure(col, buffer_facts)
         trace.record("pressure.accumulator", lambda: pressure)
@@ -230,7 +272,7 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
         trace.record("tile_cost", lambda: results["tile_cost"])
         return {
             **results,
-            "tile_propagation": tile_propagation.to_dict(),
+            "tile_propagation": propagation_report,
             "ir_context": {
                 "launch_threads": {k: str(v) for k, v in col.threads.items()},
                 "explicit_layouts": {str(k): str(v) for k, v in col.layouts.items()},

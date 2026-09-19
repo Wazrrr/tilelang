@@ -11,6 +11,38 @@ resources and timing, and ranks supplied configurations. Start with
 for the complete stage order. The shared Python core is in `src/` within this
 package; native operator metadata continues to come from the compiler.
 
+## Memory ranking and optional diagnostics
+
+`TileTuneConfig(ranking_metric="memory", alpha=0.5)` uses a lean analysis by
+default. It reads global accesses, loop visits, launch size and pipeline depth
+from the PrimFunc, then orders candidates by logical byte work, request count
+and depth. The [H200 study](../../experiments/H200_UNIFIED_MEMORY.md) describes
+the score and its fixed-pool results.
+
+Set `memory_diagnostics=True` to additionally construct reaching dependencies,
+report backward tile propagation, estimate live register tiles, and plan shared
+storage from tile lifetimes. These diagnostics do not change the memory score,
+resource rejection, or candidate selection. Their default reports are explicitly
+disabled; dependency lists are `null`, not empty graphs. `trace_path` and
+`facts_path` do not implicitly enable these analyses.
+
+Launch-limit checks always run. Backward propagation still runs internally when
+dense MMA accumulator demand can prove a rejection under a strict register
+policy. Compiler resource checks remain in the runtime after lowering. The
+legacy `pipeline_time` and `traffic_waves` modes retain their full analyses.
+
+```python
+# Default: lean memory analysis and strict 50% selection.
+tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
+
+# Opt in when inspecting dependencies and storage lifetimes.
+tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5, memory_diagnostics=True)
+```
+
+Analysis version 35 includes the diagnostic setting in the cache identity.
+Portable memory facts use `memory.v3`, whose `dependencies` field may be `null`;
+the score inputs and formula are unchanged from `memory.v2`.
+
 ## Source map
 
 | Component | Responsibility |
@@ -128,6 +160,11 @@ K; `budget_excess` records the difference. `position` is only the deterministic
 report order. Offline strict-budget comparisons require the whole group to fit
 within K before counting its oracle hit.
 
+`TileTuneConfig(alpha=0.5)` selects complete score groups within
+`floor(0.5 * original_pool_size)`. Failed and unknown candidates stay in that
+denominator. Alpha is mutually exclusive with `top_k` and exploration. An explicit
+`top_k` can use `strict_top_k=True` for the same boundary-group exclusion rule.
+
 For timing, read `compute.estimate_phase_cycles`,
 `schedule.buffer_transition`, `pipeline.estimate_pipeline_cycles`, then
 `ranking.apply_ranking_metric`. Ranking recomputes timing with modeled CTA
@@ -218,8 +255,9 @@ rates. Use your measured `performance_model` for performance interpretation.
 
 Use `TileTuneConfig(ranking_metric="memory", ...)` to rank by logical memory
 work without compute profiles, pipeline timing, or occupancy prediction. The
-target's SM count is required. Equal byte-work scores share their group's tail
-rank; memory operations and original index only order report entries. Storage
+target's SM count is required. The primary order is (logical byte-waves,
+logical access-waves, descending IR pipeline depth). Equal triples share their
+group's tail rank; original index only orders report entries. Storage
 and dependency facts remain available; unresolved scheduling or a soft register estimate does
 not prevent a memory score. Explicit resource policies still apply.
 
@@ -230,7 +268,19 @@ Rules for an MMA accumulator or a reduction's source region apply uniformly in
 every kernel that contains that operator. The current byte score does not use
 the dependency graph or live-storage estimates as a timing prediction.
 
+Analysis version 34 uses the B200 pipeline-depth and strict-selection rules,
+with logical request count included in the common primary order. Versioned
+`memory.v2` facts retain the requested depth and can be replayed using
+`score_memory(accesses, grid_blocks, sm_count, pipeline_depth)`.
+
 This opt-in path scores every oracle winner in the saved 25-case H200 study.
-Conservative tie ranks reach 20/25 within 50% and all 25 at a ceil-rounded 58%
-budget. It has lower quality at small budgets than the existing timing model.
+All 25 conservative tail ranks fit a strict 50% budget; the worst is 90/192
+(46.875%). The byte-only version reached 20/25. This is a retrospective result
+on the frozen FP16/E4M3 kernels and pools, not fresh GPU performance validation.
 See [the implementation, results and limitations](../../experiments/MEMORY_RANKING.md).
+
+```python
+tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
+```
+
+The common runner accepts `--method top_k --metric memory --alpha 0.5`.

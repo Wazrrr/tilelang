@@ -1,5 +1,12 @@
 # Simplified TileTune memory ranking
 
+**Current result:** [Unified H200 memory ranking](H200_UNIFIED_MEMORY.md) ports
+the B200 pipeline-depth and strict alpha-selection rules and includes logical
+request count in the primary order. All 29,200 fresh IR analyses match replay;
+all 25 oracle tail ranks fit 50%, with a worst rank of 90/192 (46.875%).
+
+The remainder records the historical byte-only model (analysis versions 25–27).
+
 The `simplify-tiletune-memory` worktree adds `ranking_metric="memory"`. It scores
 all **29,200 configurations** in the frozen H200 25-case study. All **25 oracle
 winners are eligible**. With equal primary scores assigned their group's tail

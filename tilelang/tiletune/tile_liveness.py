@@ -8,17 +8,24 @@ estimate informs demand and ranking, but cannot establish a rejection proof.
 from math import prod
 
 
+def launch_threads(col):
+    """Resolve launch size without computing live tile intervals."""
+    from .src.ir_utils import _int
+
+    dims = [_int(v) for k, v in col.threads.items() if k.startswith("threadIdx.")]
+    return prod(dims) if dims and all(dims) else None
+
+
 def analyze_live_tiles(col, buffer_facts, *, loop):
     """Conservative tile intervals, including attention's loop-carried state.
 
     These are logical demand estimates, never additional rejection evidence. Packing,
     automatic-layout replication, scalarization and storage reuse are unresolved.
     """
-    from .src.ir_utils import _int, _exclusive
+    from .src.ir_utils import _exclusive
     from .src.ir_utils import in_loop
 
-    thread_dims = [_int(v) for k, v in col.threads.items() if k.startswith("threadIdx.")]
-    threads = prod(thread_dims) if thread_dims and all(thread_dims) else None
+    threads = launch_threads(col)
     loops = col.serial_loops + col.pipeline_loops
     loop_ops = [[op for op in col.operations if in_loop(op, item)] for item in loops]
     carried = []

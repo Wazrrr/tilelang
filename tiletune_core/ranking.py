@@ -56,17 +56,38 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
     return result
 
 
-def select_top_k(ranking, k, *, include_ties=True):
+def alpha_budget(pool_size, alpha):
+    """Strict fraction of the original pool, including failed/unknown candidates."""
+    import math
+
+    if type(pool_size) is not int or pool_size <= 0:
+        raise ValueError("pool_size must be a positive integer")
+    if isinstance(alpha, bool) or not isinstance(alpha, int | float) or not math.isfinite(alpha) or not 0 < alpha <= 1:
+        raise ValueError("alpha must be finite and in (0, 1]")
+    budget = math.floor(pool_size * alpha)
+    if budget == 0:
+        raise ValueError("alpha selects no candidates from the supplied pool")
+    return budget
+
+
+def select_top_k(ranking, k, *, include_ties=True, strict_budget=False):
     """Keep the first k eligible candidates and their complete boundary tie.
 
     Equal primary scores are inseparable by default. Fixed-budget historical
     baselines can explicitly request ``include_ties=False``.
+    A strict budget excludes the complete crossing group instead of expanding it.
     """
     import math
 
     if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
         raise ValueError("top_k must be a positive integer")
+    if not isinstance(strict_budget, bool):
+        raise ValueError("strict_budget must be a bool")
+    if strict_budget and not include_ties:
+        raise ValueError("strict_budget requires include_ties=True")
     eligible = [entry for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])]
+    if strict_budget:
+        return [entry["index"] for entry in eligible if entry["tie_last_rank"] <= k]
     if not include_ties or len(eligible) <= k:
         return [entry["index"] for entry in eligible[:k]]
     boundary = eligible[k - 1]["score"]

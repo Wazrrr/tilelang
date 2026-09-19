@@ -5,12 +5,14 @@ python -m experiments.softmax.analyze --output experiments/results/softmax-analy
 
 import argparse
 from collections import Counter
+from contextlib import ExitStack
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import tilelang.language as T
 from tilelang.tiletune import analyze_prim_func
-from tiletune_core.ranking import rank_records
+from tiletune_core.ranking import alpha_budget, rank_records, select_top_k
 
 
 def softmax(rows, columns, block_rows, threads):
@@ -50,7 +52,7 @@ def analyze():
                 before = func.script()
                 report = analyze_prim_func(
                     func,
-                    {"ranking_metric": "memory"},
+                    {"ranking_metric": "memory", "memory_diagnostics": True},
                     target={"kind": "cuda", "arch": "sm_90a"},
                     device_limits={"sm_count": 132},
                 )
@@ -74,9 +76,20 @@ def analyze():
                     )
                 )
         ranking = rank_records(records)
-        cases.append(dict(shape=[rows, columns], configs=records, ranking=ranking))
+        budget = alpha_budget(len(records), 0.5)
+        selected = select_top_k(ranking, budget, strict_budget=True)
+        cases.append(
+            dict(
+                shape=[rows, columns],
+                configs=records,
+                ranking=ranking,
+                selection=dict(alpha=0.5, requested_k=budget, selected_indices=selected, selected_count=len(selected)),
+            )
+        )
         pairs = {(r["score"], r["tie_break_score"]) for r in ranking}
-        print(f"{rows}x{columns}: {len(records)}/{len(records)} scored and eligible; {len(pairs)} distinct score pairs")
+        print(
+            f"{rows}x{columns}: {len(records)}/{len(records)} scored and eligible; {len(pairs)} score groups; strict 50% keeps {len(selected)}"
+        )
     return dict(
         scope="CPU PrimFunc analysis only; no lowering, GPU execution, correctness comparison, or oracle measurement",
         target="cuda sm_90a; 132 SMs supplied as device metadata",
@@ -90,7 +103,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    result = analyze()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("standalone softmax analysis invoked a family or timing helper")
+
+    disabled = (
+        "tilelang.tiletune.engine.select_specialization",
+        "tilelang.tiletune.families.base.KernelSpecialization.__init__",
+        "tilelang.tiletune.pipeline.analyze_pipeline",
+        "tilelang.tiletune.occupancy.analyze_waves",
+        "tilelang.tiletune.engine.predict_warp_specialization",
+    )
+    with ExitStack() as stack:
+        for name in disabled:
+            stack.enter_context(patch(name, forbidden))
+        result = analyze()
+    result["disabled_helpers"] = list(disabled)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
 

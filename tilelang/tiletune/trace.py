@@ -150,6 +150,7 @@ def collector_snapshot(col):
 
     return {
         "type": "_Collector",
+        "dependencies_collected": col.dependencies_collected,
         "buffers": [_buffer(buffer) for buffer in col.buffers],
         "operations": [_operation(op) for op in col.operations],
         "threads": {name: str(extent) for name, extent in col.threads.items()},

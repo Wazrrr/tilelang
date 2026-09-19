@@ -1,10 +1,13 @@
 # TileTune Core
 
 `tiletune_core.memory.score_memory` provides a profile-free ordering over resolved
-logical memory accesses and launch size. It returns logical byte-waves plus a
-memory-event display key, without estimating compute cycles or physical occupancy.
-Equal primary scores share their group's tail rank; selection keeps entire
-boundary groups and can exceed requested K.
+logical memory accesses, launch size, and IR pipeline depth. It orders candidates
+by (byte-waves, access-waves, descending pipeline depth), encoded as an exact
+integer, without estimating compute cycles or physical occupancy. Equal triples
+share their group's tail rank. Default top-K selection retains the complete
+boundary group; `strict_budget=True` excludes a group crossing the budget.
+`alpha_budget(pool_size, alpha)` resolves a strict original-pool fraction with
+floor rounding, including failed and unknown candidates in the denominator.
 See the [memory-ranking study](../experiments/MEMORY_RANKING.md) for its fixed-pool
 coverage and small-budget tradeoffs.
 

@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 27
+ANALYSIS_VERSION = 35
 
 
 @dataclass(frozen=True)
@@ -18,11 +18,14 @@ class TileTuneConfig:
     report_path: str | None = None
     ranking: bool = True
     top_k: int | None = None  # Select this many scored candidates, expanding to retain a complete boundary tie.
+    strict_top_k: bool = False  # Keep only complete score groups within top_k.
+    alpha: float | None = None  # Strict pool fraction; mutually exclusive with top_k.
     exploration_fraction: float = 0.0  # Opt-in unknown-cost attempts; pure ranking remains the default.
     exploration_seed: int = 123
     device_limits: dict | None = None
     specialization: str = "auto"
     ranking_metric: str = "pipeline_time"
+    memory_diagnostics: bool = False  # Opt into dependencies, liveness and storage reports in memory mode.
     performance_model: dict | None = None
     # Read-only one-dimensional integer parameters, keyed by PrimFunc argument
     # index. Callers must verify these values against the supplied inputs.
@@ -57,17 +60,41 @@ class TileTuneConfig:
             raise ValueError("specialization must be auto, generic, gemm, or attention")
         if self.ranking_metric not in ("memory", "traffic_waves", "pipeline_time"):
             raise ValueError("ranking_metric must be memory, traffic_waves or pipeline_time")
+        if not isinstance(self.memory_diagnostics, bool):
+            raise ValueError("memory_diagnostics must be a bool")
         if self.performance_model is not None:
             from .profiling.profile_schema import validate_performance_model
 
             validate_performance_model(self.performance_model)
         if not isinstance(self.ranking, bool):
             raise ValueError("ranking must be a bool")
+        if self.alpha is not None:
+            import math
+
+            if (
+                isinstance(self.alpha, bool)
+                or not isinstance(self.alpha, int | float)
+                or not math.isfinite(self.alpha)
+                or not 0 < self.alpha <= 1
+            ):
+                raise ValueError("alpha must be finite and in (0, 1]")
+            if self.top_k is not None:
+                raise ValueError("alpha and top_k are mutually exclusive")
+            if not self.ranking:
+                raise ValueError("alpha requires ranking=True")
+            if self.exploration_fraction:
+                raise ValueError("alpha does not support exploration")
         if self.top_k is not None:
             if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k <= 0:
                 raise ValueError("top_k must be a positive integer or None")
             if not self.ranking:
                 raise ValueError("top_k requires ranking=True")
+        if not isinstance(self.strict_top_k, bool):
+            raise ValueError("strict_top_k must be a bool")
+        if self.strict_top_k and self.top_k is None and self.alpha is None:
+            raise ValueError("strict_top_k requires top_k or alpha")
+        if self.strict_top_k and self.exploration_fraction:
+            raise ValueError("strict_top_k does not support exploration")
         if self.device_limits is not None:
             from .src.device import DEVICE_LIMIT_FIELDS
 

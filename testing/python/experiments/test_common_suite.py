@@ -43,6 +43,22 @@ def test_default_workloads_match_the_family_suites():
     assert default_workloads(smoke=True) == core_cases("development")
 
 
+def test_alpha_request_resolves_budget_from_the_complete_pool():
+    from experiments.common.spec import configuration_space
+
+    workload = default_workloads()[0]
+    device = Device("hopper", TARGETS["hopper"])
+    settings = dict(method="top_k", alpha=0.5, top_k=20)
+    request = make_request(workload, device, settings)
+    assert request["settings"]["top_k"] == len(configuration_space(workload, device)["configs"]) // 2
+    assert settings["top_k"] == 20
+    assert validate_request(request) == (workload, device)
+    with pytest.raises(ValueError, match="complete declared pool"):
+        make_request(workload, device, dict(settings, config_indices=[0, 1]))
+    with pytest.raises(ValueError, match="complete declared pool"):
+        make_request(workload, replace(device, subsets={workload.name: [0, 1]}), settings)
+
+
 @pytest.mark.parametrize("op", ["rmsnorm", "reduce_sum", "elementwise", "softmax"])
 def test_retired_operations_are_rejected(op):
     with pytest.raises(ValueError, match="Unknown operation"):

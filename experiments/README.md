@@ -12,6 +12,10 @@ Saved measurements belong under each kernel's `results/` directory. The
 [result guide](RESULTS.md) identifies the saved GEMM oracle, baseline storage,
 validation records and historical data.
 
+For unified memory scoring and strict `alpha=0.5` selection, see the
+[H200 analysis and all 25 oracle scores](H200_UNIFIED_MEMORY.md). The common
+runner accepts `--method top_k --metric memory --alpha 0.5`.
+
 For a new kernel family, follow the [agent guide](.agent). For existing kernels,
 start in the family folder:
 

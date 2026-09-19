@@ -22,7 +22,7 @@ def test_replay_uses_requested_tile_and_ignores_all_measured_information():
     inputs, unknown = memory_inputs(r, 132)
     assert not unknown
     assert inputs["accesses"][0]["bytes"] == 96 * 2
-    assert score_memory(**inputs)["score"] == 96 * 2 * 43 * 2
+    assert score_memory(**inputs)["logical_byte_waves"] == 96 * 2 * 43 * 2
     changed = deepcopy(r)
     changed.update(config=dict(block_K=1), latency_ms=0.0001, winner=True, tile_cost=dict(score=1))
     changed["modules"]["pipeline_overlap"] = dict(timing=dict(cycles=1))

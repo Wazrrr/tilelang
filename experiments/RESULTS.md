@@ -5,6 +5,12 @@ Each kernel owns its saved results. Begin in `experiments/<family>/results/`:
 live under `<GPU model>/baselines/` (for example, `H200/baselines/`). Generated
 artifacts remain ignored by Git and excluded from source fingerprints.
 
+The [unified memory analysis](H200_UNIFIED_MEMORY.md) on `dev-h200-new` scores
+all 29,200 configs in the frozen FP16/E4M3 H200 study. Fresh IR and replay agree
+for every config, and all 25 oracle winners fit strict `alpha=0.5` selection
+with conservative tail ranks. The worst rank is 90/192 (46.875%). This is CPU
+analysis against saved oracle timings, not a new GPU benchmark.
+
 ## Current cache-first study
 
 The [cache-first runner](cached_study.py) fills missing measurements for the

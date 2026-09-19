@@ -6,40 +6,54 @@ Softmax was removed from the active experiment suite on 2026-09-17 and replaced 
 
 [analyze.py](analyze.py) defines a standalone, stable row softmax with FP16
 input/output and FP32 intermediate tiles. It calls `analyze_prim_func` directly
-with `ranking_metric="memory"`, a CUDA SM90a target, and a supplied SM count of
+with `ranking_metric="memory", memory_diagnostics=True`, a CUDA SM90a target, and a supplied SM count of
 132. It adds no TileTune family recognizer, cost formula, fragment layout hint,
 compute profile, or changes to the analyzer. The configuration pool is explicitly
 supplied: rows per CTA in `{1, 2, 4, 8}` and threads in `{128, 256}`.
 
 ```bash
 python -m experiments.softmax.analyze \
-  --output experiments/results/memory-ranking/softmax-analysis.json
+  --output experiments/results/h200-unified-memory/softmax-generality.json
 ```
 
-All 24 configurations passed the analysis assertions:
+The saved original report scored all 24 configurations with analysis version 34.
+The current runner opts into diagnostics to preserve its dependency and liveness
+inspection; version 35 disables those reports by default in memory mode.
+The runner replaces family dispatch, family construction, pipeline timing,
+occupancy, and warp-specialization prediction with functions that raise if called.
+No model implementation was changed for this check.
 
-| Shape | Scored and eligible | Distinct (byte score, event score) pairs |
-|---|---:|---:|
-| 256 × 128 | 8/8 | 3 |
-| 257 × 1000, masked rows/columns | 8/8 | 3 |
-| 4096 × 4096 | 8/8 | 1 |
+| Shape | Scored and eligible | Primary score groups | Selected at strict alpha=0.5 |
+|---|---:|---:|---:|
+| 256 × 128 | 8/8 | 3 | 4/8 |
+| 257 × 1000, masked rows/columns | 8/8 | 3 | 4/8 |
+| 4096 × 4096 | 8/8 | 1 | 0/8 |
 
 For each configuration, the analyzer captures two reductions and three scalar
 operation groups, their memory accesses, eight dependency edges, and live tile
 storage. The specialization is `generic`; no memory effects remain unknown.
 The original PrimFunc is unchanged. The full reports are saved in
-[softmax-analysis.json](../results/memory-ranking/softmax-analysis.json).
+[softmax-generality.json](../results/h200-unified-memory/softmax-generality.json).
 
 This checks CPU analysis coverage only. It performs no compiler lowering, GPU
 execution, numerical correctness comparison, or oracle measurement. A finite
 score does not prove compilation success or good ranking: all eight large-shape
 configurations tie, and changing only the thread count never changes this memory
 score. Under the conservative tie rule, all eight large-shape candidates have
-rank 8/8. A runtime top-K cutoff inside that group retains all eight; a strict
-50% evaluation cannot claim that it identifies any particular winner.
-Dependencies and liveness remain reported facts/resource-policy inputs;
+rank 8/8. The exact shared score is `9007233614544894`, encoding 524,288
+byte-waves, 262,144 access-waves, and pipeline depth 1. An expanding top-K cutoff
+inside that group retains all eight; strict alpha=0.5 selects none. The existing
+25-case oracle result therefore does not establish a general 50% pruning guarantee.
+With diagnostics enabled, dependencies and liveness remain reported facts;
 the simplified score does not estimate dependency critical paths, reduction
 service time, or thread-dependent occupancy.
+
+A separate pointwise regression adds an exponential, an addition, and an extra
+live fragment without changing global accesses. The operation count and reported
+live-register peak increase, but the memory score stays identical. This checks
+that computation and live storage are reported facts rather than hidden score
+terms. Regression tests also compare lean and diagnostic modes for identical
+scores and resource rejections.
 
 A separate CPU check of the 256 × 128 case (one row per CTA, 128 threads) with
 the older `pipeline_time` mode and the saved H200 primitive profile returned an

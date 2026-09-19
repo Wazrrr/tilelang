@@ -17,7 +17,7 @@ import time
 from experiments.compare_results import compare
 from experiments.utils.results import provenance, read
 from tiletune_core.memory import score_memory
-from tiletune_core.ranking import rank_records
+from tiletune_core.ranking import alpha_budget, rank_records, select_top_k
 
 
 def literal_int(value):
@@ -74,10 +74,20 @@ def memory_inputs(record, sm_count):
                     visits=visits,
                 )
             )
-    return dict(accesses=accesses, grid_blocks=record["modules"]["waves"]["grid_blocks"], sm_count=sm_count), unknown
+    # The frozen collector did not serialize pipeline annotations separately.
+    # Its pipeline report retains the requested loop depth, not a measured rate.
+    stages = record["modules"].get("pipeline_overlap", {}).get("num_stages", 0)
+    if type(stages) is not int or stages < 0:
+        raise ValueError("archived pipeline depth must be a resolved nonnegative integer")
+    return dict(
+        accesses=accesses,
+        grid_blocks=record["modules"]["waves"]["grid_blocks"],
+        sm_count=sm_count,
+        pipeline_depth=max(1, stages),
+    ), unknown
 
 
-def replay(study, output):
+def replay(study, output, alpha=0.5):
     study, output = Path(study).resolve(), Path(output).resolve()
     if output == study:
         raise ValueError("output must be separate from the frozen study")
@@ -117,6 +127,8 @@ def replay(study, output):
                 )
             )
         ranking = rank_records(records)
+        budget = alpha_budget(len(records), alpha)
+        selected = select_top_k(ranking, budget, strict_budget=True)
         scoring_seconds = time.perf_counter() - started
         target = output / path.parent.parent.name / name
         target.mkdir(parents=True, exist_ok=True)
@@ -124,13 +136,22 @@ def replay(study, output):
         ranked_path.write_text(
             json.dumps(
                 dict(
-                    version=1,
-                    settings=dict(ranking_metric="memory", sm_count=sm_count),
+                    version=2,
+                    settings=dict(ranking_metric="memory", sm_count=sm_count, alpha=alpha),
                     measurement_scope="ranking only; no new compilation or GPU measurements",
                     source=ref,
                     scoring_seconds=scoring_seconds,
                     configs=records,
                     ranking=ranking,
+                    selection=dict(
+                        requested_k=budget,
+                        selected_indices=selected,
+                        selected_count=len(selected),
+                        strict_budget=True,
+                        alpha=alpha,
+                        pool_size=len(records),
+                        budget_excess=0,
+                    ),
                 ),
                 indent=2,
                 allow_nan=False,
@@ -148,6 +169,13 @@ def replay(study, output):
             raise ValueError("oracle changed since the original study")
         (target / "oracle-curves.json").write_text(json.dumps(comparison, indent=2, allow_nan=False) + "\n")
         method = comparison["methods"][0]
+        by_index = {record["index"]: record for record in records}
+        for candidate in method["oracle_candidates"]:
+            if candidate["index"] is not None:
+                cost = by_index[candidate["index"]]["tile_cost"]
+                candidate.update(
+                    {key: cost[key] for key in ("score", "logical_byte_waves", "logical_memory_access_waves", "pipeline_depth")}
+                )
         first = method["first_oracle_hit_k"]
         rows.append(
             dict(
@@ -161,6 +189,10 @@ def replay(study, output):
                 oracle_rank_fraction=first / n if first is not None else None,
                 hits_20_percent=first is not None and first <= (n + 4) // 5,
                 hits_50_percent=first is not None and first <= (n + 1) // 2,
+                alpha=alpha,
+                alpha_budget=budget,
+                selected_count=len(selected),
+                hits_alpha=first is not None and first <= budget,
                 scoring_seconds=scoring_seconds,
                 old_first_oracle_hit_k=comparison["methods"][1]["first_oracle_hit_k"],
                 old_curves=comparison["methods"][1]["curves"],
@@ -186,11 +218,13 @@ def replay(study, output):
                 "experiments/utils/results.py",
             )
         ],
-        semantics="Retrospective replay of frozen collector facts. Equal primary scores share their group's tail rank; strict-budget curves include only complete groups. Kernels, pool, input values, oracle timings and hard resource policies are unchanged. No GPU work. Scoring time excludes IR capture and file I/O.",
+        semantics="Retrospective replay of frozen collector facts. The primary order is (logical byte-waves, logical access-waves, descending IR pipeline depth). Equal triples share their group's tail rank; alpha selection includes only complete groups within floor(alpha * original pool size). Kernels, pool, input values, oracle timings and hard resource policies are unchanged. No GPU work. Scoring time excludes IR capture and file I/O.",
         rows=rows,
         all_oracles_scored=all(r["first_oracle_hit_k"] is not None for r in rows),
         hits_20_percent=sum(r["hits_20_percent"] for r in rows),
         hits_50_percent=sum(r["hits_50_percent"] for r in rows),
+        alpha=alpha,
+        hits_alpha=sum(r["hits_alpha"] for r in rows),
         all_hit_whole_pool_percent=next(
             (
                 p
@@ -216,7 +250,7 @@ def render(result):
         "",
         f"All-case cutoff: **{result['all_hit_whole_pool_percent']}%**, with per-pool budgets rounded up.",
         "",
-        "Primary score: logical global bytes per CTA × ceil(grid CTAs / SMs). Equal scores share their group's last rank. Memory events and original index order display only; they do not split score ties. No compute rates, inferred overlap, or occupancy prediction.",
+        "Primary order: (logical byte-waves, logical access-waves, descending pipeline depth), encoded exactly as an integer. Equal triples share their group's last rank. Original index orders display only. No compute rates, inferred overlap, or occupancy prediction.",
         "",
         "| Case | Pool | Scored | Previous oracle rank | New oracle rank | Pool share | Replay scoring ms |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -248,8 +282,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--alpha", type=float, default=0.5)
     args = parser.parse_args()
-    result = replay(args.study, args.output)
+    result = replay(args.study, args.output, args.alpha)
     print(f"Completed {args.output / 'report.md'}: {result['hits_50_percent']}/{len(result['rows'])} within 50%")
 
 

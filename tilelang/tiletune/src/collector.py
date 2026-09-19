@@ -23,7 +23,7 @@ def _opaque_call(node):
 
 
 class _Collector:
-    def __init__(self, func, input_values=None):
+    def __init__(self, func, input_values=None, *, collect_dependencies=True):
         from .input_values import parameter_values
 
         self.input_values = parameter_values(func, input_values)
@@ -47,6 +47,11 @@ class _Collector:
         for i, buffer in enumerate(self.buffers):
             if any(buffer.data.same_as(other.data) and not buffer.same_as(other) for other in self.buffers[:i]):
                 self.unknown.append("multiple buffer views share a data variable")
+        self.dependencies_collected = collect_dependencies
+        if collect_dependencies:
+            self._collect_dependencies()
+
+    def _collect_dependencies(self):
         # Reaching writers: kill only proven complete, unconditional overwrites.
         reaching = []
         for op in self.operations:
