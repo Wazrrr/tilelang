@@ -227,7 +227,11 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
         )
         trace.record("prim_func", lambda: func.script())
         diagnostics = config.ranking_metric != "memory" or config.memory_diagnostics
-        col = _Collector(func, input_values=config.input_values, collect_dependencies=diagnostics)
+        col = _Collector(func, input_values=config.input_values, collect_dependencies=diagnostics, memory_only=not diagnostics)
+        if col.memory_only and col.input_values and col.unknown:
+            # Simplification can remove an unreachable opaque access or prove
+            # a metadata index safe. Preserve that coverage with the full path.
+            col = _Collector(func, input_values=config.input_values, collect_dependencies=False)
         trace.record("col", lambda: collector_snapshot(col))
         from .ampere import is_ampere, prepare_analysis
 
@@ -274,6 +278,7 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
             **results,
             "tile_propagation": propagation_report,
             "ir_context": {
+                "metadata_resolution": "not_needed" if not col.input_values else "deferred" if col.memory_only else "eager",
                 "launch_threads": {k: str(v) for k, v in col.threads.items()},
                 "explicit_layouts": {str(k): str(v) for k, v in col.layouts.items()},
             },

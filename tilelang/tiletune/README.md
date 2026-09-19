@@ -31,6 +31,15 @@ dense MMA accumulator demand can prove a rejection under a strict register
 policy. Compiler resource checks remain in the runtime after lowering. The
 legacy `pipeline_time` and `traffic_waves` modes retain their full analyses.
 
+When `input_values` supplies integer metadata, lean memory analysis resolves
+metadata lookup indices, loop bounds, and access extents, while deferring
+simplification of complete addresses and predicates. Metadata loads still count
+toward memory work, and lookup bounds and read-only checks remain enabled. If
+deferred collection reports uncertainty, collection retries with eager
+simplification. This rule is shared by all kernels. Diagnostics and timing modes
+use eager resolution; `ir_context.metadata_resolution` reports `deferred`,
+`eager`, or `not_needed`.
+
 ```python
 # Default: lean memory analysis and strict 50% selection.
 tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
@@ -39,7 +48,8 @@ tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
 tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5, memory_diagnostics=True)
 ```
 
-Analysis version 35 includes the diagnostic setting in the cache identity.
+Analysis version 36 invalidates cached reports for deferred metadata resolution.
+The diagnostic setting remains part of the cache identity.
 Portable memory facts use `memory.v3`, whose `dependencies` field may be `null`;
 the score inputs and formula are unchanged from `memory.v2`.
 

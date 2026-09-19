@@ -78,7 +78,7 @@ the score or selection. Launch-limit checks and any backward demands needed to
 prove a strict register-policy rejection remain enabled. Post-compile resource
 checks are unchanged. Timing modes retain their existing analyses.
 
-The regular runner accepts `--method top_k --metric memory --alpha 0.5`. Alpha and `top_k` are mutually exclusive in `TileTuneConfig`; the CLI alpha option overrides its default top-K budget. `strict_top_k=True` provides the same boundary policy for an explicit integer K. The original reports above use analysis version 34 and `memory.v2`. Lean analysis uses version 35 and `memory.v3`; a `null` dependency list means collection was disabled. The score formula is unchanged, and the diagnostics setting is part of the cache key.
+The regular runner accepts `--method top_k --metric memory --alpha 0.5`. Alpha and `top_k` are mutually exclusive in `TileTuneConfig`; the CLI alpha option overrides its default top-K budget. `strict_top_k=True` provides the same boundary policy for an explicit integer K. The original reports above use analysis version 34 and `memory.v2`. Lean analysis introduced version 35 and `memory.v3`; a `null` dependency list means collection was disabled. Current analysis version 36 defers unnecessary metadata simplification, retaining `memory.v3`. The score formula is unchanged, and the diagnostics setting is part of the cache key.
 
 ```bash
 python -m experiments.replay_memory \
@@ -94,6 +94,9 @@ python -m experiments.validate_memory \
 Run with Python importing this worktree. In this machine's shared `tl` environment, an existing editable-install hook points to the original checkout. The process-local [sitecustomize.py](results/h200-unified-memory/environment/sitecustomize.py) used for verification removes that redirect when its directory and this worktree are placed on `PYTHONPATH`; it also applies to child workers. The shared installation is unchanged.
 
 ## CPU analysis cost with diagnostics disabled
+
+These measurements compare the original diagnostic path with version 35, before
+the metadata optimization described below.
 
 The [paired measurement](results/h200-unified-memory/lean/benchmark.json) samples
 original pool indices `0`, `N//2`, and `N-1` in each case: 75 configurations,
@@ -114,17 +117,64 @@ The numbers below average those candidate medians within each family.
 | Grouped GEMM | 503.003 ms | 491.338 ms | 1.02× |
 | KDA | 33.807 ms | 4.487 ms | 7.53× |
 
-Grouped GEMM benefits much less; capture and resolution of its input-dependent
-accesses remain enabled. These timings use the frozen study's resource settings;
-strict register policies can still require backward propagation. This is a local
-CPU analysis measurement, not an end-to-end autotuning or GPU speedup.
+Grouped GEMM benefited much less in version 35; eager resolution of its
+input-dependent accesses remained enabled. These timings use the frozen study's
+resource settings; strict register policies can still require backward
+propagation. This is a local CPU analysis measurement, not an end-to-end
+autotuning or GPU speedup.
 The [comparison and timing script](results/h200-unified-memory/lean/verify_and_benchmark.py)
 also checks lean/full score and resource-decision equality for all timed inputs.
 
+## Deferred metadata simplification in version 36
+
+Lean memory mode now substitutes metadata without simplifying each complete
+address or predicate. It still resolves metadata lookup indices, loop bounds,
+and native access extents with launch bounds, because they establish lookup
+validity and scored work. All metadata loads remain counted. Read-only checks,
+alias checks, and opaque-operation detection remain enabled. When deferred
+collection reports uncertainty, the collector retries the existing eager path.
+The optimization uses no kernel recognition or new kernel-specific helpers.
+
+`memory_diagnostics=True` restores eager resolution together with the detailed
+analyses. Timing modes also retain eager resolution. The returned
+`ir_context.metadata_resolution` records `deferred`, `eager`, or `not_needed`.
+The original PrimFunc remains unchanged for compilation.
+
+The [paired benchmark](results/h200-unified-memory/metadata/benchmark.json)
+compares both paths with diagnostics disabled on the same prebuilt PrimFuncs:
+indices `0`, `N//2`, and `N-1` from each of the five metadata-bearing cases,
+15 configurations total. Each path has one warmup and seven timed calls per
+configuration, with alternating order. All 15 use deferred resolution without
+fallback, and match the original scores and complete resource decisions.
+
+Mean candidate median CPU analysis time falls from **481.393 ms to 44.149 ms**:
+**10.90× faster, or 90.8% less time**. Generation, compilation, serialization,
+and GPU execution are excluded; these numbers describe grouped-GEMM analysis.
+
+| Case | Eager resolution | Deferred resolution | Speedup |
+|---|---:|---:|---:|
+| grouped_gemm_aligned | 274.444 ms | 41.719 ms | 6.58× |
+| grouped_gemm_decode | 564.314 ms | 45.764 ms | 12.33× |
+| grouped_gemm_down_aligned | 274.255 ms | 41.329 ms | 6.64× |
+| grouped_gemm_prefill | 565.139 ms | 45.462 ms | 12.43× |
+| grouped_gemm_ragged | 728.815 ms | 46.475 ms | 15.68× |
+
+The [comparison and timing script](results/h200-unified-memory/metadata/verify_and_benchmark.py)
+also verifies full-pool parity against version 35 and records the measured source
+hashes. The eager baseline uses the original collector resolution path, with
+all other code and settings shared.
+
 ## Validation
 
+- Version 36: all 29,200 fresh CPU analyses have finite scores and exactly match
+  the frozen replay. The [current full-pool report](results/h200-unified-memory/metadata/live/summary.json)
+  retains 25/25 oracle hits at alpha=0.5 and the worst tail rank of 90/192.
+- [Exact comparison with version 35](results/h200-unified-memory/metadata/parity.json)
+  confirms identical cost reports except process-local buffer identities,
+  complete resource-decision reports, rankings, selections, and oracle tail
+  ranks for all 29,200 configs.
 - Version 35 lean validation: 29,200/29,200 fresh CPU analyses and finite scores;
-  zero replay mismatches. The [new full-pool report](results/h200-unified-memory/lean/live/summary.json)
+  zero replay mismatches. The [version 35 full-pool report](results/h200-unified-memory/lean/live/summary.json)
   retains all 25 oracle hits at alpha=0.5.
 - [Exact comparison with the version 34 reports](results/h200-unified-memory/lean/parity.json)
   confirms unchanged scores, complete rankings, selections, oracle tail ranks,
@@ -132,9 +182,11 @@ also checks lean/full score and resource-decision equality for all timed inputs.
   uncertainty descriptions are intentionally not treated as rejection decisions.
 - All input PrimFuncs were unchanged after analysis. Family-policy constructors, family selection, pipeline timing, occupancy timing, and warp-specialization prediction were disabled by assertions.
 - All 25 winners are in the strict 50% selections; every selected group fits the budget. Final saved scores, rankings, and selections were independently rechecked after formatting.
-- 485 tests passed and 38 were skipped in the TileTune suite plus the memory
+- 500 tests passed and 38 were skipped in the TileTune suite plus the memory
   replay, common experiment, and portable-core tests. This includes lean/full
   score and rejection comparisons, strict register caps, launch limits, and
-  report-only mode. [Test log](results/h200-unified-memory/lean/pytest.log).
+  report-only mode, plus metadata-dependent loops and access extents,
+  uncertainty fallback, out-of-range metadata, and read-only metadata checks.
+  [Test log](results/h200-unified-memory/metadata/pytest.log).
   Ruff and `git diff --check` passed.
 - H200 GPUs were occupied, so validation used archived correctness-checked oracle measurements and CPU analysis. No fresh GPU performance claim is made.

@@ -23,10 +23,11 @@ def _opaque_call(node):
 
 
 class _Collector:
-    def __init__(self, func, input_values=None, *, collect_dependencies=True):
+    def __init__(self, func, input_values=None, *, collect_dependencies=True, memory_only=False):
         from .input_values import parameter_values
 
         self.input_values = parameter_values(func, input_values)
+        self.memory_only = memory_only
         self.scalar_values = {}
         self.operations = []
         self.buffers = list(func.buffer_map.values())
@@ -90,15 +91,24 @@ class _Collector:
     def visit(self, node, loops=(), predicates=(), branches=(), annotations=None):
         annotations = dict(annotations or {})
 
-        def resolve(expr):
+        def simplify(expr):
+            from tvm.arith import Analyzer
+
+            ana = Analyzer()
+            for var, domain in self.block_domains.values():
+                ana.bind(var, domain)
+            return ana.simplify(expr)
+
+        def resolve(expr, *, require_value=False):
             if self.input_values:
                 from .input_values import ValueResolver
-                from tvm.arith import Analyzer
 
-                ana = Analyzer()
-                for var, domain in self.block_domains.values():
-                    ana.bind(var, domain)
-                return ana.simplify(ValueResolver(self).visit_expr(expr))
+                eager = not self.memory_only or require_value
+                value = ValueResolver(self, simplify_values=eager).visit_expr(expr)
+                # Memory scoring simplifies extents and visit counts when it
+                # consumes them. Exact offsets and predicates need no canonical
+                # form here; keep metadata substitution and index proofs intact.
+                return simplify(value) if eager else value
             return tir.stmt_functor.substitute(expr, self.bindings) if self.bindings else expr
 
         def scalar_reads(expr):
@@ -153,7 +163,7 @@ class _Collector:
             from .input_values import metadata_loop
 
             if self.input_values and not self.active_pipeline_stages and metadata_loop(node):
-                start = _int(resolve(node.min))
+                start = _int(resolve(node.min, require_value=True))
                 if start is not None:
                     previous = self.bindings.get(node.loop_var)
                     for value in range(start, start + _int(node.extent)):
@@ -165,7 +175,13 @@ class _Collector:
                         self.bindings[node.loop_var] = previous
                     return
             node = tir.For(
-                node.loop_var, resolve(node.min), resolve(node.extent), node.kind, node.body, node.thread_binding, node.annotations
+                node.loop_var,
+                resolve(node.min, require_value=True),
+                resolve(node.extent, require_value=True),
+                node.kind,
+                node.body,
+                node.thread_binding,
+                node.annotations,
             )
             previous_threads = dict(self.active_threads)
             previous_pipeline = self.active_pipeline_stages
@@ -252,10 +268,16 @@ class _Collector:
                 self.add(str(call.op), [], [], None, loops, predicates, branches, True)
             else:
                 reads, writes = self.access(op)
+                regions = [[Region.from_ir(r) for r in items] for items in (reads, writes)]
+                if self.memory_only and self.input_values:
+                    # Extents determine logical bytes. Canonicalize those with
+                    # launch bounds, retaining unsimplified access offsets.
+                    for region in regions[0] + regions[1]:
+                        region.ranges = [Range.from_min_extent(r.min, simplify(r.extent)) for r in region.ranges]
                 self.add(
                     str(call.op.name).split(".")[-1],
-                    [Region.from_ir(r) for r in reads],
-                    [Region.from_ir(r) for r in writes],
+                    regions[0],
+                    regions[1],
                     op,
                     loops,
                     predicates,

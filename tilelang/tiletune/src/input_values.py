@@ -31,9 +31,10 @@ def parameter_values(func, values):
 
 @tir.functor.mutator
 class ValueResolver(tir.PyStmtExprMutator):
-    def __init__(self, collector):
+    def __init__(self, collector, *, simplify_values=True):
         super().__init__()
         self.col = collector
+        self.simplify_values = simplify_values
 
     def visit_var_(self, node):
         return self.col.bindings.get(node, node)
@@ -49,12 +50,16 @@ class ValueResolver(tir.PyStmtExprMutator):
         ana = Analyzer()
         for var, domain in self.col.block_domains.values():
             ana.bind(var, domain)
+        if not self.simplify_values:
+            # Normalize only the lookup index: this is needed to prove the
+            # metadata contract, unlike the resulting piecewise address.
+            index = ana.simplify(index)
         if not ana.can_prove(index >= 0) or not ana.can_prove(index < len(values)):
             return tir.BufferLoad(node.buffer, indices)
         result = tir.const(values[-1], node.dtype)
         for i in reversed(range(len(values) - 1)):
             result = tir.Select(index == i, tir.const(values[i], node.dtype), result)
-        return ana.simplify(result)
+        return ana.simplify(result) if self.simplify_values else result
 
     def visit_call_(self, node):
         args = [self.visit_expr(arg) for arg in node.args]
