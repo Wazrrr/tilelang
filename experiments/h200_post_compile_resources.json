@@ -1,0 +1,687 @@
+{
+  "study": "h200-25shape-20260917T080241Z",
+  "scope": "Fresh compilation of all 25 frozen oracle configs; no GPU correctness or latency rerun. Source and resource counts matched with the filter disabled and enabled.",
+  "target": {
+    "kind": "cuda",
+    "arch": "sm_90a"
+  },
+  "score_and_selection_unchanged": true,
+  "all_oracles_pass_post_compile": true,
+  "rows": [
+    {
+      "workload": "attention_causal",
+      "op": "attention",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "num_stages": 1,
+        "threads": 256
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 64,
+        "max_local_bytes": 64
+      },
+      "cuda_source_sha256": "e1699c8bb5a32ae3495883c0e5d822b0a36150d1fd83458451caacbf12e17261"
+    },
+    {
+      "workload": "attention_long_causal",
+      "op": "attention",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "num_stages": 1,
+        "threads": 256
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 64,
+        "max_local_bytes": 64
+      },
+      "cuda_source_sha256": "e1699c8bb5a32ae3495883c0e5d822b0a36150d1fd83458451caacbf12e17261"
+    },
+    {
+      "workload": "attention_medium_causal",
+      "op": "attention",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "num_stages": 1,
+        "threads": 256
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 64,
+        "max_local_bytes": 64
+      },
+      "cuda_source_sha256": "e1699c8bb5a32ae3495883c0e5d822b0a36150d1fd83458451caacbf12e17261"
+    },
+    {
+      "workload": "attention_noncausal",
+      "op": "attention",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "num_stages": 1,
+        "threads": 256
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 48,
+          "spill_loads_bytes": 48,
+          "local_bytes": 48
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 64,
+        "max_local_bytes": 64
+      },
+      "cuda_source_sha256": "ef03c60c50577376fa3e435915da093f23ae4aeb4eb5ecc3f71b85ac24b71e8a"
+    },
+    {
+      "workload": "attention_short_causal",
+      "op": "attention",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 128,
+        "num_stages": 1,
+        "threads": 256
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 64,
+        "max_local_bytes": 64
+      },
+      "cuda_source_sha256": "b0ae49597e39e47808c0c89ffe778942b41b0f2f45a82d065106dc819a7b237e"
+    },
+    {
+      "workload": "gemm_decode",
+      "op": "gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 64,
+        "block_N": 64,
+        "block_K": 64,
+        "num_stages": 3,
+        "thread_num": 128,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 240,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "daeb2396f9ca7828662b073079a7b981cf8adcbd724d67265d6f086e6b1e072d"
+    },
+    {
+      "workload": "gemm_ffn_down",
+      "op": "gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 64,
+        "num_stages": 3,
+        "thread_num": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "88d7f6d6de11709048cdb10075167c094abca89fa750c376f1d2372c7ebe960e"
+    },
+    {
+      "workload": "gemm_fp8_decode",
+      "op": "gemm_fp8",
+      "dtype": "float8_e4m3fn",
+      "config": {
+        "block_M": 64,
+        "block_N": 64,
+        "block_K": 128,
+        "num_stages": 3,
+        "threads": 128,
+        "enable_rasteration": false
+      },
+      "resources": {
+        "matmul_gc_0_kernel": {
+          "registers": 240,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 128,
+        "max_local_bytes": 128
+      },
+      "cuda_source_sha256": "246f2d8c0c49e6e71e7ff05873cf1aa589520146e2a4377661b91f3e9d917470"
+    },
+    {
+      "workload": "gemm_fp8_ffn_down",
+      "op": "gemm_fp8",
+      "dtype": "float8_e4m3fn",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 96,
+        "num_stages": 2,
+        "threads": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "matmul_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 88,
+          "spill_loads_bytes": 60,
+          "local_bytes": 64
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 128,
+        "max_local_bytes": 128
+      },
+      "cuda_source_sha256": "b95e69abcf8315542510b30e79a602edbf1a15e030be29abfd7487606095d535"
+    },
+    {
+      "workload": "gemm_fp8_prefill",
+      "op": "gemm_fp8",
+      "dtype": "float8_e4m3fn",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 96,
+        "num_stages": 2,
+        "threads": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "matmul_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 92,
+          "spill_loads_bytes": 64,
+          "local_bytes": 64
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 128,
+        "max_local_bytes": 128
+      },
+      "cuda_source_sha256": "9d3589c1aeadc3559189a41bfd5967820d80e9b41eae30f81c17b324fe096e59"
+    },
+    {
+      "workload": "gemm_fp8_square",
+      "op": "gemm_fp8",
+      "dtype": "float8_e4m3fn",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 96,
+        "num_stages": 2,
+        "threads": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "matmul_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 92,
+          "spill_loads_bytes": 64,
+          "local_bytes": 64
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 128,
+        "max_local_bytes": 128
+      },
+      "cuda_source_sha256": "9d3589c1aeadc3559189a41bfd5967820d80e9b41eae30f81c17b324fe096e59"
+    },
+    {
+      "workload": "gemm_fp8_square_large",
+      "op": "gemm_fp8",
+      "dtype": "float8_e4m3fn",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 96,
+        "num_stages": 2,
+        "threads": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "matmul_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 92,
+          "spill_loads_bytes": 64,
+          "local_bytes": 64
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 128,
+        "max_local_bytes": 128
+      },
+      "cuda_source_sha256": "56464e6cd3a1e2d3b9bab78eaeeb8717f0279bb899fd237c6ec97ef01bcf2fc2"
+    },
+    {
+      "workload": "gemm_prefill",
+      "op": "gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 64,
+        "num_stages": 3,
+        "thread_num": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "bced059748c2bbc9686af5efc94fe9471e1010e728d406352a6536a4994ab426"
+    },
+    {
+      "workload": "gemm_square",
+      "op": "gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 64,
+        "num_stages": 3,
+        "thread_num": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "bced059748c2bbc9686af5efc94fe9471e1010e728d406352a6536a4994ab426"
+    },
+    {
+      "workload": "gemm_square_large",
+      "op": "gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 128,
+        "block_N": 256,
+        "block_K": 64,
+        "num_stages": 3,
+        "thread_num": 256,
+        "enable_rasteration": true
+      },
+      "resources": {
+        "main_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "bced059748c2bbc9686af5efc94fe9471e1010e728d406352a6536a4994ab426"
+    },
+    {
+      "workload": "grouped_gemm_aligned",
+      "op": "grouped_gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 64,
+        "block_N": 128,
+        "block_K": 64,
+        "num_stages": 3,
+        "threads": 128
+      },
+      "resources": {
+        "grouped_gemm_gc_0_kernel": {
+          "registers": 240,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "988731ca4123a5007162c7af6f9079225c82771b1f43467b14b74722d236819a"
+    },
+    {
+      "workload": "grouped_gemm_decode",
+      "op": "grouped_gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 64,
+        "block_N": 128,
+        "block_K": 64,
+        "num_stages": 3,
+        "threads": 256
+      },
+      "resources": {
+        "grouped_gemm_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "51d13b8cc3d868925b183df3b25525732e837210a0073b32e566879e1ef67e8a"
+    },
+    {
+      "workload": "grouped_gemm_down_aligned",
+      "op": "grouped_gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 64,
+        "block_N": 256,
+        "block_K": 64,
+        "num_stages": 3,
+        "threads": 256
+      },
+      "resources": {
+        "grouped_gemm_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "23f5c1f0af6fb8c89215f587a9934b969cc9e1a096977bd69f68f7cebe5ed339"
+    },
+    {
+      "workload": "grouped_gemm_prefill",
+      "op": "grouped_gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 64,
+        "block_N": 64,
+        "block_K": 64,
+        "num_stages": 3,
+        "threads": 128
+      },
+      "resources": {
+        "grouped_gemm_gc_0_kernel": {
+          "registers": 240,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "293f3649badef401eca02ba267729e31859f31fe34bd264856f4058b02f4b1fc"
+    },
+    {
+      "workload": "grouped_gemm_ragged",
+      "op": "grouped_gemm",
+      "dtype": "float16",
+      "config": {
+        "block_M": 64,
+        "block_N": 192,
+        "block_K": 64,
+        "num_stages": 3,
+        "threads": 256
+      },
+      "resources": {
+        "grouped_gemm_gc_0_kernel": {
+          "registers": 168,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "e3949cf68650e2a086eb563daca59964b5d4a4198dc976fdd116bd5d2d0ae89b"
+    },
+    {
+      "workload": "kda_chunk_batched",
+      "op": "kda_chunk_o",
+      "dtype": "float16",
+      "config": {
+        "block_DK": 128,
+        "block_DV": 128,
+        "num_stages": 0,
+        "threads": 256
+      },
+      "resources": {
+        "kernel_gc_0_kernel": {
+          "registers": 100,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "4dc498a9df24cb0802017b920a6418da24b1e74b1f86dfcdb01dacb35155fa53"
+    },
+    {
+      "workload": "kda_chunk_long",
+      "op": "kda_chunk_o",
+      "dtype": "float16",
+      "config": {
+        "block_DK": 128,
+        "block_DV": 128,
+        "num_stages": 0,
+        "threads": 256
+      },
+      "resources": {
+        "kernel_gc_0_kernel": {
+          "registers": 100,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "d0996267429f83635fbb6407508df95d7ad5913f377caf77b1c47421ab1afde4"
+    },
+    {
+      "workload": "kda_chunk_medium",
+      "op": "kda_chunk_o",
+      "dtype": "float16",
+      "config": {
+        "block_DK": 128,
+        "block_DV": 128,
+        "num_stages": 0,
+        "threads": 256
+      },
+      "resources": {
+        "kernel_gc_0_kernel": {
+          "registers": 100,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "d0996267429f83635fbb6407508df95d7ad5913f377caf77b1c47421ab1afde4"
+    },
+    {
+      "workload": "kda_chunk_regular",
+      "op": "kda_chunk_o",
+      "dtype": "float16",
+      "config": {
+        "block_DK": 128,
+        "block_DV": 128,
+        "num_stages": 0,
+        "threads": 256
+      },
+      "resources": {
+        "kernel_gc_0_kernel": {
+          "registers": 100,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "d0996267429f83635fbb6407508df95d7ad5913f377caf77b1c47421ab1afde4"
+    },
+    {
+      "workload": "kda_chunk_short",
+      "op": "kda_chunk_o",
+      "dtype": "float16",
+      "config": {
+        "block_DK": 128,
+        "block_DV": 128,
+        "num_stages": 0,
+        "threads": 256
+      },
+      "resources": {
+        "kernel_gc_0_kernel": {
+          "registers": 100,
+          "spill_stores_bytes": 0,
+          "spill_loads_bytes": 0,
+          "local_bytes": 0
+        }
+      },
+      "policy": {
+        "mode": "reject",
+        "register_cap": null,
+        "max_spill_bytes": 0,
+        "max_local_bytes": 0
+      },
+      "cuda_source_sha256": "d0996267429f83635fbb6407508df95d7ad5913f377caf77b1c47421ab1afde4"
+    }
+  ]
+}

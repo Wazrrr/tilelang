@@ -349,6 +349,8 @@ def run_native(request, output):
     else:
         indices = list(range(len(configs)))
     if analytical:
+        from .resource_policy import h200_post_compile_policy
+
         config = TileTuneConfig(
             enabled=True,
             mode="report_only",
@@ -361,6 +363,7 @@ def run_native(request, output):
             trace_path=str(output / "trace.log") if settings["trace"] else None,
             max_spill_bytes=None,
             max_local_bytes=None,
+            post_compile_policy=h200_post_compile_policy(workload, device.target) if settings["metric"] == "memory" else None,
             **({"alpha": settings["alpha"]} if settings["method"] == "top_k" and settings.get("alpha") is not None else {}),
             **exploration_options(settings, TileTuneConfig),
         )

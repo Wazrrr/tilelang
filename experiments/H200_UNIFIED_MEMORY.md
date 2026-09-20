@@ -2,7 +2,7 @@
 
 **All 25 oracle winners have finite scores and conservative tail ranks within the first 50% of their full pools.** Fresh CPU analysis of all **29,200 PrimFuncs** exactly matched the frozen-fact replay. The worst oracle rank is **90/192 (46.875%)**, for `grouped_gemm_decode`. Strict `alpha=0.5` selection retained exactly half of each pool, without splitting ties.
 
-The source is the completed `h200-25shape-20260917T080241Z` FP16/E4M3 study. Kernels, inputs, configuration pools, resource policies, and exhaustive oracle measurements are unchanged. This result does not apply automatically to the newer BF16/block-scaled contract. No kernels were compiled or timed for this analysis.
+The source is the completed `h200-25shape-20260917T080241Z` FP16/E4M3 study. Kernels, inputs, configuration pools, pre-lowering resource policies, and exhaustive oracle measurements are unchanged. This result does not apply automatically to the newer BF16/block-scaled contract. The ranking validations through version 36 used CPU analysis only; version 37 additionally compiles the oracle configs to validate the post-compile policy below.
 
 An additional [standalone softmax check](softmax/README.md) scores 24/24
 PrimFuncs with family helpers disabled. Its 4096×4096 case has eight equal-score
@@ -76,9 +76,11 @@ restore reaching dependencies, backward-propagation reports, register liveness,
 and shared-memory lifetime estimates. These diagnostic analyses do not affect
 the score or selection. Launch-limit checks and any backward demands needed to
 prove a strict register-policy rejection remain enabled. Post-compile resource
-checks are unchanged. Timing modes retain their existing analyses.
+checks remain available. Version 37 enables rejection in the H200 memory
+experiment runner with the explicit post-compile policy described below.
+Timing modes retain their existing analyses.
 
-The regular runner accepts `--method top_k --metric memory --alpha 0.5`. Alpha and `top_k` are mutually exclusive in `TileTuneConfig`; the CLI alpha option overrides its default top-K budget. `strict_top_k=True` provides the same boundary policy for an explicit integer K. The original reports above use analysis version 34 and `memory.v2`. Lean analysis introduced version 35 and `memory.v3`; a `null` dependency list means collection was disabled. Current analysis version 36 defers unnecessary metadata simplification, retaining `memory.v3`. The score formula is unchanged, and the diagnostics setting is part of the cache key.
+The regular runner accepts `--method top_k --metric memory --alpha 0.5`. Alpha and `top_k` are mutually exclusive in `TileTuneConfig`; the CLI alpha option overrides its default top-K budget. `strict_top_k=True` provides the same boundary policy for an explicit integer K. The original reports above use analysis version 34 and `memory.v2`. Lean analysis introduced version 35 and `memory.v3`; a `null` dependency list means collection was disabled. Version 36 defers unnecessary metadata simplification. Current analysis version 37 adds a separate compiler-resource policy, retaining `memory.v3`. The score formula is unchanged; diagnostics and compiler policy are part of the cache key.
 
 ```bash
 python -m experiments.replay_memory \
@@ -164,8 +166,63 @@ also verifies full-pool parity against version 35 and records the measured sourc
 hashes. The eager baseline uses the original collector resolution path, with
 all other code and settings shared.
 
+## Post-compile rejection in version 37
+
+The H200 memory autotuning runner now enables a compiler-only rejection policy.
+It keeps pre-lowering settings at `mode="report_only"`,
+`max_spill_bytes=None`, and `max_local_bytes=None`, and supplies separate
+`post_compile_policy` limits. Thus the score, pre-lowering eligibility, and
+frozen strict-alpha shortlist retain their existing behavior. After compilation,
+PTXAS counters and physical limits can reject a selected configuration before
+benchmarking. Rejected configurations are not replaced.
+
+| Experiment family | Maximum spill stores | Maximum spill loads | Maximum local/stack bytes |
+|---|---:|---:|---:|
+| GEMM, grouped GEMM, KDA | 0 | 0 | 0 |
+| Attention | 64 | 64 | 64 |
+| FP8 GEMM | 128 | 128 | 128 |
+
+These are inclusive, independent PTXAS counters, not estimates of runtime spill
+traffic. The policy is explicit in
+[resource_policy.py](common/resource_policy.py), using the experiment's workload
+declaration outside the family-independent analyzer. It applies to the H200
+branch's Hopper memory runs; other architectures and timing modes retain their
+existing settings. Hardware register, block, and shared-memory limits remain
+enforced. Missing observations remain unknown rather than being called zero.
+
+Fresh compilation of all 25 frozen oracle configs found:
+
+- Noncausal attention: 48 bytes of spill stores, 48 of spill loads, and 48 local
+  bytes. The other four attention winners reported zero.
+- FP8 FFN-down: 88 bytes of spill stores, 60 of spill loads, and 64 local bytes.
+  FP8 prefill, square, and square-large: 92 stores, 64 loads, and 64 local bytes.
+  FP8 decode reported zero.
+- All 15 GEMM, grouped-GEMM, and KDA winners reported zero spills/local bytes.
+
+Consequently, zero-spill rejection for every non-attention family would discard
+four FP8 oracle winners. The declared budgets round the observed maxima upward
+to 64 and 128 bytes. They are calibrated on this known study and are not a
+guarantee for a different workload contract or compiler version. The runtime
+does not consult oracle identities or measured latencies.
+
+All 25 winners were compiled again through the real `TileTuneSession.post_compile`
+hook with rejection enabled, and all 25 passed. Their fresh analysis scores
+matched the saved 50% ranking reports. The audit did not rerun kernels for
+correctness or latency: it validates compiler-resource acceptance of the
+previously correctness-checked configs. See the
+[committed resource summary](h200_post_compile_resources.json),
+[initial resource audit](results/h200-unified-memory/post-compile/oracle-resources.json),
+[enforced-filter audit](results/h200-unified-memory/post-compile/oracle-filter-validation.json),
+and [compilation script](results/h200-unified-memory/post-compile/audit_oracles.py).
+
 ## Validation
 
+- Version 37: all 25 oracle configs compile and pass the enabled compiler-resource
+  policy. Generated CUDA source hashes and PTXAS counters match the report-only
+  compilations, and fresh scores match the existing strict-alpha selection.
+  The regression suite passed 525 tests with 38 skipped; an additional runner
+  integration check verifies that H200 memory requests enable the separate
+  compiler policy. [Test log](results/h200-unified-memory/post-compile/pytest.log).
 - Version 36: all 29,200 fresh CPU analyses have finite scores and exactly match
   the frozen replay. The [current full-pool report](results/h200-unified-memory/metadata/live/summary.json)
   retains 25/25 oracle hits at alpha=0.5 and the worst tail rank of 90/192.
@@ -182,11 +239,13 @@ all other code and settings shared.
   uncertainty descriptions are intentionally not treated as rejection decisions.
 - All input PrimFuncs were unchanged after analysis. Family-policy constructors, family selection, pipeline timing, occupancy timing, and warp-specialization prediction were disabled by assertions.
 - All 25 winners are in the strict 50% selections; every selected group fits the budget. Final saved scores, rankings, and selections were independently rechecked after formatting.
-- 500 tests passed and 38 were skipped in the TileTune suite plus the memory
+- Version 36: 500 tests passed and 38 were skipped in the TileTune suite plus the memory
   replay, common experiment, and portable-core tests. This includes lean/full
   score and rejection comparisons, strict register caps, launch limits, and
   report-only mode, plus metadata-dependent loops and access extents,
   uncertainty fallback, out-of-range metadata, and read-only metadata checks.
   [Test log](results/h200-unified-memory/metadata/pytest.log).
   Ruff and `git diff --check` passed.
-- H200 GPUs were occupied, so validation used archived correctness-checked oracle measurements and CPU analysis. No fresh GPU performance claim is made.
+- Ranking validation through version 36 used archived correctness-checked oracle
+  measurements and CPU analysis while GPUs were occupied. Version 37 adds
+  compiler-resource validation; no fresh GPU performance claim is made.

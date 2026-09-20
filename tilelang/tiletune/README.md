@@ -48,10 +48,48 @@ tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
 tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5, memory_diagnostics=True)
 ```
 
-Analysis version 36 invalidates cached reports for deferred metadata resolution.
-The diagnostic setting remains part of the cache identity.
+Analysis version 37 includes compiler-only resource policy in the cache identity.
+Deferred metadata resolution was introduced in version 36. The diagnostic
+setting remains part of the cache identity.
 Portable memory facts use `memory.v3`, whose `dependencies` field may be `null`;
 the score inputs and formula are unchanged from `memory.v2`.
+
+## Post-compile resource policy
+
+`post_compile_policy` overrides `mode`, `register_cap`, `max_spill_bytes`, and
+`max_local_bytes` only for compiler-resource checks. Omitted entries inherit
+the ordinary settings. With no override, the existing behavior is preserved.
+The override cannot change memory scoring, pre-lowering eligibility, or alpha
+selection. It is included in cache identity and the effective limits appear in
+each `post_compile.policy` report.
+
+```python
+tuner.set_tiletune_args(
+    True,
+    ranking_metric="memory",
+    alpha=0.5,
+    mode="report_only",
+    max_spill_bytes=None,
+    max_local_bytes=None,
+    post_compile_policy={
+        "mode": "reject",
+        "max_spill_bytes": 64,
+        "max_local_bytes": 64,
+    },
+)
+```
+
+This example permits up to 64 bytes in each PTXAS spill counter and 64 local
+bytes, while retaining hardware register, launch, and shared-memory checks.
+These are compiler counters, not measured runtime traffic. Missing counters
+remain unknown rather than being interpreted as zero. Rejection happens after
+compilation and before benchmarking; rejected selections are not replaced.
+
+The H200 memory experiment runner supplies explicit family budgets from
+[resource_policy.py](../../experiments/common/resource_policy.py): 64 bytes for
+attention, 128 for FP8 GEMM, and zero for the other experiment families. This
+policy uses the workload declaration outside the analyzer; memory scoring
+remains family-independent. See the [oracle resource audit](../../experiments/H200_UNIFIED_MEMORY.md).
 
 ## Source map
 
