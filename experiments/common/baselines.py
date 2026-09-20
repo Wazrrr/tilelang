@@ -4,6 +4,8 @@
 def carver_support_reason(workload, device):
     if device.target["kind"] != "cuda":
         return "the Carver experiment adapters require CUDA"
+    if workload.op == "kda_chunk_intra_token_parallel":
+        return "no Carver template for token-parallel KDA intra-chunk; KDAChunkTemplate models chunk output"
     from .spec import support_reason
 
     reason = support_reason(workload, device)

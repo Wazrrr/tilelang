@@ -1,5 +1,10 @@
 # CUDA branch compatibility review
 
+This is a historical version-2 / space-7 checkpoint. `dev-h200-new` now uses
+KDA intra-chunk with a 512-config pool (contract 3 / space 8); see
+[the current contract](BENCHMARK_CONTRACT.md). The compatibility and measurement
+claims below apply to the reviewed revisions, not to the current KDA operation.
+
 Reviewed on 2026-09-17: `dev-a100` at `419b1b0a`, `dev-h200` at
 `158d8052`, and `dev-b200` at `00707d8a`, including local changes. Origin was
 fetched; these branch tips already matched their upstreams. The A100 worktree

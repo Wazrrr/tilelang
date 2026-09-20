@@ -11,7 +11,7 @@ from experiments.utils.io import write_json
 
 def instruction_evidence(source, target, operation, config):
     """Inspect generated instruction text; a target name alone is not evidence."""
-    matrix = operation in ("gemm", "gemm_fp8", "grouped_gemm", "attention", "kda_chunk_o")
+    matrix = operation in ("gemm", "gemm_fp8", "grouped_gemm", "attention")
     # T.gemm selects its lowering in the compiler. A newer target need not use
     # its newest matrix instruction, and pipelining need not use TMA copies.
     source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)

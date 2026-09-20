@@ -30,7 +30,7 @@ def test_original_carver_ranks_common_grid(dtype):
         assert record["tile_cost"]["score"] == (record["model"]["traffic_bytes"] + 1) * record["model"]["waves"]
 
 
-@pytest.mark.parametrize("op", ["gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"])
+@pytest.mark.parametrize("op", ["gemm", "attention", "gemm_fp8", "grouped_gemm"])
 def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -43,7 +43,6 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     expected_template = {
         "gemm": "MatmulTemplate",
         "attention": "FlashAttentionTemplate",
-        "kda_chunk_o": "KDAChunkTemplate",
         "gemm_fp8": "FP8MatmulTemplate",
         "grouped_gemm": "GroupedMatmulTemplate",
     }[op]

@@ -34,7 +34,7 @@ def test_all_cuda_targets_preserve_final_cases_and_complete_pools(op):
             assert plan["subsets"][name][workload.name]["indices"] == list(range(len(space["configs"])))
 
 
-@pytest.mark.parametrize("op", ["gemm", "grouped_gemm", "attention", "kda_chunk_o"])
+@pytest.mark.parametrize("op", ["gemm", "grouped_gemm", "attention"])
 @pytest.mark.parametrize("arch", ["sm_80", "sm_90a", "sm_100a"])
 def test_smoke_accepts_actual_mma_lowering_without_requiring_newer_instructions(op, arch):
     result = instruction_evidence(
@@ -50,6 +50,11 @@ def test_smoke_accepts_actual_mma_lowering_without_requiring_newer_instructions(
 def test_smoke_records_alternative_native_matrix_instructions(instruction):
     result = instruction_evidence(instruction + ";", TARGETS["blackwell"], "gemm", {})
     assert result["status"] == "verified" and result["observed"][instruction]
+
+
+def test_kda_intra_reductions_do_not_require_matrix_instructions():
+    result = instruction_evidence("add.f32;", TARGETS["hopper"], "kda_chunk_intra_token_parallel", {})
+    assert result["status"] == "not_applicable" and not result["required"]
 
 
 def test_unsupported_fp8_carver_architecture_is_recorded_before_gpu_or_model_execution(tmp_path):

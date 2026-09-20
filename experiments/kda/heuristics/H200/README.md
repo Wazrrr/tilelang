@@ -1,8 +1,9 @@
 # H200 results
 
-The current experiment uses the 1,296-config `expanded` example pool (space
-version 7). A complete sweep and winner validation have not yet been recorded
-for this update.
+The current experiment uses the 512-config intra-chunk pool (space version 8).
+The saved `kda_chunk_*` JSON files describe historical chunk-output kernels;
+they cannot serve as intra-chunk oracles. A complete intra-chunk sweep and
+winner validation have not yet been recorded.
 
 Earlier JSON records were moved to
 `experiments/results/pre-three-single-pools-20260916/kda/heuristics/H200/`.

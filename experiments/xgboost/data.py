@@ -55,7 +55,7 @@ def make_context(workload, implementation, target, device_name, backend, source_
         "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
         "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
         "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
-        "kda": "examples/kda/chunk_o.py",
+        "kda": "examples/kda/chunk_intra_token_parallel.py",
         "gemm_fp8": "examples/gemm_fp8/example_blockscaled_gemm.py",
     }
     if family in examples:

@@ -27,7 +27,7 @@ def test_every_shape_split_is_disjoint_and_has_the_declared_dtype():
         assert len({digest(canonical_workload(w)) for w in training + final}) == 8
         assert {w.dtype for w in training + final} == {"float8_e4m3fn" if op == "gemm_fp8" else "bfloat16"}
         if op.startswith("kda_"):
-            assert all(tuple(w.parameters[k] for k in ("dim", "value_dim", "chunk_size")) == (128, 128, 64) for w in final)
+            assert all(tuple(w.parameters[k] for k in ("dim", "chunk_size", "sub_chunk_size")) == (128, 64, 16) for w in final)
 
 
 def test_carver_counts_fp8_scales(monkeypatch):

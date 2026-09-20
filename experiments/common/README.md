@@ -35,7 +35,7 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 7 gives each final operation exactly one `expanded` pool. Each pool
+Space version 8 gives each final operation exactly one `expanded` pool. Each pool
 uses the parameters declared in the common benchmark contract.
 The same complete domain is used for all cases and all native targets.
 
@@ -43,7 +43,7 @@ The same complete domain is used for all cases and all native targets.
 | --- | ---: | --- |
 | [GEMM](../gemm/README.md) | 3,456 | All 288 autotune configs; 12× expansion |
 | [FlashAttention](../flash_attention/README.md) | 576 | Single autotune config and explicit 128/128 launch |
-| [KDA chunk output](../kda/README.md) | 1,296 | Includes all 90 example autotune configs |
+| [KDA intra-chunk](../kda/README.md) | 512 | Includes all 32 example autotune configs |
 | [FP8 GEMM](../gemm_fp8/README.md) | 576 | Fixed 128-K blocks and explicit row scales |
 | [Grouped GEMM](../grouped_gemm/README.md) | 576 | Fixed 64-row tiles and native example knobs |
 
@@ -70,7 +70,7 @@ Inspect a space without loading TileLang or querying hardware:
 
 ```bash
 python -m experiments.common.run --plan --devices ampere \
-  --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square \
+  --workloads gemm_square attention_noncausal kda_intra_regular gemm_fp8_square \
   --config-space expanded
 ```
 
@@ -96,7 +96,7 @@ Run the sampled baseline comparison on the full expanded pools:
 ```bash
 bash experiments/common/run_accelerator.sh \
   --device ampere \
-  --workloads gemm_square attention_causal kda_chunk_regular gemm_fp8_square \
+  --workloads gemm_square attention_causal kda_intra_regular gemm_fp8_square \
   --methods tiletune xgboost --top-k 20 --xgb-sample-fraction 0.1 \
   --wait-idle --output experiments/results/expanded-comparison
 ```
@@ -233,7 +233,7 @@ Run a small correctness/runner check on a Hopper machine:
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m experiments.common.run \
     --devices hopper --smoke --method exhaustive --config-indices 0 \
-    --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square
+    --workloads gemm_square attention_noncausal kda_intra_regular gemm_fp8_square
 ```
 
 Run top-K selection over each workload's full default grid:
@@ -264,7 +264,7 @@ correctness checks; they do not add default experiment cases:
 | --- | --- |
 | `gemm_*` | Decode/prefill hidden projections and both FFN directions, pretransposed B |
 | `attention_*` | BSHD prefill attention from 512 to 8192 tokens, including matched causal/noncausal 4K cases |
-| `kda_chunk_*` | Chunk output from 2K to 16K context plus a batched case, DK=DV=128 |
+| `kda_intra_*` | Token-parallel intra-chunk from 2K to 16K context plus a batched case; D=128, chunk=64, sub-chunk=16 |
 | `gemm_fp8_*` | FP8 decode/prefill projections and both FFN directions with FP32 accumulation |
 | `grouped_gemm_*` | MoE up/down projections with aligned and ragged expert loads |
 
@@ -276,13 +276,12 @@ FP32 before the specified output cast. Checks include both elementwise tolerance
 and a relative output-norm bound: all-zero output cannot pass solely because a
 long-sequence softmax or attention result has small magnitude.
 
-The chunk-output workload calls `examples/kda/chunk_o.py` directly. Inputs and
-outputs use BSHD; hidden states use (B,chunks,H,DK,DV). It computes
-`cast(cast(q * scale) * exp2(g)) @ hidden + tril(a) @ v`, preserving both
-input-dtype rounding points in the example. This is the chunk-output stage,
-not the complete KDA forward/backward computation. Its config keys are
-`block_DK`, `block_DV`, `num_stages` and `threads`; `block_S` equals chunk size.
-The recurrent baseline and old tiled implementation are retired from the suite.
+The KDA intra workload calls `examples/kda/chunk_intra_token_parallel.py`.
+BF16 Q/K and FP32 gates use (B,S,H,128); BF16 beta uses (B,S,H).
+Its BF16 Aqk/Akk outputs use (B,S,H,64)/(B,S,H,16). It computes sub-chunk
+causal coefficients, with gate preprocessing outside timing. Scheduling knobs
+are `block_H`, `num_stages` and `threads`. The existing chunk-output Carver
+template is not used for this operation; Carver reports unsupported.
 
 The numerical tests in `test_example_kernels.py`, `test_expanded_kernels.py`
 and `test_kda_example.py` check program identity, final shapes, causal masking,
@@ -502,7 +501,7 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 `python -m experiments.suite --suite smoke --plan` plans five families
 with one representative shape per operation (five cases). Development uses twenty-five cases and up to 256
 configurations; final uses the complete `expanded` pools (GEMM 3,456,
-FlashAttention 576, KDA chunk output 1,296, FP8 GEMM 576 and grouped GEMM 576 per case) and three seeds. See
+FlashAttention 576, KDA intra-chunk 512, FP8 GEMM 576 and grouped GEMM 576 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 

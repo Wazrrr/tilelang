@@ -1,9 +1,11 @@
-# Common CUDA benchmark contract, version 2
+# H200 CUDA benchmark contract, version 3
 
-`dev-a100`, `dev-h200`, and `dev-b200` share the same families, development,
-training, validation and final shapes, ordered configuration pools, and Carver
-adapter equations. There are five families, five independently tuned operations,
-and five final shapes per operation: **25 final workloads**.
+`dev-h200-new` retains the four GEMM/attention families from contract version 2
+and replaces KDA chunk output with token-parallel intra-chunk from
+`dev-b200-tiletune` at `133bfa89`. There are five families, five independently
+tuned operations, and five final shapes per operation: **25 final workloads**.
+Historical cross-branch alignment is recorded in `BRANCH_COMPATIBILITY.md`;
+compare live sources before asserting that another branch shares this contract.
 
 | Family / operation | Contract | Configurations per case |
 | --- | --- | ---: |
@@ -11,7 +13,7 @@ and five final shapes per operation: **25 final workloads**.
 | FP8 GEMM | E4M3 A/B; FP32 scales per row and 128 K elements on **both** operands; FP32 partial/total accumulation; BF16 C | 576 |
 | Grouped GEMM | Packed BF16 A/B/C; FP32 accumulation; fixed 64-row scheduling tiles | 576 |
 | FlashAttention | BF16 forward; FP32 online softmax and accumulators | 576 |
-| KDA output | BF16 Q/V/A/state/output; FP32 accumulators | 1296 |
+| KDA intra-chunk | BF16 Q/K/beta/Aqk/Akk; FP32 gates and accumulators | 512 |
 
 Counts are declared candidates, not guaranteed compiler successes. Every method
 uses the same ordered pool. Invalid configurations retain their failed outcomes;
@@ -19,10 +21,10 @@ there is no architecture-specific pruning or replacement of failed candidates.
 Attention M tiles are 32/64/128 on all branches: larger tiles were excluded from
 the common domain because the native SM100 implementation can hang on them.
 
-## Scheduling domains, space version 7
+## Scheduling domains, space version 8
 
-Every pool contains at least 500 candidates and includes all version 6 candidates.
-Each row below is a Cartesian product of scheduling choices. Ranges are inclusive; M/N/K and DK/DV
+Every pool contains at least 500 candidates and includes its active example's original pool.
+Each row below is a Cartesian product of scheduling choices. Ranges are inclusive; M/N/K and block_H
 refer to scheduling tiles, not workload dimensions.
 
 | Operation | Tile choices | Threads | Stages | Other fixed/tuned settings |
@@ -31,14 +33,18 @@ refer to scheduling tiles, not workload dimensions.
 | FP8 GEMM | M,N each: 32,64,96,128,192,256 | 128,256 | 0–7 | K=128; fixed row scales |
 | Grouped GEMM | N: 32,64,96,128,192,256; K: 16,32,48,64,96,128 | 128,256 | 0–7 | M=64; fixed metadata |
 | Attention | M: 32,64,128; N: 16,32,48,64,80,96,112,128,160,192,224,256 | 128,256 | 0–7 | Workload causal flag |
-| KDA output | DK: 16,32,48,64,96,128; DV: 16,32,48,64,80,96,112,128,160,192,224,256 | 64,128,256 | 0–5 | Fixed chunk=64 |
+| KDA intra-chunk | block_H: 1–16 | 32,64,128,256 | 0–7 | Fixed head dimension=128, chunk=64, sub-chunk=16 |
 
-Version 7 changes pool membership and indices; configuration hashes for retained
-candidates remain stable. Stored bundles with the old full pools cannot be reused
-as complete version 7 baselines. Kernel contract version 2 remains unchanged.
-Smoke/development still select their declared budgeted subsets; final/full use
-all candidates. The 25 final workloads contain 32,400 candidate evaluations per
-device per repeat, before winner validation and training/validation collection.
+Version 8 replaces the KDA operation and pool; the other four pools are unchanged.
+The 512-config KDA pool contains all 32 original intra example configs: block_H
+in {1,2,4,8}, stages in {0,1,2,3}, threads in {128,256}. Chunk-output bundles
+cannot serve as intra-chunk baselines. Kernel contract version 3 records this
+semantic change. Smoke/development still select their declared budgeted subsets;
+final/full use all candidates. The 25 final workloads contain 28,480 candidate
+evaluations per device per repeat, before winner validation and training.
+
+Baseline collections containing KDA use contract version 3. Collections for
+the four unchanged families retain version 2, preserving compatible baselines.
 
 ## Shapes
 
@@ -60,9 +66,9 @@ Attention final (B,H,S,D,causal) shapes are (1,32,512,64,true),
 (2,16,2048,64,true), (1,32,4096,128,false), (1,32,4096,128,true), and
 (1,16,8192,128,true).
 
-KDA chunk output uses the final (B,H,S) shapes: (1,32,2048),
-(1,64,4096), (1,32,8192), (2,32,4096), and (1,64,16384). DK=DV=128
-and chunk size=64 are fixed. Each operation has two training cases and one validation case, disjoint from its five final cases.
+KDA intra-chunk uses the final (B,H,S) shapes: (1,32,2048),
+(1,64,4096), (1,32,8192), (2,32,4096), and (1,64,16384). Head dimension=128,
+chunk size=64 and sub-chunk size=16 are fixed. Each operation has two training cases and one validation case, disjoint from its five final cases.
 The machine-readable source is each family's cases.py and the frozen manifest.
 
 ## Allowed backend implementations
@@ -75,41 +81,44 @@ The machine-readable source is each family's cases.py and the frozen manifest.
   longer the experiment contract; their standalone examples remain available.
 - B200 retains its SM100 TCGen05 dense GEMM and attention examples. A100/H200
   use the advanced GEMM and portable BSHD attention examples.
-- Grouped GEMM and KDA chunk output use the same examples on all three
-  branches. The KDA output expression retains Ampere's pipeline-safe casts.
+- Grouped GEMM retains the common concatenated example. H200 KDA now uses
+  the token-parallel intra example imported from `dev-b200-tiletune`.
 
 `experiments/backend.py` makes the worktree's FP8 compute choice explicit.
 Backends do not introduce tuning knobs, change mathematical shapes, or switch
 scale granularity. FP8 always uses FP32 scales of shapes (M,K/128) and (N,K/128).
 
-## KDA chunk-output semantics
+## KDA intra-chunk semantics
 
-Only `kda_chunk_o` is part of the experiment family. Its Q, V, attention and
-per-chunk state inputs and output are BF16; accumulators are FP32. DK=DV=128
-and chunk size=64 are fixed for every named workload. Gates are FP32 base-2
-cumulative log gates, reset at chunk boundaries, and the query scale is DK^-0.5.
-Gate preprocessing is outside the timed kernel. State is supplied as
-(B,S/64,H,128,128); the chunk-output kernel consumes it without updating it.
-The independent Torch reference preserves the example's BF16 rounding points.
+Only `kda_chunk_intra_token_parallel` is active. Q/K are BF16 (B,S,H,128),
+gates are FP32 with the same shape, and beta is BF16 (B,S,H). Outputs are BF16
+Aqk (B,S,H,64) and Akk (B,S,H,16); accumulation is FP32. Head dimension=128,
+chunk=64, sub-chunk=16 and query scale=128^-0.5 are fixed.
 
-The pool tunes key/value tiles, thread count and pipeline stages. Results measure
-chunk output only. Intra, inter-solve, WY and recurrent state updates are outside
-the active suite; the benchmark does not measure a complete FlashKDA pipeline.
-The repository's standalone examples remain available.
+The example computes causal query/key coefficients within each 16-token
+sub-chunk and strictly causal beta-weighted key/key coefficients. Aqk entries
+outside that sub-chunk block and Akk's diagonal are zero. Gates are cumulative
+log-sigmoid values reset at chunk boundaries; the kernel evaluates exp2 of
+gate differences. Gate preprocessing is outside timing. The independent Torch
+reference uses a stable exponential factorization and sub-chunk matrix products.
+
+Results cover this token-parallel intra stage. Inter-solve, WY, recurrent state
+updates and chunk output remain standalone examples outside the active suite.
+See [KDA workloads and pool](kda/README.md) for the complete tensor contract.
 
 ## Models and provenance
 
-Carver uses the same adapter equations and ordering on all branches. Dense and
+Carver's existing dense and
 grouped GEMM retain the existing policy. FP8's shared traffic/wave adapter counts
 explicit scale loads, operand storage/conversion and two FP32 accumulator tiles.
-KDA chunk output retains its shared Carver template and reference. TileTune can
-score the representative configurations tested for all five active operations.
+The existing KDAChunkTemplate models chunk output; intra-chunk Carver requests
+report unsupported. TileTune analyzes the intra PrimFunc with its unified model.
 Unsupported scheduling remains an explicit model diagnostic; compatibility is
 not evidence of ranking quality.
 
-Contract version 2 separates new runs from old measurement bundles. Source
+Contract version 3 separates new runs from old measurement bundles. Source
 fingerprints include backend selection and the active kernels and examples.
-Old artifacts remain historical and must not be relabeled as version 2 results.
+Old artifacts remain historical and must not be relabeled as version 3 results.
 
 Run the standard-library-only comparison from any worktree:
 

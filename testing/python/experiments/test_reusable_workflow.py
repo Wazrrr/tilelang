@@ -46,9 +46,7 @@ def write(path, data):
     write_json(path, data)
 
 
-@pytest.mark.parametrize(
-    "family,count", [("gemm", 3456), ("flash_attention", 576), ("kda", 1296), ("gemm_fp8", 576), ("grouped_gemm", 576)]
-)
+@pytest.mark.parametrize("family,count", [("gemm", 3456), ("flash_attention", 576), ("kda", 512), ("gemm_fp8", 576), ("grouped_gemm", 576)])
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
     assert len(plan) == 25
@@ -103,6 +101,21 @@ def test_baseline_identity_ignores_tiletune_seed_and_k_but_includes_baseline_see
     assert first == second
     assert baseline_store.identities(plan, device, settings, {"device": "test"}, 456)[1] != first
     assert baseline_store.identities(plan, device, settings | {"rep": 3}, {"device": "test"})[1] != first
+
+
+@pytest.mark.parametrize("family", ["gemm", "flash_attention", "gemm_fp8", "kda", "grouped_gemm"])
+def test_kda_contract_change_preserves_other_family_baselines(monkeypatch, family):
+    from experiments.families import FAMILIES, family_module
+
+    op = next(op for op, folder in FAMILIES.items() if folder == family)
+    workload = family_module(op, "cases").cases(holdout=True)[0]
+    plan = dict(splits=dict(test=[workload.to_dict()]), xgboost={})
+    settings = dict(warmup=1, rep=2, timeout=30, case_timeout=300, workers=1)
+    monkeypatch.setattr(baseline_store, "measurement_sources", lambda families: {})
+    monkeypatch.setattr(baseline_store, "hash_files", lambda paths: {})
+    measurement, _ = baseline_store.identities(plan, Device("hopper", TARGETS["hopper"]), settings, {})
+    assert measurement["kernel_contract_version"] == (3 if family == "kda" else 2)
+    assert baseline_store.EXAMPLES["kda"] == "examples/kda/chunk_intra_token_parallel.py"
 
 
 def ranking(configs):

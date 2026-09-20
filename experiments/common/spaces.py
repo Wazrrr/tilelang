@@ -4,7 +4,7 @@ from collections import Counter
 import hashlib
 import json
 
-SPACE_VERSION = 7
+SPACE_VERSION = 8
 PRESETS = ("expanded",)
 
 

@@ -24,7 +24,7 @@ _PARAMETERS = {
     "gemm": ({"m", "n", "k"}, {"batch", "transpose_a", "transpose_b", "epilogue"}),
     "grouped_gemm": ({"batch_sizes", "n", "k"}, {"transpose_b"}),
     "attention": ({"batch", "heads", "sequence", "dim"}, {"causal"}),
-    "kda_chunk_o": ({"batch", "heads", "sequence", "dim", "value_dim", "chunk_size"}, set()),
+    "kda_chunk_intra_token_parallel": ({"batch", "heads", "sequence", "dim", "chunk_size", "sub_chunk_size"}, set()),
     "gemm_fp8": ({"m", "n", "k"}, {"transpose_b"}),
 }
 
@@ -66,10 +66,13 @@ class Workload:
                 raise ValueError(f"{key} must be a positive integer")
         if self.dtype not in _DTYPES:
             raise ValueError(f"Unsupported workload dtype {self.dtype}")
-        if self.op in ("attention", "kda_chunk_o", "grouped_gemm") and self.dtype not in ("float16", "bfloat16"):
+        if self.op in ("attention", "kda_chunk_intra_token_parallel", "grouped_gemm") and self.dtype not in ("float16", "bfloat16"):
             raise ValueError(f"{self.op} supports float16 and bfloat16")
-        if self.op == "kda_chunk_o" and self.parameters["sequence"] % self.parameters["chunk_size"]:
-            raise ValueError("kda_chunk_o requires complete chunks")
+        if self.op == "kda_chunk_intra_token_parallel":
+            if self.parameters["sequence"] % self.parameters["chunk_size"]:
+                raise ValueError("kda_chunk_intra_token_parallel requires complete chunks")
+            if self.parameters["chunk_size"] % self.parameters["sub_chunk_size"]:
+                raise ValueError("kda_chunk_intra_token_parallel requires complete sub-chunks")
         if self.configs is not None and (not self.configs or any(not isinstance(c, dict) or not c for c in self.configs)):
             raise ValueError("configs must be a nonempty list of nonempty dictionaries")
 

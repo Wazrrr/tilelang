@@ -1,5 +1,8 @@
-"""Carver's KDA chunk template on the experiment's exact pool."""
+"""Explicit support boundary for the active KDA intra-chunk operation."""
 
-from experiments.common.carver import kda_rank as carver_rank
+
+def carver_rank(workload, device, configs, top_k):
+    raise NotImplementedError("no Carver template for token-parallel KDA intra-chunk")
+
 
 __all__ = ["carver_rank"]

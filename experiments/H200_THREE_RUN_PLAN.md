@@ -7,10 +7,10 @@ failure-isolation tests and H200 pipeline/alpha tests in
 `testing/python/autotune/test_grouped_compile_fallback.py`. Experiment-runner
 wiring and the complete oracle-retention study remain to be executed.
 
-Use `dev-h200-new`, starting from `1082c9feb270e52deb65c0da42473fc2185e51b6`.
-Freeze the actual code revision after the runner changes below. Use the current
-[benchmark contract](BENCHMARK_CONTRACT.md), contract version 2 and configuration
-space version 7. The older FP16/E4M3 29,200-candidate study does not establish
+Use `dev-h200-new`, including grouped-compile recovery and the KDA intra-chunk
+migration. Freeze the actual code revision after the runner changes below. Use the current
+[benchmark contract](BENCHMARK_CONTRACT.md), contract version 3 and configuration
+space version 8. The older FP16/E4M3 29,200-candidate study does not establish
 oracle retention for this BF16/block-scaled suite.
 
 ## Experiment matrix
@@ -50,21 +50,39 @@ Use `common.spec.default_workloads(smoke=False)` and each family's complete
 | --- | --- | ---: | ---: |
 | GEMM | gemm_decode, gemm_prefill, gemm_ffn_down, gemm_square, gemm_square_large | 3456 | 1728 |
 | Attention | attention_short_causal, attention_batched_causal, attention_noncausal, attention_causal, attention_long_causal | 576 | 288 |
-| KDA | kda_chunk_short, kda_chunk_medium, kda_chunk_regular, kda_chunk_batched, kda_chunk_long | 1296 | 648 |
+| KDA intra-chunk | kda_intra_short, kda_intra_medium, kda_intra_regular, kda_intra_batched, kda_intra_long | 512 | 256 |
 | FP8 GEMM | gemm_fp8_decode, gemm_fp8_prefill, gemm_fp8_ffn_down, gemm_fp8_square, gemm_fp8_square_large | 576 | 288 |
 | Grouped GEMM | grouped_gemm_decode, grouped_gemm_prefill, grouped_gemm_aligned, grouped_gemm_down_aligned, grouped_gemm_ragged | 576 | 288 |
 
-Each exhaustive experiment attempts 32,400 candidates. E3 elaborates/analyzes
-all 32,400 and selects at most 16,200 for compilation. Whole equal-score groups
+Each exhaustive experiment attempts 28,480 candidates. E3 elaborates/analyzes
+all 28,480 and selects at most 14,240 for compilation. Whole equal-score groups
 must fit inside `floor(0.5 * original_pool_size)`. A group crossing the boundary
 is excluded; ties are not split or expanded. Failures and unknown scores stay
 in the original denominator. Do not refill after analysis, compilation,
 post-compile rejection, correctness, or benchmark failures.
 
-There are at most 81,000 distinct candidates submitted for compilation across
+There are at most 71,200 candidate slots submitted for compilation across
 the three full experiments, excluding preflight and winner verification.
 Failed shared builds add retry attempts, which must be counted and timed.
 Actual benchmark counts will be smaller when candidates fail or are filtered.
+
+KDA inputs are BF16 Q/K of shape (B,S,H,128), FP32 gates of the same shape,
+and BF16 beta of shape (B,S,H). Outputs are BF16 Aqk (B,S,H,64) and
+Akk (B,S,H,16). Head dimension=128, chunk=64, sub-chunk=16.
+
+| KDA workload | B | S | H |
+| --- | ---: | ---: | ---: |
+| kda_intra_short | 1 | 2048 | 32 |
+| kda_intra_medium | 1 | 4096 | 64 |
+| kda_intra_regular | 1 | 8192 | 32 |
+| kda_intra_batched | 2 | 4096 | 32 |
+| kda_intra_long | 1 | 16384 | 64 |
+
+Use block_H=1–16, stages=0–7, threads={32,64,128,256}: 512 configs per
+workload. This includes all 32 original example configs (block_H={1,2,4,8},
+stages=0–3, threads={128,256}). See [the KDA contract](kda/README.md).
+Previous chunk-output oracle and spill validations do not establish retention
+for this intra-chunk operation.
 
 E3's grouped compiler isolates per-config elaboration/lowering failures and
 post-compile rejections. If a shared device/host build fails, it bisects the

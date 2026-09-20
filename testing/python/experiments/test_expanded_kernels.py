@@ -70,8 +70,10 @@ def test_retired_rewrite_knobs_are_not_silently_ignored():
             dict(block_M=64, block_N=64, num_stages=1, threads=128, qk_policy="square"),
         ),
         (
-            Workload("kda", "kda_chunk_o", dict(batch=1, heads=1, sequence=128, dim=64, value_dim=64, chunk_size=64)),
-            dict(block_DK=64, block_DV=64, num_stages=0, threads=128, intra_stages=1),
+            Workload(
+                "kda", "kda_chunk_intra_token_parallel", dict(batch=1, heads=1, sequence=128, dim=128, chunk_size=64, sub_chunk_size=16)
+            ),
+            dict(block_H=4, num_stages=0, threads=128, intra_stages=1),
         ),
     ]
     for w, c in cases:

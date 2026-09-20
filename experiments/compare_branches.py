@@ -36,7 +36,7 @@ for op, family in FAMILIES.items():
 shared = ['tilelang/carver/matmul_analysis.py', 'experiments/common/carver.py', 'experiments/gemm/carver.py',
           'tilelang/carver/template/matmul_fp8.py',
           'examples/gemm_fp8/example_blockscaled_gemm.py',
-          'examples/kda/chunk_o.py',
+          'examples/kda/chunk_intra_token_parallel.py',
           'experiments/gemm_fp8/reference.py', 'experiments/grouped_gemm/reference.py',
           'experiments/kda/reference.py', 'examples/grouped_gemm/example_grouped_gemm_fwd.py']
 shared += [str(p.relative_to(root)) for folder in ('arch', 'roller')

@@ -55,11 +55,11 @@ exact hardware simulation. Synthetic test profiles are never performance results
 | FP8 GEMM | `FP8MatmulTemplate` | FP32 accumulation; E4M3FN lowers to Carver's tensorizable E4M3 spelling |
 | Attention | `FlashAttentionTemplate` | Scaling, masking, stable softmax, probability cast and both GEMMs are retained |
 | Grouped GEMM | `GroupedMatmulTemplate` | The padded CTA domain is modeled; metadata lookup and interleaved CTA scheduling are omitted |
-| KDA chunk output | `KDAChunkTemplate` | Scaling, casts, exp2, causal mask and both GEMMs are retained |
+| KDA intra-chunk | Unsupported | `KDAChunkTemplate` describes the retired chunk-output operation |
 
 Adapters evaluate the complete experiment pool through the existing policy.
 Policy scores and feasibility rules are unchanged. The final attention pools,
-ragged grouped case and 48-row KDA case can have no feasible candidates. These
+ragged grouped case and historical 48-row KDA chunk-output case can have no feasible candidates. These
 save every rejection and report `model_unavailable`; they receive no replacement
 ranking. SM100 uses Carver's SM90 tensorization vocabulary while retaining
 visible-device capacities.

@@ -11,7 +11,8 @@ from tilelang.tiletune import TileTuneConfig, check_compiler_resources
 
 
 @pytest.mark.parametrize(
-    "op,spill,local", [("gemm", 0, 0), ("grouped_gemm", 0, 0), ("kda_chunk_o", 0, 0), ("attention", 48, 48), ("gemm_fp8", 92, 64)]
+    "op,spill,local",
+    [("gemm", 0, 0), ("grouped_gemm", 0, 0), ("kda_chunk_intra_token_parallel", 0, 0), ("attention", 48, 48), ("gemm_fp8", 92, 64)],
 )
 def test_observed_h200_oracle_resources_fit_declared_policy(op, spill, local):
     target = dict(kind="cuda", arch="sm_90a")

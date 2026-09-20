@@ -38,9 +38,9 @@ def test_expanded_retains_attention_example_launches():
 
 
 def test_expanded_retains_native_kda_example_grid():
-    from examples.kda.chunk_o import get_configs
+    from examples.kda.chunk_intra_token_parallel import get_configs
 
-    w = next(w for w in default_workloads() if w.op == "kda_chunk_o")
+    w = next(w for w in default_workloads() if w.op == "kda_chunk_intra_token_parallel")
     pool = configurations(w, Device("ampere", TARGETS["ampere"]))
     for c in get_configs():
         assert c in pool

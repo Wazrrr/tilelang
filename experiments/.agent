@@ -1,5 +1,10 @@
 # Guide for adding or extending kernel experiments
 
+The active H200 matrix is defined by [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md)
+version 3: 25 final workloads, with KDA intra-chunk and its 512-config pool.
+That contract supersedes older case counts and KDA chunk-output descriptions
+in this guide. Historical results retain their original contracts.
+
 Follow the organization in [gemm/](gemm/README.md) and
 [flash_attention/](flash_attention/README.md). Read their `cases.py`, `spaces.py`,
 `kernel.py`, `reference.py`, and command entry points before adding a family.

@@ -101,8 +101,8 @@ def test_carver_unsupported_semantics_are_explicit_and_exhaustive_has_no_gate():
     workloads = {w.name: w for w in default_workloads()}
     assert carver_support_reason(workloads["gemm_square"], device) is None
     assert carver_support_reason(workloads["attention_noncausal"], device) is None
-    for name in ("kda_chunk_regular", "grouped_gemm_aligned"):
-        assert carver_support_reason(workloads[name], device) is None
+    assert carver_support_reason(workloads["grouped_gemm_aligned"], device) is None
+    assert "intra-chunk" in carver_support_reason(workloads["kda_intra_regular"], device)
     assert carver_support_reason(workloads["gemm_fp8_square"], device)
     for parameters in (dict(batch=2), dict(epilogue="bias_relu"), dict(transpose_b=False)):
         w = workloads["gemm_square"]
