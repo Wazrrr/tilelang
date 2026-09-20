@@ -16,7 +16,7 @@ from collections.abc import Callable
 from tilelang import tvm
 from tvm.tirx import PrimFunc
 
-from tilelang import env
+from tilelang import env, logger
 from tilelang.env import resolve_pass_profile_threshold_ms
 from tilelang.autotuner.param import CompileArgs
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, device_codegen_without_compile, host_codegen
@@ -56,6 +56,8 @@ def compile_grouped_unit_tvm_ffi(
     3. Merge all device IR into one IRModule and compile device code once.
     4. Merge kept host IR, build one host runtime module, and import the shared device module.
     5. Construct per-config JITKernel objects that dispatch to named entries in the shared executable.
+    Shared build failures bisect unfinished configs down to singleton builds,
+    reusing lowered IR and preserving per-config rejections without replacement.
     """
 
     if _prepared_programs is None:
@@ -246,243 +248,267 @@ def compile_grouped_unit_tvm_ffi(
     if not lowered_items:
         return unit_results
 
-    try:
-        grouped_config_indices = ",".join(str(item["idx"]) for item in lowered_items)
-        lowered_group_size = len(lowered_items)
-        with timed_autotune_stage(
-            "grouped.merge_device_ir",
-            group_size=lowered_group_size,
-            configs=grouped_config_indices,
-        ):
-            merged_funcs: dict[Any, Any] = {}
-            merged_attrs = None
-            merged_names: set[str] = set()
-            for item in lowered_items:
-                device_mod = item["device_mod"]
-                if merged_attrs is None:
-                    merged_attrs = device_mod.attrs
-                for global_var, func in device_mod.functions.items():
-                    name_hint = getattr(global_var, "name_hint", str(global_var))
-                    if name_hint in merged_names:
-                        raise RuntimeError(
-                            f"Duplicate device global symbol '{name_hint}' during grouped compilation (config index={item['idx']})."
-                        )
-                    merged_names.add(name_hint)
-                    merged_funcs[global_var] = func
-            merged_device_mod = tvm.IRModule(merged_funcs, attrs=merged_attrs)
-
-        reference_target = lowered_items[0]["target"]
-        device_instruments, device_timing_inst = create_pass_instruments()
-        capture_cuda_resources = requested_resource_capture or filter_config.needs_cuda_resource_usage() or tiletune_session is not None
-        if capture_cuda_resources:
-            cuda_reset_recorder()
-        capture_context = cuda_resource_info.capture_resource_usage() if capture_cuda_resources else contextlib.nullcontext()
-        device_start = time.perf_counter()
+    def compile_lowered(lowered_items):
+        results: list[CompileUnitResult] = []
         try:
-            with (
-                timed_autotune_stage(
-                    "grouped.device_codegen",
-                    group_size=lowered_group_size,
-                    configs=grouped_config_indices,
-                ),
-                capture_context,
-                report_pass_timing_on_exit(
-                    device_timing_inst,
-                    context=f"stage=grouped-device, configs=[{grouped_config_indices}]",
-                ),
-                tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
-                reference_target,
+            grouped_config_indices = ",".join(str(item["idx"]) for item in lowered_items)
+            lowered_group_size = len(lowered_items)
+            with timed_autotune_stage(
+                "grouped.merge_device_ir",
+                group_size=lowered_group_size,
+                configs=grouped_config_indices,
             ):
-                grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
-        finally:
-            grouped_resource_usage = cuda_pop_recorded() if capture_cuda_resources else {}
-            if tiletune_session is not None:
-                duration = (time.perf_counter() - device_start) * 1000 / len(lowered_items)
+                merged_funcs: dict[Any, Any] = {}
+                merged_attrs = None
+                merged_names: set[str] = set()
                 for item in lowered_items:
-                    tiletune_session.records[item["idx"]]["timings_ms"]["device_compile"] = duration
+                    device_mod = item["device_mod"]
+                    if merged_attrs is None:
+                        merged_attrs = device_mod.attrs
+                    for global_var, func in device_mod.functions.items():
+                        name_hint = getattr(global_var, "name_hint", str(global_var))
+                        if name_hint in merged_names:
+                            raise RuntimeError(
+                                f"Duplicate device global symbol '{name_hint}' during grouped compilation (config index={item['idx']})."
+                            )
+                        merged_names.add(name_hint)
+                        merged_funcs[global_var] = func
+                merged_device_mod = tvm.IRModule(merged_funcs, attrs=merged_attrs)
 
-        with timed_autotune_stage(
-            "grouped.inspect_source",
-            group_size=lowered_group_size,
-            configs=grouped_config_indices,
-        ):
-            grouped_kernel_source = grouped_device_rt_mod.inspect_source()
-
-        runtime_items: list[dict[str, Any]] = []
-        for item in lowered_items:
-            idx = item["idx"]
-            config_arg = item["config_arg"]
+            reference_target = lowered_items[0]["target"]
+            device_instruments, device_timing_inst = create_pass_instruments()
+            capture_cuda_resources = requested_resource_capture or filter_config.needs_cuda_resource_usage() or tiletune_session is not None
+            if capture_cuda_resources:
+                cuda_reset_recorder()
+            capture_context = cuda_resource_info.capture_resource_usage() if capture_cuda_resources else contextlib.nullcontext()
+            device_start = time.perf_counter()
             try:
+                with (
+                    timed_autotune_stage(
+                        "grouped.device_codegen",
+                        group_size=lowered_group_size,
+                        configs=grouped_config_indices,
+                    ),
+                    capture_context,
+                    report_pass_timing_on_exit(
+                        device_timing_inst,
+                        context=f"stage=grouped-device, configs=[{grouped_config_indices}]",
+                    ),
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
+                    reference_target,
+                ):
+                    grouped_device_rt_mod = device_codegen(merged_device_mod, reference_target)
+            finally:
+                grouped_resource_usage = cuda_pop_recorded() if capture_cuda_resources else {}
                 if tiletune_session is not None:
-                    tiletune_session.post_compile(idx, grouped_resource_usage, item["launch_infos"], target=compile_args.target)
-                if filter_config.enabled:
+                    duration = (time.perf_counter() - device_start) * 1000 / len(lowered_items)
+                    for item in lowered_items:
+                        timings = tiletune_session.records[item["idx"]]["timings_ms"]
+                        timings["device_compile"] = timings.get("device_compile", 0) + duration
+
+            with timed_autotune_stage(
+                "grouped.inspect_source",
+                group_size=lowered_group_size,
+                configs=grouped_config_indices,
+            ):
+                grouped_kernel_source = grouped_device_rt_mod.inspect_source()
+
+            runtime_items: list[dict[str, Any]] = []
+            for item in lowered_items:
+                idx = item["idx"]
+                config_arg = item["config_arg"]
+                try:
+                    if tiletune_session is not None:
+                        tiletune_session.post_compile(idx, grouped_resource_usage, item["launch_infos"], target=compile_args.target)
+                    if filter_config.enabled:
+                        with timed_autotune_stage(
+                            "grouped.post_compile_filter",
+                            group_size=lowered_group_size,
+                            config_idx=idx,
+                            configs=grouped_config_indices,
+                        ):
+                            decision = evaluate_post_compile_filter(
+                                launch_infos=item["launch_infos"],
+                                resource_usage=grouped_resource_usage,
+                                kernel_source=grouped_kernel_source,
+                                config=config_arg,
+                                filter_config=filter_config,
+                            )
+                        item["filter_decisions"].append(decision)
+                        if not decision.keep:
+                            results.append(
+                                (
+                                    idx,
+                                    config_arg,
+                                    None,
+                                    AutotuneFilterReject(
+                                        decision,
+                                        filter_decisions=item["filter_decisions"],
+                                    ),
+                                )
+                            )
+                            continue
+
+                    runtime_items.append(item)
+                except Exception as e:
+                    results.append((idx, config_arg, None, e))
+
+            if not runtime_items:
+                return results
+
+            runtime_grouped_config_indices = ",".join(str(item["idx"]) for item in runtime_items)
+            runtime_group_size = len(runtime_items)
+            with timed_autotune_stage(
+                "grouped.merge_host_ir",
+                group_size=runtime_group_size,
+                configs=runtime_grouped_config_indices,
+            ):
+                merged_host_funcs: dict[Any, Any] = {}
+                merged_host_attrs = None
+                merged_host_names: set[str] = set()
+                for item in runtime_items:
+                    host_mod = item["host_mod"]
+                    if merged_host_attrs is None:
+                        merged_host_attrs = host_mod.attrs
+                    for global_var, func in host_mod.functions.items():
+                        name_hint = getattr(global_var, "name_hint", str(global_var))
+                        if name_hint in merged_host_names:
+                            raise RuntimeError(
+                                f"Duplicate host global symbol '{name_hint}' during grouped compilation (config index={item['idx']})."
+                            )
+                        merged_host_names.add(name_hint)
+                        merged_host_funcs[global_var] = func
+                merged_host_mod = tvm.IRModule(merged_host_funcs, attrs=merged_host_attrs)
+
+            host_start = time.perf_counter()
+            try:
+                host_instruments, host_timing_inst = create_pass_instruments()
+                with (
+                    timed_autotune_stage(
+                        "grouped.host_codegen",
+                        group_size=runtime_group_size,
+                        configs=runtime_grouped_config_indices,
+                    ),
+                    report_pass_timing_on_exit(
+                        host_timing_inst,
+                        context=f"stage=grouped-host, configs=[{runtime_grouped_config_indices}]",
+                    ),
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
+                    runtime_items[0]["target"],
+                ):
+                    grouped_host_rt_mod = host_codegen(
+                        merged_host_mod,
+                        runtime_items[0]["target_host"],
+                        target=runtime_items[0]["target"],
+                    )
+            finally:
+                if tiletune_session is not None:
+                    duration = (time.perf_counter() - host_start) * 1000 / len(runtime_items)
+                    for item in runtime_items:
+                        timings = tiletune_session.records[item["idx"]]["timings_ms"]
+                        timings["host_compile"] = timings.get("host_compile", 0) + duration
+
+            with timed_autotune_stage(
+                "grouped.import_module",
+                group_size=runtime_group_size,
+                configs=runtime_grouped_config_indices,
+            ):
+                grouped_host_rt_mod.import_module(grouped_device_rt_mod)
+
+            shared_executable = tvm.runtime.Executable(grouped_host_rt_mod)
+            with timed_autotune_stage(
+                "grouped.executable_jit",
+                group_size=runtime_group_size,
+                configs=runtime_grouped_config_indices,
+            ):
+                shared_executable.jit()
+
+            for item in runtime_items:
+                idx = item["idx"]
+                config_arg = item["config_arg"]
+                try:
+                    kernel_symbol = str(item["program"].attrs["global_symbol"])
+                    artifact = CompiledArtifact(
+                        host_mod=grouped_host_rt_mod,
+                        device_mod=item["device_mod"],
+                        params=item["params"],
+                        kernel_source=grouped_kernel_source,
+                        rt_mod=grouped_host_rt_mod,
+                    )
+
                     with timed_autotune_stage(
-                        "grouped.post_compile_filter",
+                        "grouped.adapter_init",
                         group_size=lowered_group_size,
                         config_idx=idx,
                         configs=grouped_config_indices,
                     ):
-                        decision = evaluate_post_compile_filter(
-                            launch_infos=item["launch_infos"],
-                            resource_usage=grouped_resource_usage,
-                            kernel_source=grouped_kernel_source,
-                            config=config_arg,
-                            filter_config=filter_config,
+                        adapter = TVMFFIKernelAdapter(
+                            params=artifact.params,
+                            result_idx=compile_args.out_idx,
+                            target=compile_args.target,
+                            func_or_mod=item["program"],
+                            host_mod=artifact.host_mod,
+                            device_mod=artifact.device_mod,
+                            rt_mod=artifact.rt_mod,
+                            device_kernel_source=artifact.kernel_source,
+                            entry_name=kernel_symbol,
+                            executable=shared_executable,
+                            verbose=compile_args.verbose,
+                            pass_configs=pass_configs,
                         )
-                    item["filter_decisions"].append(decision)
-                    if not decision.keep:
-                        unit_results.append(
-                            (
-                                idx,
-                                config_arg,
-                                None,
-                                AutotuneFilterReject(
-                                    decision,
-                                    filter_decisions=item["filter_decisions"],
-                                ),
-                            )
+                        adapter._autotune_group_size = runtime_group_size
+                        adapter._autotune_config_idx = idx
+
+                    with timed_autotune_stage(
+                        "grouped.jit_kernel_init",
+                        group_size=runtime_group_size,
+                        config_idx=idx,
+                        configs=runtime_grouped_config_indices,
+                    ):
+                        jit_kernel = JITKernel(
+                            func=item["program"],
+                            out_idx=compile_args.out_idx,
+                            execution_backend=compile_args.execution_backend,
+                            target=compile_args.target,
+                            target_host=compile_args.target_host,
+                            verbose=compile_args.verbose,
+                            pass_configs=pass_configs,
+                            from_database=True,
                         )
-                        continue
+                    jit_kernel.artifact = artifact
+                    jit_kernel.adapter = adapter
+                    jit_kernel.torch_function = adapter.func
+                    if grouped_resource_usage:
+                        jit_kernel._resource_usage = grouped_resource_usage
+                    if item["filter_decisions"]:
+                        jit_kernel._filter_decisions = item["filter_decisions"]
 
-                runtime_items.append(item)
-            except Exception as e:
-                unit_results.append((idx, config_arg, None, e))
-
-        if not runtime_items:
-            return unit_results
-
-        runtime_grouped_config_indices = ",".join(str(item["idx"]) for item in runtime_items)
-        runtime_group_size = len(runtime_items)
-        with timed_autotune_stage(
-            "grouped.merge_host_ir",
-            group_size=runtime_group_size,
-            configs=runtime_grouped_config_indices,
-        ):
-            merged_host_funcs: dict[Any, Any] = {}
-            merged_host_attrs = None
-            merged_host_names: set[str] = set()
-            for item in runtime_items:
-                host_mod = item["host_mod"]
-                if merged_host_attrs is None:
-                    merged_host_attrs = host_mod.attrs
-                for global_var, func in host_mod.functions.items():
-                    name_hint = getattr(global_var, "name_hint", str(global_var))
-                    if name_hint in merged_host_names:
-                        raise RuntimeError(
-                            f"Duplicate host global symbol '{name_hint}' during grouped compilation (config index={item['idx']})."
+                    results.append((idx, config_arg, jit_kernel, None))
+                except Exception as e:
+                    results.append((idx, config_arg, None, e))
+        except Exception as error:
+            completed = {result[0] for result in results}
+            pending = [item for item in lowered_items if item["idx"] not in completed]
+            if len(lowered_items) == 1:
+                results.extend((item["idx"], item["config_arg"], None, error) for item in pending)
+            elif pending:
+                # A shared build failure does not identify the invalid config.
+                # Bisect only unfinished items; reuse their lowered IR and effective
+                # settings, and never retry a per-config rejection or completed result.
+                midpoint = max(1, len(pending) // 2)
+                retry_groups = [pending[:midpoint], pending[midpoint:]]
+                retry_groups = [group for group in retry_groups if group]
+                failed_indices = [item["idx"] for item in lowered_items]
+                retry_indices = [[item["idx"] for item in group] for group in retry_groups]
+                logger.warning("Grouped compilation failed for configs %s; retrying %s: %s", failed_indices, retry_indices, error)
+                if tiletune_session is not None:
+                    for item in pending:
+                        tiletune_session.records[item["idx"]].setdefault("grouped_compile_fallbacks", []).append(
+                            dict(configs=failed_indices, retry_groups=retry_indices, error=str(error))
                         )
-                    merged_host_names.add(name_hint)
-                    merged_host_funcs[global_var] = func
-            merged_host_mod = tvm.IRModule(merged_host_funcs, attrs=merged_host_attrs)
+                for group in retry_groups:
+                    results.extend(compile_lowered(group))
 
-        host_start = time.perf_counter()
-        host_instruments, host_timing_inst = create_pass_instruments()
-        with (
-            timed_autotune_stage(
-                "grouped.host_codegen",
-                group_size=runtime_group_size,
-                configs=runtime_grouped_config_indices,
-            ),
-            report_pass_timing_on_exit(
-                host_timing_inst,
-                context=f"stage=grouped-host, configs=[{runtime_grouped_config_indices}]",
-            ),
-            tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
-            runtime_items[0]["target"],
-        ):
-            grouped_host_rt_mod = host_codegen(
-                merged_host_mod,
-                runtime_items[0]["target_host"],
-                target=runtime_items[0]["target"],
-            )
+        return results
 
-        if tiletune_session is not None:
-            duration = (time.perf_counter() - host_start) * 1000 / len(runtime_items)
-            for item in runtime_items:
-                tiletune_session.records[item["idx"]]["timings_ms"]["host_compile"] = duration
-
-        with timed_autotune_stage(
-            "grouped.import_module",
-            group_size=runtime_group_size,
-            configs=runtime_grouped_config_indices,
-        ):
-            grouped_host_rt_mod.import_module(grouped_device_rt_mod)
-
-        shared_executable = tvm.runtime.Executable(grouped_host_rt_mod)
-        with timed_autotune_stage(
-            "grouped.executable_jit",
-            group_size=runtime_group_size,
-            configs=runtime_grouped_config_indices,
-        ):
-            shared_executable.jit()
-
-        for item in runtime_items:
-            idx = item["idx"]
-            config_arg = item["config_arg"]
-            try:
-                kernel_symbol = str(item["program"].attrs["global_symbol"])
-                artifact = CompiledArtifact(
-                    host_mod=grouped_host_rt_mod,
-                    device_mod=item["device_mod"],
-                    params=item["params"],
-                    kernel_source=grouped_kernel_source,
-                    rt_mod=grouped_host_rt_mod,
-                )
-
-                with timed_autotune_stage(
-                    "grouped.adapter_init",
-                    group_size=lowered_group_size,
-                    config_idx=idx,
-                    configs=grouped_config_indices,
-                ):
-                    adapter = TVMFFIKernelAdapter(
-                        params=artifact.params,
-                        result_idx=compile_args.out_idx,
-                        target=compile_args.target,
-                        func_or_mod=item["program"],
-                        host_mod=artifact.host_mod,
-                        device_mod=artifact.device_mod,
-                        rt_mod=artifact.rt_mod,
-                        device_kernel_source=artifact.kernel_source,
-                        entry_name=kernel_symbol,
-                        executable=shared_executable,
-                        verbose=compile_args.verbose,
-                        pass_configs=pass_configs,
-                    )
-                    adapter._autotune_group_size = runtime_group_size
-                    adapter._autotune_config_idx = idx
-
-                with timed_autotune_stage(
-                    "grouped.jit_kernel_init",
-                    group_size=runtime_group_size,
-                    config_idx=idx,
-                    configs=runtime_grouped_config_indices,
-                ):
-                    jit_kernel = JITKernel(
-                        func=item["program"],
-                        out_idx=compile_args.out_idx,
-                        execution_backend=compile_args.execution_backend,
-                        target=compile_args.target,
-                        target_host=compile_args.target_host,
-                        verbose=compile_args.verbose,
-                        pass_configs=pass_configs,
-                        from_database=True,
-                    )
-                jit_kernel.artifact = artifact
-                jit_kernel.adapter = adapter
-                jit_kernel.torch_function = adapter.func
-                if grouped_resource_usage:
-                    jit_kernel._resource_usage = grouped_resource_usage
-                if item["filter_decisions"]:
-                    jit_kernel._filter_decisions = item["filter_decisions"]
-
-                unit_results.append((idx, config_arg, jit_kernel, None))
-            except Exception as e:
-                unit_results.append((idx, config_arg, None, e))
-    except Exception as e:
-        completed = {result[0] for result in unit_results}
-        for item in lowered_items:
-            if item["idx"] not in completed:
-                unit_results.append((item["idx"], item["config_arg"], None, e))
-
-    return unit_results
+    return unit_results + compile_lowered(lowered_items)

@@ -91,6 +91,22 @@ attention, 128 for FP8 GEMM, and zero for the other experiment families. This
 policy uses the workload declaration outside the analyzer; memory scoring
 remains family-independent. See the [oracle resource audit](../../experiments/H200_UNIFIED_MEMORY.md).
 
+## Grouped compilation and recovery
+
+`tuner.run(use_pipeline=True, enable_grouped_compile=True, group_compile_size=8)`
+compiles up to eight selected configurations together when their effective
+compiler settings agree. Selection remains frozen before compilation.
+
+Per-config elaboration/lowering errors and resource rejections affect only that
+config. If a shared device or host build fails, the compiler splits unfinished
+configs into smaller groups, down to singletons. It reuses lowered IR, preserves
+effective options and post-compile checks, and does not retry rejected configs
+or refill the selection. Valid neighbors can still compile and benchmark.
+
+Affected TileTune records include `grouped_compile_fallbacks` with the failed
+group, retry groups and error. Device/host compile costs accumulate all attempts,
+including failed shared builds. The timing log also retains each build attempt.
+
 ## Source map
 
 | Component | Responsibility |

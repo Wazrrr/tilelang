@@ -1,0 +1,176 @@
+# H200: exhaustive, multi-GPU, and pipelined TileTune experiments
+
+Status: planned; these three full sweeps have not been launched.
+
+The grouped-compile recovery below is implemented and covered by focused
+failure-isolation tests and H200 pipeline/alpha tests in
+`testing/python/autotune/test_grouped_compile_fallback.py`. Experiment-runner
+wiring and the complete oracle-retention study remain to be executed.
+
+Use `dev-h200-new`, starting from `1082c9feb270e52deb65c0da42473fc2185e51b6`.
+Freeze the actual code revision after the runner changes below. Use the current
+[benchmark contract](BENCHMARK_CONTRACT.md), contract version 2 and configuration
+space version 7. The older FP16/E4M3 29,200-candidate study does not establish
+oracle retention for this BF16/block-scaled suite.
+
+## Experiment matrix
+
+Run all 25 final workloads once per experiment: 75 workload runs altogether.
+
+| Experiment | Selection | Compiler workers | Benchmark GPUs | Pipeline | Grouped compilation | Post-compile TileTune policy |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| E1: exhaustive, one GPU | Complete pool | 128 | 1 | Off | Off | Off |
+| E2: exhaustive, four GPUs | Complete pool | 128 | 4 | Off | Off | Off |
+| E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 128 | 4 | On | On, size 8 | On |
+
+Multi-GPU means distributing candidate benchmarks within each workload through
+`AutoTuner.run(benchmark_multi_gpu=True, benchmark_devices=[0,1,2,3])`.
+It does not mean running four separate workloads concurrently. E1 uses
+`benchmark_multi_gpu=False`. Pipeline means overlapping compilation and
+benchmarking with `use_pipeline=True`; it is separate from the kernel's tuned
+`num_stages` and from the `pipeline_time` ranking metric. E3 uses
+`ranking_metric="memory"`, not `pipeline_time`.
+
+Keep `enable_grouped_compile=False` in E1/E2. In E3, set
+`enable_grouped_compile=True, group_compile_size=8`; groups contain at most eight
+selected configs with compatible effective compiler settings. Keep
+`early_stop=False` in all three runs.
+E1 and E2 do not apply spill-based pruning, so their oracle tables include all
+successfully compiled and numerically correct candidates, including spillers.
+E3 retains the existing post-compile checks: spill/local byte allowances of 0
+for GEMM, grouped GEMM and KDA, 64 for attention, and 128 for FP8 GEMM. Hardware
+limits also apply. Use `common/resource_policy.py`; do not enable legacy filters.
+
+## Workload and budget inventory
+
+Use `common.spec.default_workloads(smoke=False)` and each family's complete
+`spaces.get_configs()` pool. Preserve config ordering and SHA-256 config IDs.
+
+| Family | Five final workload names | Pool per workload | E3 maximum selected per workload |
+| --- | --- | ---: | ---: |
+| GEMM | gemm_decode, gemm_prefill, gemm_ffn_down, gemm_square, gemm_square_large | 3456 | 1728 |
+| Attention | attention_short_causal, attention_batched_causal, attention_noncausal, attention_causal, attention_long_causal | 576 | 288 |
+| KDA | kda_chunk_short, kda_chunk_medium, kda_chunk_regular, kda_chunk_batched, kda_chunk_long | 1296 | 648 |
+| FP8 GEMM | gemm_fp8_decode, gemm_fp8_prefill, gemm_fp8_ffn_down, gemm_fp8_square, gemm_fp8_square_large | 576 | 288 |
+| Grouped GEMM | grouped_gemm_decode, grouped_gemm_prefill, grouped_gemm_aligned, grouped_gemm_down_aligned, grouped_gemm_ragged | 576 | 288 |
+
+Each exhaustive experiment attempts 32,400 candidates. E3 elaborates/analyzes
+all 32,400 and selects at most 16,200 for compilation. Whole equal-score groups
+must fit inside `floor(0.5 * original_pool_size)`. A group crossing the boundary
+is excluded; ties are not split or expanded. Failures and unknown scores stay
+in the original denominator. Do not refill after analysis, compilation,
+post-compile rejection, correctness, or benchmark failures.
+
+There are at most 81,000 distinct candidates submitted for compilation across
+the three full experiments, excluding preflight and winner verification.
+Failed shared builds add retry attempts, which must be counted and timed.
+Actual benchmark counts will be smaller when candidates fail or are filtered.
+
+E3's grouped compiler isolates per-config elaboration/lowering failures and
+post-compile rejections. If a shared device/host build fails, it bisects the
+unfinished configs and retries down to singleton builds, reusing their lowered
+IR and effective settings. Already rejected or completed configs stay final.
+Only a failing singleton is marked as a compilation failure; valid neighbors
+remain available for benchmarking. Retries stay inside the original selection,
+never refill the alpha budget, and include failed-attempt time in compile costs.
+
+## Shared measurement settings
+
+- Use four idle H200 GPUs of the same model for E2/E3 and the first of those
+  devices for E1. Bind explicit physical GPU UUIDs and record the logical mapping.
+  Process workloads sequentially and experiments in E1, E2, E3 order.
+- Set `TILELANG_AUTO_TUNING_CPU_COUNTS=128` and
+  `TILELANG_AUTO_TUNING_MAX_CPU_COUNT=128`. Check that the tuner's resolved worker
+  count is exactly 128; CPU affinity or allocation can otherwise silently clamp
+  the requested count. This is one shared 128-worker compiler pool per workload,
+  not 128 workers per GPU.
+- Use fresh worker processes with `TILELANG_DISABLE_CACHE=1` and
+  `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`. Give each run a new output directory.
+  Keep compiler options, authoritative example builders, inputs, references,
+  tolerances and benchmark backend identical across the three experiments.
+- Fix input seed 123, event timing, 10 warmup iterations, 50 timing iterations,
+  and a 60-second per-candidate benchmark timeout. Preserve the same input and
+  cache-conditioning behavior in all modes. Record those settings explicitly.
+- Keep memory diagnostics opt-in/off. E3 receives the same generic integer
+  `input_values` metadata used by the existing runner, and queried H200 device
+  limits. Supply the full pool and `alpha=0.5`; do not substitute a top-K subset.
+- Monitor GPU/process activity through `experiments.utils.monitor.run_monitored`.
+  Discard and retry contaminated workload runs, preserving their logs. Record
+  device UUIDs, clocks, driver/toolchain versions, source hashes and pool hashes.
+
+## Runner preparation and execution order
+
+1. Extend `experiments/common/system.py` to support E3, reusing its monitored
+   multi-GPU orchestration and `common/run.py`'s TileTune configuration and
+   resource-policy setup. Its existing `baseline` and `multi_gpu` variants cover
+   E1 and E2. Its existing `combined` variant supplies pipeline, multi-GPU and
+   grouped compilation, but still needs TileTune enabled and group size 8 for
+   E3. `common/run.py` currently supports
+   memory alpha selection but does not pass multi-GPU/pipeline options to the
+   tuner. Wire the requested combination explicitly before execution.
+2. Make the runner save complete per-config outcomes and TileTune reports,
+   including selection IDs, scores, equal-score tail ranks, effective resource
+   policy, compiler resource counters, rejection reasons, correctness and
+   benchmark status. Record and assert the effective worker count and GPU count.
+   Keep `--plan` standard-library-only, without GPU queries or result creation.
+3. Validate the runner with focused offline checks for mode settings, full-pool
+   identity, strict alpha selection and oracle comparison. Run a monitored GPU
+   preflight for each family and mode using known valid representative configs;
+   test E3 selection against its full original pool. Store preflight separately.
+4. Freeze a manifest containing all 25 workload definitions, full ordered config
+   pools/IDs, code identity, settings and resolved devices. Execute the three
+   complete experiments using that manifest. Preserve every failure as an
+   outcome; an interrupted or incomplete sweep cannot establish an oracle.
+5. Run the retention audit below, then remeasure each distinct E1/E2/E3 winner
+   seven times on the same single H200 with matching inputs/timing settings.
+   Report median and spread separately from the original sweep measurements.
+
+## Oracle-retention audit
+
+For each workload, derive the minimum valid measured latency from each complete
+exhaustive run. Retain every config attaining that minimum, and take the union
+of E1 and E2 oracle config IDs. This tests both measured oracles when timing or
+GPU differences produce different winners. Do not redefine an oracle after
+applying E3's post-compile filter or after winner remeasurement.
+
+For every oracle config in that union, check:
+
+1. E3 analyzed the identical configuration in an identical workload/pool, with a
+   finite eligible memory score and equal-score tail rank no greater than
+   `floor(pool_size / 2)`.
+2. Its exact config ID is in E3's saved selected set.
+3. Its E3 compilation and post-compile checks passed, with compiler-resource
+   evidence sufficient to verify the configured limits.
+4. Its E3 numerical correctness check and benchmark completed successfully.
+
+Produce `oracle_retention.csv` and JSON with workload, baseline experiment,
+oracle config ID/config, oracle latency, pool size, alpha budget, memory score,
+tail rank/fraction, selection membership, compiler counters, post-compile
+decision, correctness, benchmark status and failure reason.
+
+Success requires **25/25 workloads retaining every E1/E2 oracle config through
+all four checks**, with no selected set exceeding half its original pool.
+Report selection retention separately from post-compile and final usable
+retention. If a check fails, keep the original result and diagnose the failing
+stage; do not silently change alpha, score, spill allowances, or replace configs.
+The spill allowances were validated on the older suite and must be rechecked
+against these newly measured oracles.
+
+## Timing report and artifacts
+
+Write outputs under a new `experiments/results/h200-three-run-<timestamp>/`
+directory, separated by experiment and workload. Save the frozen manifest,
+compiler/benchmark logs, all config outcomes, TileTune reports, monitor evidence,
+retention CSV/JSON, winner remeasurements and a final comparison table.
+
+Report per-workload and total tuning wall time, E1/E2 and E1/E3 speedups, full
+worker wall time, elaboration/analysis time, compilation time, benchmark time,
+selected/rejected/success/failure counts and best latency. Include E3's complete
+analysis and selection cost in tuning time. Separate overlapping stage timings
+from elapsed wall time; do not sum parallel work as though it were serial.
+Keep verification and preflight costs separate from tuning costs.
+
+Report shortlist quality against each exhaustive table using that table's own
+latencies, and report common-GPU winner remeasurements separately. E2/E3 compares
+the combined effect of pipeline, grouped compilation and TileTune; these three
+experiments alone cannot attribute that speedup independently to each feature.
