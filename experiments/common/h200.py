@@ -23,7 +23,16 @@ from experiments.utils.io import write_json
 
 
 MODES = {"E1": "baseline", "E2": "multi_gpu", "E3": "tiletune"}
-SETTINGS = dict(workers=64, warmup=10, rep=50, timeout=60, group_size=8, seed=123, benchmark_backend="cupti")
+SETTINGS = dict(
+    workers=64,
+    warmup=10,
+    rep=50,
+    timeout=60,
+    group_size=8,
+    seed=123,
+    benchmark_backend="cupti",
+    cpu_contention_policy="observe",
+)
 RETRYABLE = {"contended", "host_contended", "monitor_gap"}
 
 
@@ -242,6 +251,7 @@ def _run_item(
                 cpu_ids=cpu_ids,
                 pass_fds=lease_fds,
                 stop_event=stop_event,
+                cpu_contention_policy=request["settings"]["cpu_contention_policy"],
             )
             summary = validate_attempt(output, request)
         except BaseException as error:

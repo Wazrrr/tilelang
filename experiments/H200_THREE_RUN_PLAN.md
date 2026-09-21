@@ -22,7 +22,7 @@ Run all 25 final workloads once per experiment: 75 workload runs altogether.
 
 | Experiment | Selection | Compiler workers/workload | Benchmark GPUs/workload | Concurrent workloads | Timing | Pipeline | Grouped compilation | Post-compile policy |
 | --- | --- | ---: | ---: | ---: | --- | --- | --- | --- |
-| E1: exhaustive, one GPU | Complete pool | 64 | 1 | 1 in its initial Slurm allocation | CUPTI | Off | Off | No pruning; defines the one-GPU oracle |
+| E1: exhaustive, one GPU | Complete pool | 64 | 1 | 1 | CUPTI | Off | Off | No pruning; defines the one-GPU oracle |
 | E2: exhaustive, four GPUs | Complete pool | 64 | 4 | 1 | CUPTI | Off | Off | No pruning; defines the four-GPU oracle |
 | E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 64 | 4 | 1 | CUPTI | On | On, size 8 | Enforced after compilation |
 
@@ -199,11 +199,10 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
 
 ## Shared measurement settings
 
-- Run experiment phases in E1, E2, E3 order using phase-sized Slurm
-  allocations. The initial E1 job reserves 80 logical CPUs and one H200: one
-  72-CPU workload pool (64 compiler workers plus eight CPUs of runtime headroom)
-  and eight CPUs for the coordinator. It processes the 25 E1 workloads
-  sequentially. E2/E3 will be submitted separately with all four benchmark GPUs.
+- Run experiment phases in E1, E2, E3 order. The initial E1 process uses GPU 0,
+  one 72-CPU workload pool (64 compiler workers plus eight CPUs of runtime
+  headroom), and separate CPUs for the coordinator. It processes the 25 E1
+  workloads sequentially. E2/E3 use all four benchmark GPUs.
   Bind explicit physical GPU UUIDs and record the logical mapping. A host lease
   and leases on the allocated GPUs reject a second cooperating experiment
   launcher. Monitor each workload's active GPU subset.
@@ -233,42 +232,38 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
   Discard and retry contaminated workload runs, preserving their logs. Record
   device UUIDs, clocks, driver/toolchain versions, source hashes and pool hashes.
   Pin each workload to one frozen sibling-complete set of at least 72 logical
-  CPUs: 64 compiler workers plus eight CPUs of benchmark/runtime headroom. In
-  the E1 allocation, place the coordinator on the eight remaining CPUs. Set OpenMP, MKL,
+  CPUs: 64 compiler workers plus eight CPUs of benchmark/runtime headroom. Place
+  the coordinator outside that workload pool. Set OpenMP, MKL,
   OpenBLAS, NumExpr, TVM and Torch thread counts to one to prevent nested thread
   pools. CPU affinity is not an exclusive OS reservation: sample CPU busy time
-  and subtract the worker process group's own CPU usage. Require five quiet
-  one-second samples before starting. Reject two consecutive samples exceeding
-  two external busy CPU cores, one I/O-wait core, or 0.1 stolen CPU cores. These
-  small allowances cover scheduler/monitor noise and are recorded in the audit.
+  and subtract the worker process group's own CPU usage. Record samples above
+  two external busy CPU cores, one I/O-wait core, or 0.1 stolen CPU cores, but
+  treat CPU contention as advisory because other host work does not use a shared
+  resource allocator. It does not delay launch or invalidate measurements.
   Foreign GPU activity and monitor gaps invalidate the attempt immediately.
-  Never kill or reconfigure unrelated jobs. Contended attempts are preserved and
-  retried until a clean attempt completes or the coordinator is interrupted.
+  Never kill or reconfigure unrelated jobs. GPU-contended attempts are preserved
+  and retried until a clean attempt completes or the coordinator is interrupted.
   Owned CPU accounting traverses only each worker's process tree, so its polling
   cost does not grow with unrelated process entries on a shared host.
 
-## Resource-scheduled execution and interruption recovery
+## Local execution and interruption recovery
 
 ```bash
 # Planning imports no CUDA/compiler packages and creates no results.
 python -m experiments.common.h200 --plan
 
-# First reserve 80 logical CPUs, 512 GiB, and GPU 0 for E1 on the unlimited
-# long partition. This runs five E1 preflights followed by all 25 E1 workloads.
-sbatch --output=experiments/results/h200-e1-slurm-%j.out \
-  experiments/run_h200_e1_slurm.sh \
-  experiments/results/h200-e1-20260921
+# Run five E1 preflights followed by all 25 E1 workloads on GPU 0.
+experiments/run_h200_e1.sh experiments/results/h200-e1-20260921
 
 # Resubmit the same command and result path after cancellation or a node restart;
 # the launcher detects the frozen manifest and enables verified resume.
 ```
 
-The E1 Slurm launcher activates the `tl` environment and validates its 80-CPU and
-one-GPU allocation before starting. Slurm cgroups reserve the requested CPUs
-from other Slurm jobs and expose only the requested device. The continuous
-monitor remains authoritative because processes launched outside Slurm can still
-run on the host. The runner selects/binds the GPU and runs the E1 preflight and
-full sweep without overlap, one workload at a time. Preflight
+The E1 launcher activates the `tl` environment. The runner selects and binds GPU
+0 and runs the E1 preflight and full sweep without workload overlap, one workload
+at a time. CPU contention is retained in `monitor.json` as advisory evidence;
+foreign GPU use still causes the complete workload attempt to be discarded and
+retried. Preflight
 tries at most eight candidates per family/mode. E3 still analyzes/selects from
 the complete pool, then marks selected candidates beyond those eight as
 `preflight_omitted`; preflight results never establish an exhaustive oracle.

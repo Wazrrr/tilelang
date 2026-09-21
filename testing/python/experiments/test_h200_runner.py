@@ -78,6 +78,7 @@ def test_plan_is_75_resource_scheduled_workloads_with_identical_pools():
         assert [e["gpu_count"] for e in (e1, e2, e3)] == [1, 4, 4]
         assert e3["settings"]["group_size"] == 8
         assert all(e["settings"]["benchmark_backend"] == "cupti" for e in (e1, e2, e3))
+        assert all(e["settings"]["cpu_contention_policy"] == "observe" for e in (e1, e2, e3))
     assert sum(len(p["configs"]) for p in plan[:25]) == 21145
     preflight = h200.study_plan(preflight=True)
     assert len(preflight) == 15
@@ -338,6 +339,44 @@ def test_cpu_contention_kills_only_owned_worker(tmp_path, monkeypatch):
         monitor.run_monitored(["worker"], tmp_path, [gpu], cpu_ids=[0])
     assert process.killed
     assert h200.read(tmp_path / "monitor.json")["status"] == "host_contended"
+
+
+def test_cpu_contention_can_be_observed_without_rejecting_worker(tmp_path, monkeypatch):
+    gpu = devices(1)[0]
+
+    class Sampler:
+        def __init__(self, cpus):
+            pass
+
+        def sample(self, pid):
+            return dict(ready=True, external_busy_cores=7, iowait_cores=2, steal_cores=0.2)
+
+    class Process:
+        pid = 999999
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    process = Process()
+    monkeypatch.setattr(isolation, "CpuMonitor", Sampler)
+    monkeypatch.setattr(monitor, "snapshot", lambda: dict(gpus=[gpu], processes=[]))
+    monkeypatch.setattr(monitor.time, "sleep", lambda _: None)
+    monkeypatch.setattr(monitor.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(monitor, "stop_worker", lambda p: None)
+    monitor.run_monitored(
+        ["worker"],
+        tmp_path,
+        [gpu],
+        cpu_ids=[0],
+        cpu_contention_policy="observe",
+    )
+    audit = h200.read(tmp_path / "monitor.json")
+    assert audit["status"] == "uncontended"
+    assert audit["cpu_contention_policy"] == "observe"
+    assert audit["quiet_samples_required"] == 0
+    assert audit["cpu_contention_observed"]
+    assert audit["observed_max_external_busy_cores"] == 7
 
 
 def test_sigterm_worker_cleans_its_compiler_process_group(tmp_path):

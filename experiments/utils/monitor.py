@@ -145,12 +145,17 @@ def run_monitored(
     cpu_ids=None,
     pass_fds=(),
     stop_event=None,
+    cpu_contention_policy="reject",
 ):
     """Reject the whole invocation if a foreign process is observed on any GPU.
 
     Logs and partial artifacts remain inspectable; callers must not publish them
-    as completed measurements. Process polling cannot detect subsecond overlap.
+    as completed measurements. CPU pressure is either rejecting or observational,
+    according to ``cpu_contention_policy``. Process polling cannot detect
+    subsecond overlap.
     """
+    if cpu_contention_policy not in {"reject", "observe"}:
+        raise ValueError("cpu_contention_policy must be 'reject' or 'observe'")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     process = None
@@ -160,17 +165,22 @@ def run_monitored(
     audit = dict(gpus=gpus, poll_interval_seconds=1, max_poll_gap_seconds=MAX_POLL_GAP_SECONDS, status="waiting")
     cpu_monitor = None
     quiet_samples = cpu_contention_samples = 0
+    observed_cpu_contention_samples = 0
+    observed_max_external_busy_cores = 0.0
+    observed_max_iowait_cores = 0.0
+    observed_max_steal_cores = 0.0
     if cpu_ids is not None:
         from .isolation import CpuMonitor
 
         cpu_monitor = CpuMonitor(cpu_ids)
         audit.update(
             cpu_ids=cpu_ids,
+            cpu_contention_policy=cpu_contention_policy,
             max_external_busy_cores=2,
             max_iowait_cores=1,
             max_steal_cores=0.1,
             excessive_cpu_samples_required=2,
-            quiet_samples_required=5,
+            quiet_samples_required=5 if cpu_contention_policy == "reject" else 0,
         )
     write_json(output / "monitor.json", audit)
     try:
@@ -193,6 +203,14 @@ def run_monitored(
                 cpu_contention_samples = cpu_contention_samples + 1 if cpu_busy else 0
                 if cpu is not None:
                     observed["cpu_observation"] = cpu
+                    if cpu.get("ready"):
+                        observed_max_external_busy_cores = max(
+                            observed_max_external_busy_cores, cpu["external_busy_cores"]
+                        )
+                        observed_max_iowait_cores = max(observed_max_iowait_cores, cpu["iowait_cores"])
+                        observed_max_steal_cores = max(observed_max_steal_cores, cpu["steal_cores"])
+                        if cpu_busy:
+                            observed_cpu_contention_samples += 1
                 observed["poll_gap_seconds"] = gap
                 foreign = [
                     p
@@ -204,14 +222,16 @@ def run_monitored(
                 observations.flush()
                 if process is None:
                     busy = any(float(next(g for g in observed["gpus"] if g["uuid"] == gpu["uuid"])["utilization.gpu"]) > 5 for gpu in gpus)
-                    if foreign or busy or delayed or overloaded or cpu_busy:
+                    if foreign or busy or delayed or (
+                        cpu_contention_policy == "reject" and (overloaded or cpu_busy)
+                    ):
                         quiet_samples = 0
                         if not wait_idle:
                             raise RuntimeError("requested CPU/GPU resources are busy")
                         time.sleep(1)
                         continue
                     quiet_samples += 1
-                    if cpu_monitor and quiet_samples < 5:
+                    if cpu_monitor and cpu_contention_policy == "reject" and quiet_samples < 5:
                         time.sleep(1)
                         continue
                     process = subprocess.Popen(
@@ -226,7 +246,9 @@ def run_monitored(
                     started = time.monotonic()
                     audit.update(status="running", worker_pid=process.pid, idle_wait_seconds=started - waiting_started)
                     write_json(output / "monitor.json", audit)
-                elif delayed or overloaded or cpu_contention_samples >= 2:
+                elif delayed or (
+                    cpu_contention_policy == "reject" and (overloaded or cpu_contention_samples >= 2)
+                ):
                     audit.update(
                         status="monitor_gap" if delayed else "host_contended",
                         observed_poll_gap_seconds=gap,
@@ -252,6 +274,14 @@ def run_monitored(
     finally:
         if process is not None:
             stop_worker(process)
+        if cpu_monitor is not None:
+            audit.update(
+                cpu_contention_observed=observed_cpu_contention_samples > 0,
+                observed_cpu_contention_samples=observed_cpu_contention_samples,
+                observed_max_external_busy_cores=observed_max_external_busy_cores,
+                observed_max_iowait_cores=observed_max_iowait_cores,
+                observed_max_steal_cores=observed_max_steal_cores,
+            )
         audit["wall_seconds"] = time.monotonic() - started if process is not None else 0
         if process is None:
             audit["idle_wait_seconds"] = time.monotonic() - waiting_started
