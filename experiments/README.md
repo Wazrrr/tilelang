@@ -37,7 +37,7 @@ experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
 ├── grouped_gemm/            Concatenated grouped forward GEMM study
 ├── flash_attention/         Same family conventions
-├── kda/                     Chunk-output study
+├── kda/                     Token-parallel intra-chunk study
 ├── gemm_fp8/                Direct FP8 GEMM example study
 ├── common/                  Shared execution and comparison protocol
 ├── utils/                   Monitoring, baseline storage, result I/O and shared helpers
