@@ -60,6 +60,20 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
     return result
 
 
+def alpha_budget(pool_size, alpha):
+    """Return a strict fraction of the original pool, including failures and unknowns."""
+    import math
+
+    if type(pool_size) is not int or pool_size <= 0:
+        raise ValueError("pool_size must be a positive integer")
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(alpha) or not 0 < alpha <= 1:
+        raise ValueError("alpha must be finite and in (0, 1]")
+    budget = math.floor(pool_size * alpha)
+    if budget == 0:
+        raise ValueError("alpha selects no candidates from the supplied pool")
+    return budget
+
+
 def select_top_k(ranking, k, *, include_ties=True, include_unknown=True, strict_budget=False):
     """Keep the first k candidates and their complete boundary tie.
 

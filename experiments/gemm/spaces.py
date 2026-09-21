@@ -1,17 +1,45 @@
-"""TCGen05 GEMM tile, pipeline, thread, and rasterization candidates."""
+"""B200-compilable TCGen05 GEMM candidates."""
 
 from experiments.utils.grid import grid
 
 
+_EXAMPLE_MAIN_CONFIG = dict(
+    block_M=128,
+    block_N=128,
+    block_K=128,
+    num_stages=2,
+    thread_num=256,
+    enable_rasteration=False,
+)
+
+
+def _compiles_on_b200(config):
+    """Encode the exact TCGen05 lowering domain from the B200 census."""
+    block_m, block_n, threads = (config[key] for key in ("block_M", "block_N", "thread_num"))
+    if block_m in (128, 256):
+        return True
+    if block_n not in (64, 128, 192, 256):
+        return False
+    return threads == 128 or (block_m in (32, 64) and block_n != 192)
+
+
 def get_configs():
-    return grid(
-        block_M=[32, 64, 96, 128, 192, 256],
-        block_N=[32, 64, 96, 128, 192, 256],
-        block_K=[16, 32, 48, 64],
-        num_stages=[0, 1, 2, 3],
-        thread_num=[128, 256],
-        enable_rasteration=[True, False],
-    )
+    configs = [
+        config
+        for config in grid(
+            block_M=[32, 64, 96, 128, 192, 256],
+            block_N=[32, 64, 96, 128, 192, 256],
+            block_K=[16, 32, 48, 64],
+            num_stages=[0, 1, 2, 3],
+            thread_num=[128, 256],
+            enable_rasteration=[True, False],
+        )
+        if _compiles_on_b200(config)
+    ]
+    # The active SM100 example has one explicit 128x128x128 launch outside the
+    # historical autotuning grid. Keep it as an exact, compiler-verified member.
+    configs.append(dict(_EXAMPLE_MAIN_CONFIG))
+    return configs
 
 
 def support_reason(workload):
@@ -24,7 +52,7 @@ def support_reason(workload):
 
 
 def legality_reason(w, device, c):
-    # Compile every declared candidate; record actual compiler/correctness failures.
+    # The declared pool is the compiler-verified SM100 domain.
     return None
 
 

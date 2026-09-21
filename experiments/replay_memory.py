@@ -291,8 +291,8 @@ def render(result):
         )
     lines += [
         "",
-        "This is a fixed-pool retrospective result, not a generalization claim. Memory-event and original-index keys only order "
-        "the report within equal primary scores; they do not split a tie for pruning.",
+        "This is a fixed-pool retrospective result, not a generalization claim. Logical request count refines equal-byte, "
+        "equal-depth candidates; original index only orders the remaining equal primary scores.",
         "",
     ]
     return "\n".join(lines)

@@ -101,7 +101,9 @@ def rank_configs(
             )
         )
     ranking = rank_records(records)
-    selected = select_top_k(ranking, top_k)
+    # A Carver rejection is an unsupported candidate, not an unscored
+    # exploration candidate.  Never fill a shortfall with those records.
+    selected = select_top_k(ranking, top_k, include_unknown=False)
     for record in records:
         record["selected"] = record["index"] in selected
         if record["status"] == "analyzed" and not record["selected"]:

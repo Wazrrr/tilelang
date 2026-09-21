@@ -42,7 +42,6 @@ SOURCE_ROOTS = (
     "examples/grouped_gemm",
     "examples/flash_attention",
     "examples/flash_attention_sm100",
-    "examples/kda",
     "tiletune_core",
     "tilelang/tiletune",
     "tilelang/carver",
@@ -54,6 +53,9 @@ def source_hashes(kernel_source, *extra_sources):
     """Fingerprint active code; generated results and archived sources are data."""
     root = Path(__file__).resolve().parents[2]
     paths = {root / name for name in (kernel_source, *extra_sources)}
+    active_kda = root / "examples/kda/chunk_intra_token_parallel.py"
+    if active_kda.is_file():
+        paths.add(active_kda)
     paths.update((root / "experiments").glob("*.py"))
     for directory in SOURCE_ROOTS:
         paths.update((root / directory).rglob("*.py"))

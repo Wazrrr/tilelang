@@ -13,14 +13,14 @@
     "train": [
       {"name": "attention_train_a", "op": "attention", "parameters": {"batch": 1, "heads": 16, "sequence": 512, "dim": 128, "causal": false}},
       {"name": "attention_train_b", "op": "attention", "parameters": {"batch": 1, "heads": 16, "sequence": 1024, "dim": 128, "causal": true}},
-      {"name": "kda_chunk_train_a", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 32, "sequence": 1024, "dim": 128, "value_dim": 128, "chunk_size": 64}},
-      {"name": "kda_chunk_train_b", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 32, "sequence": 2048, "dim": 128, "value_dim": 128, "chunk_size": 64}},
+      {"name": "kda_intra_train_a", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 1, "heads": 16, "sequence": 1024, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
+      {"name": "kda_intra_train_b", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 2, "heads": 16, "sequence": 2048, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
       {"name": "grouped_gemm_train_a", "op": "grouped_gemm", "parameters": {"batch_sizes": [16, 32, 64], "n": 2048, "k": 7168, "transpose_b": false}, "dtype": "float8_e4m3fn"},
       {"name": "grouped_gemm_train_b", "op": "grouped_gemm", "parameters": {"batch_sizes": [15, 31, 65], "n": 7168, "k": 2048, "transpose_b": true}, "dtype": "float8_e4m3fn"}
     ],
     "validation": [
       {"name": "attention_validation", "op": "attention", "parameters": {"batch": 1, "heads": 16, "sequence": 2048, "dim": 128, "causal": true}},
-      {"name": "kda_chunk_validation", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 32, "sequence": 4096, "dim": 128, "value_dim": 128, "chunk_size": 64}},
+      {"name": "kda_intra_validation", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 1, "heads": 48, "sequence": 4096, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
       {"name": "grouped_gemm_validation", "op": "grouped_gemm", "parameters": {"batch_sizes": [24, 40, 72], "n": 2048, "k": 7168, "transpose_b": false}, "dtype": "float8_e4m3fn"}
     ],
     "test": [
@@ -29,11 +29,11 @@
       {"name": "attention_noncausal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 4096, "dim": 128, "causal": false}},
       {"name": "attention_causal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 4096, "dim": 128, "causal": true}},
       {"name": "attention_long_causal", "op": "attention", "parameters": {"batch": 1, "heads": 32, "sequence": 8192, "dim": 128, "causal": true}},
-      {"name": "kda_chunk_short", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 64, "sequence": 2048, "dim": 128, "value_dim": 128, "chunk_size": 64}},
-      {"name": "kda_chunk_medium", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 64, "sequence": 4096, "dim": 128, "value_dim": 128, "chunk_size": 64}},
-      {"name": "kda_chunk_regular", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 64, "sequence": 8192, "dim": 128, "value_dim": 128, "chunk_size": 64}},
-      {"name": "kda_chunk_batched", "op": "kda_chunk_o", "parameters": {"batch": 2, "heads": 64, "sequence": 4096, "dim": 128, "value_dim": 128, "chunk_size": 64}},
-      {"name": "kda_chunk_long", "op": "kda_chunk_o", "parameters": {"batch": 1, "heads": 64, "sequence": 16384, "dim": 128, "value_dim": 128, "chunk_size": 64}},
+      {"name": "kda_intra_short", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 1, "heads": 32, "sequence": 2048, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
+      {"name": "kda_intra_medium", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 1, "heads": 64, "sequence": 4096, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
+      {"name": "kda_intra_regular", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 1, "heads": 32, "sequence": 8192, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
+      {"name": "kda_intra_batched", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 2, "heads": 32, "sequence": 4096, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
+      {"name": "kda_intra_long", "op": "kda_chunk_intra_token_parallel", "parameters": {"batch": 1, "heads": 64, "sequence": 16384, "dim": 128, "chunk_size": 64, "sub_chunk_size": 16}},
       {"name": "grouped_gemm_decode", "op": "grouped_gemm", "parameters": {"batch_sizes": [1, 2, 4, 8], "n": 2048, "k": 7168, "transpose_b": false}, "dtype": "float8_e4m3fn"},
       {"name": "grouped_gemm_prefill", "op": "grouped_gemm", "parameters": {"batch_sizes": [16, 32, 48, 64], "n": 2048, "k": 7168, "transpose_b": false}, "dtype": "float8_e4m3fn"},
       {"name": "grouped_gemm_aligned", "op": "grouped_gemm", "parameters": {"batch_sizes": [64, 128, 256], "n": 2048, "k": 7168, "transpose_b": false}, "dtype": "float8_e4m3fn"},

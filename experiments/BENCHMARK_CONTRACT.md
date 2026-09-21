@@ -18,9 +18,9 @@ axis:
 - FlashAttention: BF16 forward with FP32 online softmax and accumulation. The
   cases vary sequence length, head dimension, batch size, head count, and
   causal masking while using the SM100 attention example.
-- KDA: only `examples/kda/chunk_o.py`, with BF16 Q/V/A/state and BF16 output,
-  the example's fixed FP32 gate semantics, FP32 component accumulations,
-  DK=DV=128, chunk size 64, and varying sequence, batch, and head count.
+- KDA: only `examples/kda/chunk_intra_token_parallel.py`, with BF16 Q/K/beta,
+  FP32 cumulative gates and accumulation, BF16 coefficient outputs, DK=128,
+  chunk size 64, sub-chunk size 16, and varying sequence, batch, and head count.
 
 Training uses two independent workloads per family and validation uses one;
 the final holdouts are not used to fit XGBoost. Brute force, Carver, XGBoost,

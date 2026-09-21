@@ -12,9 +12,10 @@ requests are unsupported by this experiment.
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 2,304 configurations:
-exactly eight times the example's 288 configurations. Tile sizes are sampled more
-finely; the other parameters keep the example's ranges.
+[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 1,473
+configurations. It retains all 288 configurations from the advanced autotuning
+example, removes combinations rejected by B200 TCGen05 lowering, and adds the
+active SM100 example's explicit 128x128x128 launch.
 
 | Parameter | Values |
 | --- | --- |
@@ -33,9 +34,8 @@ subset or `current`/`large`/`exhaustive` GEMM preset. Smoke/development budgets
 select recorded indices from this pool. Explicit CUDA/HIP configs must also be
 members of it.
 
-The pool is identical across target devices. All declared candidates are
-attempted; compilation and correctness failures are recorded. The 2,304 count
-does not assert that every candidate compiles or yields distinct device code.
+All declared candidates are in the compiler-verified B200 domain. Other targets
+need their own validation; correctness and launch failures remain outcomes.
 
 ## Files and cases
 

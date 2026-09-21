@@ -51,7 +51,7 @@ def test_default_matrix_includes_grouped_and_has_frozen_disjoint_splits():
     plan = study_plan("full", [Device("hopper", TARGETS["hopper"])], families=["grouped_gemm"])
     assert plan["families"] == ["grouped_gemm"]
     assert [len(plan["splits"][key]) for key in ("train", "validation", "test")] == [2, 1, 5]
-    assert all(s["indices"] == list(range(192)) for s in plan["subsets"]["hopper"].values())
+    assert all(s["indices"] == list(range(576)) for s in plan["subsets"]["hopper"].values())
     assert len(core_cases("full", ["gemm", "grouped_gemm"])) == 10
 
 
@@ -82,19 +82,19 @@ def test_pool_identity_subsets_and_system_variants():
     assert spaces[0] == spaces[1] == spaces[2]
     space = spaces[0]
     assert space["configs"] == get_configs()
-    assert len(set(space["config_ids"])) == space["candidate_count"] == 192
+    assert len(set(space["config_ids"])) == space["candidate_count"] == 576
     assert space["rejected_count"] == space["alias_count"] == space["budget_omitted_count"] == 0
-    assert space["configs"][60] == CONFIG
-    assert space["configs"][125] == dict(CONFIG, block_N=128, threads=256)
+    assert space["configs"][172] == CONFIG
+    assert space["configs"][365] == dict(CONFIG, block_N=128, threads=256)
     device = Device("hopper", TARGETS["hopper"])
-    subset = [space["configs"][i] for i in (125, 60)]
+    subset = [space["configs"][i] for i in (365, 172)]
     assert configuration_space(replace(w, configs=subset), device)["configs"] == subset
     with pytest.raises(ValueError, match="subset"):
         configuration_space(replace(w, configs=[dict(CONFIG, block_M=32)]), device)
-    plan = system_plan("grouped_gemm", indices=[125, 60])
+    plan = system_plan("grouped_gemm", indices=[365, 172])
     assert len(plan) == 25
     assert {row["variant"] for row in plan} == set(VARIANTS)
-    assert all(row["indices"] == [125, 60] for row in plan)
+    assert all(row["indices"] == [365, 172] for row in plan)
 
 
 @pytest.mark.parametrize("sizes", [[], [0, 64], [-1], [True], [1.5], "64,128", (64, 128)])

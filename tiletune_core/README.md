@@ -3,11 +3,14 @@
 `tiletune_core.memory.score_memory` provides a dependency-free ordering over
 resolved logical global accesses, launch size, SM count, and IR pipeline depth.
 The integer score keeps byte-waves dominant and uses pipeline depth only within
-equal byte work. The event count is a deterministic display key, not pruning
-evidence. `rank_records` assigns every equal primary score its group's tail rank,
+equal byte work, then uses logical access-waves to refine equal bytes and depth.
+It exactly encodes `(byte_waves, -pipeline_depth, access_waves)` with integers.
+`rank_records` assigns every equal primary score its group's tail rank,
 and `select_top_k` retains an entire boundary tie by default. Its
 `strict_budget=True` mode instead excludes a group that crosses the budget;
-this preserves ties without ever selecting more than the requested count. See the
+this preserves ties without ever selecting more than the requested count.
+`alpha_budget` converts an original-pool fraction to that strict integer budget.
+See the
 [fixed-pool B200 replay](../experiments/MEMORY_RANKING.md).
 
 Install independently of TileLang, TVM, PyTorch, and accelerator runtimes:

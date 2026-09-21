@@ -124,7 +124,7 @@ def aggregate_study(plan, root):
         "gemm",
         "gemm_fp8",
         "attention",
-        "kda_chunk_o",
+        "kda_chunk_intra_token_parallel",
         "grouped_gemm",
     }
     return dict(

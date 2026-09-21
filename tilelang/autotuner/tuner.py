@@ -1528,7 +1528,7 @@ class AutoTuner:
                 return program
 
         compile_indices = list(range(len(config_args)))
-        if self.tiletune_session is not None and self.tiletune_args.top_k is not None:
+        if self.tiletune_session is not None and self.tiletune_session.requested_k is not None:
             items = [
                 (idx, kwargs, self._merge_pass_configs_into_compile_args(kwargs.get(_PASS_CONFIGS_KEY)).pass_configs)
                 for idx, kwargs in enumerate(config_args)

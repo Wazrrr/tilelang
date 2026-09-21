@@ -10,7 +10,7 @@ from experiments.common.spec import Device, TARGETS, configurations
 EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=128, block_N=128, num_stages=1, threads=128),
-    "kda_chunk_o": dict(block_DK=64, block_DV=64, num_stages=0, threads=128),
+    "kda_chunk_intra_token_parallel": dict(block_H=4, num_stages=2, threads=128),
     "gemm_fp8": dict(
         block_M=128,
         block_N=256,
@@ -63,24 +63,22 @@ def example_program(w, c):
             num_stages=c["num_stages"],
             variant="ts" if c["threads"] == 256 else "ss",
         )
-    if w.op == "kda_chunk_o":
-        from examples.kda.chunk_o import tilelang_chunk_fwd_o
+    if w.op == "kda_chunk_intra_token_parallel":
+        from examples.kda.chunk_intra_token_parallel import tilelang_chunk_kda_fwd_intra_token_parallel
 
-        return tilelang_chunk_fwd_o.jit_impl.get_tir(
+        return tilelang_chunk_kda_fwd_intra_token_parallel.jit_impl.get_tir(
             B=p["batch"],
             S=p["sequence"],
             H=p["heads"],
             DK=p["dim"],
-            DV=p["value_dim"],
             input_dtype=w.dtype,
             output_dtype=w.dtype,
             accum_dtype="float32",
             gate_dtype="float32",
             chunk_size=p["chunk_size"],
+            sub_chunk_size=p["sub_chunk_size"],
             scale=p["dim"] ** -0.5,
-            block_S=p["chunk_size"],
-            block_DK=c["block_DK"],
-            block_DV=c["block_DV"],
+            block_H=c["block_H"],
             threads=c["threads"],
             num_stages=c["num_stages"],
         )
@@ -130,7 +128,7 @@ def test_expanded_retains_every_advanced_example_configuration(target):
     d = Device(target, TARGETS[target])
     for w in core_cases("final")[:2]:
         pool = configurations(w, d)
-        assert len(pool) == 2304
+        assert len(pool) == 1473
         assert EXAMPLE_CONFIGS["gemm"] in pool
 
 
@@ -149,4 +147,9 @@ def test_final_example_kernels_on_gpu(w):
         case.build(**c), target=current_target(), execution_backend="tvm_ffi", out_idx=case.out_idx, pass_configs=case.pass_configs
     )
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
-    case.check([kernel(*inputs)], [case.reference(*inputs)])
+    actual = kernel(*inputs)
+    expected = case.reference(*inputs)
+    case.check(
+        list(actual) if isinstance(actual, (tuple, list)) else [actual],
+        list(expected) if isinstance(expected, (tuple, list)) else [expected],
+    )

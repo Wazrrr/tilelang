@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 34
+ANALYSIS_VERSION = 35
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,7 @@ class TileTuneConfig:
     ranking: bool = True
     top_k: int | None = None  # Select this many candidates, expanding scored or permitted-unscored boundary ties.
     strict_top_k: bool = False  # Exclude, rather than split or expand, a tie group that crosses top_k.
+    alpha: float | None = None  # Strict original-pool fraction; mutually exclusive with top_k.
     exploration_fraction: float = 0.0  # Opt-in unknown-cost attempts; pure ranking remains the default.
     exploration_seed: int = 123
     device_limits: dict | None = None
@@ -30,8 +31,22 @@ class TileTuneConfig:
     # Memory ranking needs only the access ledger. Enable this to additionally
     # report dependency, tile-propagation, register-liveness and shared-lifetime facts.
     memory_diagnostics: bool = False
+    # Read-only one-dimensional integer parameters, keyed by PrimFunc argument
+    # index. Callers must verify these values against the supplied inputs.
+    input_values: dict | None = None
 
     def __post_init__(self):
+        if self.input_values is not None and (
+            not isinstance(self.input_values, dict)
+            or any(
+                not str(key).isdigit()
+                or not isinstance(values, (list, tuple))
+                or not values
+                or any(type(value) is not int for value in values)
+                for key, values in self.input_values.items()
+            )
+        ):
+            raise ValueError("input_values maps parameter indices to nonempty integer vectors")
         if self.facts_path is not None and (not isinstance(self.facts_path, str) or not self.facts_path.strip()):
             raise ValueError("facts_path must be a nonempty string or None")
         if (
@@ -58,6 +73,22 @@ class TileTuneConfig:
             validate_performance_model(self.performance_model)
         if not isinstance(self.ranking, bool):
             raise ValueError("ranking must be a bool")
+        if self.alpha is not None:
+            import math
+
+            if (
+                isinstance(self.alpha, bool)
+                or not isinstance(self.alpha, (int, float))
+                or not math.isfinite(self.alpha)
+                or not 0 < self.alpha <= 1
+            ):
+                raise ValueError("alpha must be finite and in (0, 1]")
+            if self.top_k is not None:
+                raise ValueError("alpha and top_k are mutually exclusive")
+            if not self.ranking:
+                raise ValueError("alpha requires ranking=True")
+            if self.exploration_fraction:
+                raise ValueError("alpha does not support exploration")
         if self.top_k is not None:
             if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k <= 0:
                 raise ValueError("top_k must be a positive integer or None")
@@ -65,8 +96,8 @@ class TileTuneConfig:
                 raise ValueError("top_k requires ranking=True")
         if not isinstance(self.strict_top_k, bool):
             raise ValueError("strict_top_k must be a bool")
-        if self.strict_top_k and self.top_k is None:
-            raise ValueError("strict_top_k requires top_k")
+        if self.strict_top_k and self.top_k is None and self.alpha is None:
+            raise ValueError("strict_top_k requires top_k or alpha")
         if self.strict_top_k and self.exploration_fraction:
             raise ValueError("strict_top_k does not support exploration")
         if self.device_limits is not None:

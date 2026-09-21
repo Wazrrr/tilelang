@@ -9,7 +9,6 @@ def workload_template(workload, configs=None, *, arch=None):
         FP8MatmulTemplate,
         FlashAttentionTemplate,
         GroupedMatmulTemplate,
-        KDAChunkTemplate,
         MatmulTemplate,
     )
 
@@ -70,19 +69,6 @@ def workload_template(workload, configs=None, *, arch=None):
             accum_dtype="float32",
             **common,
         )
-    if workload.op == "kda_chunk_o":
-        return KDAChunkTemplate(
-            batch_size=p["batch"],
-            num_heads=p["heads"],
-            sequence=p["sequence"],
-            key_dim=p["dim"],
-            value_dim=p["value_dim"],
-            chunk_size=p["chunk_size"],
-            in_dtype=workload.dtype,
-            out_dtype=workload.dtype,
-            accum_dtype="float32",
-            **common,
-        )
     raise ValueError(f"No Carver template for experiment operation {workload.op!r}")
 
 
@@ -104,7 +90,9 @@ def _rank_records(configs, top_k, *, arch, template, evaluate):
             )
         )
     ranking = rank_records(records)
-    selected = select_top_k(ranking, top_k)
+    # A Carver rejection is an unsupported candidate, not an unscored
+    # exploration candidate.  Never fill a shortfall with those records.
+    selected = select_top_k(ranking, top_k, include_unknown=False)
     for record in records:
         record["selected"] = record["index"] in selected
         if record["status"] == "analyzed" and not record["selected"]:
@@ -206,39 +194,6 @@ def attention_rank(workload, device, configs, top_k):
             blocks_per_sm=blocks,
             waves=waves,
             loop_iterations=average_iterations,
-        )
-
-    return _rank_records(configs, top_k, arch=arch, template=template, evaluate=evaluate)
-
-
-def kda_rank(workload, device, configs, top_k):
-    p = workload.parameters
-    batch, heads, sequence, dk, dv, chunk = (p[key] for key in ("batch", "heads", "sequence", "dim", "value_dim", "chunk_size"))
-    element_bytes = 2
-    arch = _architecture(device.target)
-    template = workload_template(workload, configs, arch=arch)
-
-    def evaluate(c):
-        bdk, bdv, depth = c["block_DK"], c["block_DV"], max(1, c["num_stages"])
-        grid = batch * heads * (sequence // chunk) * math.ceil(dv / bdv)
-        iterations = math.ceil(dk / bdk)
-        repeated = chunk * bdk * (2 * element_bytes + 4) + bdk * bdv * element_bytes
-        once = (chunk * bdv + chunk * chunk + chunk * bdv) * element_bytes
-        traffic = iterations * repeated + once
-        shared = depth * repeated + once
-        register_words = chunk * bdv
-        valid, blocks, waves = _occupancy(
-            arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"]
-        )
-        return dict(
-            valid=valid,
-            traffic_bytes_per_cta=traffic,
-            shared_bytes=shared,
-            register_words=register_words,
-            grid_blocks=grid,
-            blocks_per_sm=blocks,
-            waves=waves,
-            loop_iterations=iterations,
         )
 
     return _rank_records(configs, top_k, arch=arch, template=template, evaluate=evaluate)

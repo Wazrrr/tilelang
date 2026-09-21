@@ -54,7 +54,7 @@ def test_memory_mode_skips_timing_occupancy_and_family_policies(monkeypatch, tmp
         device_limits=LIMITS,
     )
     facts = json.loads(path.read_text())
-    assert facts["backend"] == "memory.v1"
+    assert facts["backend"] == "memory.v2"
     assert score_memory(facts["accesses"], facts["grid_blocks"], facts["sm_count"], facts["pipeline_depth"])["score"] == result[
         "tile_cost"
     ]["score"]
@@ -192,6 +192,33 @@ def test_explicit_resource_policy_still_rejects():
     assert select_top_k(rank_records(records), 1) == []
 
 
+def test_tcgen05_strict_register_policy_does_not_propagate_tensor_memory(monkeypatch):
+    @T.prim_func
+    def kernel(A: T.Tensor((128, 32), "float16"), B: T.Tensor((32, 128), "float16"), C: T.Tensor((128, 128), "float32")):
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((128, 32), "float16")
+            b = T.alloc_shared((32, 128), "float16")
+            c = T.alloc_tmem((128, 128), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            T.tcgen05_gemm(a, b, c, clear_accum=True, mbar=None)
+            T.copy(c, C)
+
+    def fail(*args, **kwargs):
+        pytest.fail("tensor-memory accumulators do not require register-demand propagation")
+
+    monkeypatch.setattr("tilelang.tiletune.engine._propagate_tiles", fail)
+    result = analyze_prim_func(
+        kernel,
+        dict(ranking_metric="memory", register_cap=1),
+        target={"kind": "cuda", "arch": "sm_100a"},
+        device_limits={**LIMITS, "sm_count": 148},
+    )
+    assert result["tile_cost"]["score"] is not None
+    assert result["pressure"]["modeled_lower_bound"] is None
+    assert not result["pressure"]["decision"]["would_reject"]
+
+
 def test_missing_memory_effects_and_device_inputs_remain_unknown():
     @T.prim_func
     def opaque(A: T.Tensor((32,), "float32")):
@@ -301,7 +328,7 @@ def test_wave_rounding_memory_ties_and_measurement_independence():
     fine = score_memory([dict(operation=0, bytes=64, visits=4)], 133, 132)
     coarse = score_memory([dict(operation=0, bytes=128, visits=2)], 133, 132)
     assert fine["logical_byte_waves"] == coarse["logical_byte_waves"] == 512
-    assert fine["score"] == coarse["score"]
+    assert coarse["score"] < fine["score"]
     records = [
         dict(index=2, tile_cost=dict(fine, ranking_metric="memory")),
         dict(index=7, tile_cost=dict(coarse, ranking_metric="memory")),
@@ -309,9 +336,10 @@ def test_wave_rounding_memory_ties_and_measurement_independence():
     ]
     expected = rank_records(records)
     assert [row["index"] for row in expected] == [4, 7, 2]
-    assert all(row["rank"] == row["tie_last_rank"] == 3 and row["tie_first_rank"] == 1 for row in expected)
+    assert [row["rank"] for row in expected] == [2, 2, 3]
     assert [row["position"] for row in expected] == [1, 2, 3]
-    assert select_top_k(expected, 1) == [4, 7, 2]
+    assert select_top_k(expected, 1) == [4, 7]
+    assert select_top_k(expected, 1, strict_budget=True) == []
     for record in records:
         record.update(latency_ms=-record["index"], winner=True, compiler_resources={"registers": 255})
     assert rank_records(records) == expected
@@ -332,3 +360,18 @@ def test_pipeline_depth_only_breaks_equal_byte_work():
     more_bytes = score_memory([dict(operation=0, bytes=257, visits=1)], 132, 132, pipeline_depth=6)
     assert deep["score"] < shallow["score"] < more_bytes["score"]
     assert deep["logical_byte_waves"] == shallow["logical_byte_waves"] == 256
+
+
+def test_exact_score_orders_depth_before_requests_without_float_rounding():
+    size = 2**30
+    fewer = [dict(operation=0, bytes=size, visits=1)]
+    more = [dict(operation=0, bytes=1, visits=size)]
+    scores = [
+        score_memory(fewer, 1, 1, 65535)["score"],
+        score_memory(more, 1, 1, 65535)["score"],
+        score_memory(fewer, 1, 1, 1)["score"],
+        score_memory(more, 1, 1, 1)["score"],
+        score_memory([dict(operation=0, bytes=size + 1, visits=1)], 1, 1, 65535)["score"],
+    ]
+    assert all(type(value) is int and value > 2**53 for value in scores)
+    assert scores == sorted(set(scores))

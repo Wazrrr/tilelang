@@ -41,14 +41,6 @@ def _offline_hopper():
             ),
             "GroupedMatmulTemplate",
         ),
-        (
-            _workload(
-                "kda",
-                "kda_chunk_o",
-                {"batch": 1, "heads": 2, "sequence": 128, "dim": 64, "value_dim": 64, "chunk_size": 64},
-            ),
-            "KDAChunkTemplate",
-        ),
     ],
 )
 def test_each_experiment_family_selects_its_canonical_template(workload, expected):
@@ -93,17 +85,16 @@ def test_fused_templates_model_the_full_semantic_graph():
     for stage in ("Scores", "Scaled", "Maximum", "Exponentials", "Denominator", "Probabilities", "Numerator"):
         assert stage in attention_ir
 
-    kda = workload_template(
-        _workload(
-            "kda",
-            "kda_chunk_o",
-            {"batch": 1, "heads": 2, "sequence": 128, "dim": 64, "value_dim": 64, "chunk_size": 64},
-        ),
-        arch=_offline_hopper(),
+
+
+def test_token_parallel_kda_has_no_incorrect_chunk_level_template():
+    workload = _workload(
+        "kda",
+        "kda_chunk_intra_token_parallel",
+        {"batch": 1, "heads": 2, "sequence": 128, "dim": 64, "chunk_size": 64, "sub_chunk_size": 16},
     )
-    kda_ir = kda.equivalent_function().script()
-    for stage in ("ScaledQ", "GatedQ", "Carried", "MaskedA", "Local"):
-        assert stage in kda_ir
+    with pytest.raises(ValueError, match="No Carver template"):
+        workload_template(workload, arch=_offline_hopper())
 
 
 def test_grouped_template_preserves_padded_cta_domain():

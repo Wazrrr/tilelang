@@ -10,6 +10,7 @@ from .analysis import analyze_prim_func
 from .config import ANALYSIS_VERSION, TileTuneConfig, TileTuneReject
 from .register_pressure import resolve_register_budget
 from .ranking import rank_records, select_top_k
+from tiletune_core.ranking import alpha_budget
 
 
 def check_compiler_resources(resource_usage, function_names, config=None, *, target=None, launch_infos=None, device_limits=None):
@@ -139,6 +140,8 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
 class TileTuneSession:
     def __init__(self, config, configs, compile_flags=None, *, target=None, device_limits=None):
         self.config = config
+        self.requested_k = alpha_budget(len(configs), config.alpha) if config.alpha is not None else config.top_k
+        self.strict_budget = config.strict_top_k or config.alpha is not None
         self.target = target
         self.device_limits = device_limits or config.device_limits
         self.compile_flags = list(compile_flags or [])
@@ -218,7 +221,12 @@ class TileTuneSession:
                 # elaborate records the precise elaboration/analysis/pressure failure.
                 continue
         self.ranking = rank_records(self.records)
-        indices = select_top_k(self.ranking, self.config.top_k, strict_budget=self.config.strict_top_k)
+        indices = select_top_k(
+            self.ranking,
+            self.requested_k,
+            include_unknown=self.config.alpha is None,
+            strict_budget=self.strict_budget,
+        )
         explored = []
         if self.config.exploration_fraction:
             from .ranking import select_with_exploration
@@ -232,29 +240,39 @@ class TileTuneSession:
             if record["status"] == "analyzed" and not record["selected"]:
                 record["status"] = "not_selected"
         self.prepared_programs = {idx: self.prepared_programs[idx] for idx in indices}
+        if self.config.alpha is not None:
+            unknown_policy = "exclude unscored, pressure-rejected, and unavailable candidates"
+        elif self.strict_budget:
+            unknown_policy = (
+                "retain the complete permitted unscored tail group only when its tail rank is within the strict budget; "
+                "exclude pressure-rejected and unavailable candidates"
+            )
+        else:
+            unknown_policy = (
+                "retain the complete permitted unscored tail group when the requested budget reaches it; "
+                "exclude pressure-rejected and unavailable candidates"
+            )
         self.selection = {
-            "requested_k": self.config.top_k,
+            "requested_k": self.requested_k,
+            "alpha": self.config.alpha,
+            "pool_size": len(self.records),
             "selected_indices": indices,
             "selected_count": len(indices),
-            "shortfall": max(0, self.config.top_k - len(indices)),
-            "budget_excess": max(0, len(indices) - self.config.top_k),
+            "shortfall": max(0, self.requested_k - len(indices)),
+            "budget_excess": max(0, len(indices) - self.requested_k),
             "tie_policy": "exclude_boundary_score_group"
-            if self.config.strict_top_k
+            if self.strict_budget
             else "include_boundary_score_group",
             "rank_policy": "equal primary scores share the group's last rank",
-            "tie_break": "logical memory events, then original configuration index"
+            "tie_break": "original configuration index"
             if self.config.ranking_metric == "memory"
             else (
                 "fixed-primitive uncertainty group, then original configuration index"
                 if any(row.get("score_relative_uncertainty", 0) for row in self.ranking)
                 else "original configuration index"
             ),
-            "unknown_policy": (
-                "retain the complete permitted unscored tail group only when its tail rank is within the strict budget; exclude pressure-rejected and unavailable candidates"
-                if self.config.strict_top_k
-                else "retain the complete permitted unscored tail group when the requested budget reaches it; exclude pressure-rejected and unavailable candidates"
-            ),
-            "strict_budget": self.config.strict_top_k,
+            "unknown_policy": unknown_policy,
+            "strict_budget": self.strict_budget,
             "failure_policy": "no replacement after compilation or benchmark failure",
             "wall_time_ms": (time.perf_counter() - started) * 1000,
         }

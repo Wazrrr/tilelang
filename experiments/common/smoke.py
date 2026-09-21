@@ -11,7 +11,7 @@ from experiments.utils.io import write_json
 
 def instruction_evidence(source, target, operation, config):
     """Inspect generated instruction text; a target name alone is not evidence."""
-    matrix = operation in ("gemm", "attention", "kda_chunk_o")
+    matrix = operation in ("gemm", "attention")
     arch = target.get("arch", "").rstrip("af")
     required = []
     if target["kind"] == "cuda":

@@ -86,6 +86,46 @@ def test_strict_preparation_drops_a_boundary_tie(monkeypatch):
     assert session.selection["tie_policy"] == "exclude_boundary_score_group"
 
 
+@pytest.mark.parametrize("alpha", [0, -1, 1.1, True, float("inf"), float("nan")])
+def test_invalid_alpha(alpha):
+    with pytest.raises(ValueError, match="alpha"):
+        TileTuneConfig(alpha=alpha)
+
+
+def test_alpha_uses_original_pool_and_excludes_unknowns_and_crossing_ties(monkeypatch):
+    session = TileTuneSession(TileTuneConfig(alpha=0.5), [{"id": i} for i in range(5)])
+
+    def analyze(program, *args, **kwargs):
+        if program == 4:
+            raise ValueError("opaque candidate")
+        return dict(tile_cost={"score": 1 if program == 0 else 2}, pressure={"decision": {"keep": True}})
+
+    monkeypatch.setattr("tilelang.tiletune.runtime.analyze_prim_func", analyze)
+    assert session.prepare_top_k([(i, {"id": i}, {}) for i in range(5)], lambda id: id) == [0]
+    assert session.selection["requested_k"] == 2
+    assert session.selection["pool_size"] == 5
+    assert session.selection["alpha"] == 0.5
+    assert session.selection["shortfall"] == 1
+    assert session.selection["budget_excess"] == 0
+    assert session.selection["strict_budget"]
+    assert session.records[-1]["status"] == "analysis_failed"
+
+
+def test_alpha_configuration_contract_and_cache_identity():
+    for settings in (
+        dict(alpha=0.5, top_k=2),
+        dict(alpha=0.5, ranking=False),
+        dict(alpha=0.5, exploration_fraction=0.5),
+        dict(strict_top_k=True),
+        dict(top_k=2, strict_top_k=1),
+    ):
+        with pytest.raises(ValueError):
+            TileTuneConfig(**settings)
+    assert TileTuneConfig(alpha=0.5).to_cache_key_dict() != TileTuneConfig(top_k=2).to_cache_key_dict()
+    with pytest.raises(ValueError, match="selects no candidates"):
+        TileTuneSession(TileTuneConfig(alpha=0.1), [{"id": 0}])
+
+
 def test_preparation_retains_failures_and_never_refills(monkeypatch):
     session = TileTuneSession(TileTuneConfig(top_k=2), [{"id": i} for i in range(4)])
     calls = []

@@ -30,25 +30,24 @@ All named-suite cases use BF16. Smoke uses the first development case.
 
 ## Configuration space
 
-Every case uses the same complete **320-config `expanded` pool**:
+Every case uses the same complete **520-config `expanded` pool**:
 
 | Parameter | Values |
 | --- | --- |
-| `block_M` | 32, 64, 128, 192, 256 |
-| `block_N` | 16, 32, 48, 64, 96, 128, 192, 256 |
-| `num_stages` | 0, 1, 2, 3 |
-| `threads` | 128, 256 |
+| `block_M` | 32, 64, 128 |
+| `block_N` | 16 through 256 in steps of 16 |
+| `num_stages` | 0 through 12 |
+| `threads` | 128 (all M), 256 (M=128) |
 
 The example's `get_configs()` contains one config: 64/64/1/128.
 Its explicit 128/128/1/128 launch is also included. The pool expands these
 native tile, stage and thread parameters; it preserves the example's causal
 loop, fragment recurrence, FullRow GEMMs and shared output.
 
-Space version 5 has no alternative `current`, `large` or `exhaustive` presets
+Space version 11 has no alternative `current`, `large` or `exhaustive` presets
 for this family. There is no cap, protected subset, target-dependent domain or
-structural prefilter. Every declared candidate is attempted in a full sweep;
-compilation and correctness failures remain recorded. Counts describe candidate
-configs, not a guarantee of that many valid or distinct compiled programs.
+budget cap. The declared combinations are the B200 compiler-verified domain;
+correctness and launch failures remain recorded.
 Explicit CUDA/HIP configs must select members of this pool. Smoke and
 development budgets select original indices without changing the pool.
 

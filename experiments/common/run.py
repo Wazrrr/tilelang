@@ -43,6 +43,12 @@ def exploration_options(settings, config_type):
 
 def make_request(workload, device, settings):
     settings = dict(settings)
+    if settings.get("alpha") is not None:
+        from tiletune_core.ranking import alpha_budget
+
+        if settings["method"] != "top_k" or settings.get("config_indices") is not None or device.subsets:
+            raise ValueError("alpha selection requires TileTune top_k on the complete declared pool")
+        settings["top_k"] = alpha_budget(len(configuration_space(workload, device)["configs"]), settings["alpha"])
     if settings.get("method") == "xgboost" and not settings.get("xgb_model_sha256"):
         path = settings.get("xgb_model")
         if not path:
@@ -343,17 +349,27 @@ def run_native(request, output):
     else:
         indices = list(range(len(configs)))
     if analytical:
+        feature_options = {}
+        if case.input_values:
+            if "input_values" not in TileTuneConfig.__dataclass_fields__:
+                raise ValueError("declared metadata requires a TileTune runtime with input_values support")
+            feature_options["input_values"] = case.input_values
+        if settings["method"] == "top_k" and settings.get("alpha") is not None:
+            if "alpha" not in TileTuneConfig.__dataclass_fields__:
+                raise ValueError("alpha selection requires a TileTune runtime with alpha support")
+            feature_options["alpha"] = settings["alpha"]
         config = TileTuneConfig(
             enabled=True,
             mode="report_only",
             ranking_metric=settings["metric"],
-            top_k=settings["top_k"] if settings["method"] == "top_k" else None,
+            top_k=settings["top_k"] if settings["method"] == "top_k" and settings.get("alpha") is None else None,
             performance_model=performance_model,
             device_limits=limits,
             report_path=str(output / "tiletune.json"),
             trace_path=str(output / "trace.log") if settings["trace"] else None,
             max_spill_bytes=None,
             max_local_bytes=None,
+            **feature_options,
             **exploration_options(settings, TileTuneConfig),
         )
     extra_sources = (("examples/flash_attention_sm100/mha_fwd_bshd.py",) if workload.op == "attention" else ())
@@ -602,6 +618,7 @@ def main():
     parser.add_argument("--metric", choices=["memory", "traffic_waves", "pipeline_time"], default="pipeline_time")
     parser.add_argument("--exploration-fraction", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--alpha", type=float, help="Strict original-pool fraction; overrides --top-k for TileTune")
     parser.add_argument("--memory-regime", choices=["cached", "streaming"], default="streaming")
     parser.add_argument("--config-indices", nargs="+", type=int)
     parser.add_argument("--output", type=Path, default=Path("experiments/results/portable"))
@@ -613,6 +630,11 @@ def main():
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--case-timeout", type=int, default=3600)
     args = parser.parse_args()
+    if args.alpha is not None:
+        if not math.isfinite(args.alpha) or not 0 < args.alpha <= 1 or args.method != "top_k" or args.exploration_fraction:
+            parser.error("alpha requires --method top_k, a finite fraction in (0, 1], and no exploration")
+        if args.config_indices:
+            parser.error("alpha requires the complete pool; omit --config-indices")
     if not 0 <= args.exploration_fraction <= 1 or (args.exploration_fraction and args.method != "top_k"):
         parser.error("exploration requires --method top_k and a fraction in (0, 1]")
     if args.method == "xgboost" and args.xgb_model is None:
@@ -681,6 +703,7 @@ def main():
             "metric",
             "memory_regime",
             "top_k",
+            "alpha",
             "exploration_fraction",
             "config_indices",
             "trace",

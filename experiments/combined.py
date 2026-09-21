@@ -120,6 +120,7 @@ def _worker(request_path, output):
     import tilelang
     from tilelang.autotuner import AutoTuner, set_autotune_inputs
     from tilelang.tiletune import TileTuneConfig, current_target, query_device_limits
+    from tiletune_core.ranking import alpha_budget
     from experiments.common.kernels import make_case
     from experiments.utils.cli import device_info, source_hashes
     from experiments.utils.results import config_key, load_oracle
@@ -140,9 +141,7 @@ def _worker(request_path, output):
     limits = query_device_limits(target)
     case = make_case(workload)
     configs = configuration_space(workload, Device("blackwell", TARGETS["blackwell"]))["configs"]
-    requested_k = math.floor(len(configs) * settings["alpha"])
-    if requested_k <= 0:
-        raise ValueError(f"alpha={settings['alpha']} selects no configs from a pool of {len(configs)}")
+    requested_k = alpha_budget(len(configs), settings["alpha"])
     inputs = case.inputs("cuda:0", torch.Generator(device="cuda:0").manual_seed(settings["seed"]))
     case.check_input_values(inputs)
     references = {}
@@ -179,8 +178,8 @@ def _worker(request_path, output):
         enabled=True,
         mode="reject",
         ranking_metric="memory",
-        top_k=requested_k,
-        strict_top_k=True,
+        alpha=settings["alpha"],
+        input_values=case.input_values or None,
         device_limits=limits,
         report_path=str(output / "tiletune.json"),
         max_spill_bytes=settings["max_spill_bytes"],

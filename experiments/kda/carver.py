@@ -1,3 +1,11 @@
-"""Carver's KDA chunk template on the experiment's exact pool."""
+"""Carver support boundary for token-parallel KDA intra coefficients."""
 
-from experiments.common.carver import kda_rank as carver_rank
+
+def support_reason(workload, device):
+    del workload, device
+    return "Carver has no template for token-parallel KDA intra coefficients"
+
+
+def carver_rank(workload, device, configs, top_k):
+    del workload, device, configs, top_k
+    raise ValueError("Carver has no template for token-parallel KDA intra coefficients")

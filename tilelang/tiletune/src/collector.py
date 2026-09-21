@@ -48,7 +48,11 @@ def _same_scalar_slot(a, b):
 
 
 class _Collector:
-    def __init__(self, func, *, track_dependencies=True):
+    def __init__(self, func, input_values=None, *, track_dependencies=True, memory_only=False):
+        from .input_values import parameter_values
+
+        self.input_values = parameter_values(func, input_values)
+        self.memory_only = memory_only
         self.operations = []
         self.buffers = list(func.buffer_map.values())
         self.layouts = {}
@@ -68,12 +72,16 @@ class _Collector:
         self.parse = tvm_ffi.get_global_func("tl.tiletune.ParseOperator")
         self.access = tvm_ffi.get_global_func("tl.tiletune.GetAccessRegions")
         self.visit(func.body)
+        if any(region.buffer in self.input_values for op in self.operations for region in op.writes):
+            raise ValueError("input_values parameters must be read-only")
         for i, buffer in enumerate(self.buffers):
             if any(buffer.data.same_as(other.data) and not buffer.same_as(other) for other in self.buffers[:i]):
                 self.unknown.append("multiple buffer views share a data variable")
                 self.memory_unknown.append("multiple buffer views share a data variable")
-        if not track_dependencies:
-            return
+        if track_dependencies:
+            self._collect_dependencies()
+
+    def _collect_dependencies(self):
         # Reaching writers: kill only proven complete, unconditional overwrites.
         reaching = []
         for op in self.operations:
@@ -115,8 +123,34 @@ class _Collector:
     def visit(self, node, loops=(), predicates=(), branches=(), annotations=None):
         annotations = dict(annotations or {})
 
-        def resolve(expr):
+        def simplify(expr):
+            analyzer = tvm.arith.Analyzer()
+            for var, domain in self.block_domains.values():
+                analyzer.bind(var, domain)
+            return analyzer.simplify(expr)
+
+        def resolve(expr, *, require_value=False):
+            if self.input_values:
+                from .input_values import ValueResolver
+
+                eager = not self.memory_only or require_value
+                value = ValueResolver(self, simplify_values=eager).visit_expr(expr)
+                # Byte counts need resolved extents and visit counts. Address
+                # offsets and predicates can retain their substituted form.
+                return simplify(value) if eager else value
             return tir.stmt_functor.substitute(expr, self.bindings) if self.bindings else expr
+
+        def scalar_reads(expr):
+            reads = []
+            tir.stmt_functor.post_order_visit(
+                expr,
+                lambda value: reads.append(
+                    Region(value.buffer, [Range.from_min_extent(resolve(index), 1) for index in value.indices])
+                )
+                if isinstance(value, tir.BufferLoad)
+                else None,
+            )
+            return reads
 
         def visit(child, **kw):
             self.visit(
@@ -132,6 +166,20 @@ class _Collector:
                 visit(stmt)
         elif isinstance(node, tir.Bind):
             value = resolve(node.value)
+            if self.input_values and scalar_reads(node.value):
+                # Preserve metadata loads as scored work even though their
+                # values become constants in subsequent address expressions.
+                buffer = tir.decl_buffer((1,), str(node.var.dtype), name=str(node.var), scope="local.var")
+                store = tir.BufferStore(buffer, node.value, [0])
+                self.add(
+                    "elementwise",
+                    scalar_reads(node.value),
+                    [Region(buffer, [Range.from_min_extent(0, 1)])],
+                    store,
+                    loops,
+                    predicates,
+                    branches,
+                )
             unsafe = []
             tir.stmt_functor.post_order_visit(
                 value, lambda n: unsafe.append(n) if isinstance(n, tir.BufferLoad) or _opaque_call(n) else None
@@ -151,8 +199,29 @@ class _Collector:
                 # the original PrimFunc is retained unchanged for compilation.
                 self.bindings[node.var] = value
         elif isinstance(node, tir.For):
+            from .input_values import metadata_loop
+
+            if self.input_values and not self.active_pipeline_stages and metadata_loop(node):
+                start = _int(resolve(node.min, require_value=True))
+                extent = _int(node.extent)
+                if start is not None and extent is not None:
+                    previous = self.bindings.get(node.loop_var)
+                    for value in range(start, start + extent):
+                        self.bindings[node.loop_var] = tir.const(value, node.loop_var.dtype)
+                        visit(node.body)
+                    if previous is None:
+                        self.bindings.pop(node.loop_var, None)
+                    else:
+                        self.bindings[node.loop_var] = previous
+                    return
             node = tir.For(
-                node.loop_var, resolve(node.min), resolve(node.extent), node.kind, node.body, node.thread_binding, node.annotations
+                node.loop_var,
+                resolve(node.min, require_value=True),
+                resolve(node.extent, require_value=True),
+                node.kind,
+                node.body,
+                node.thread_binding,
+                node.annotations,
             )
             previous_threads = dict(self.active_threads)
             previous_pipeline = self.active_pipeline_stages
@@ -251,6 +320,7 @@ class _Collector:
                 visit(node.init, annotations=annotations)
             visit(node.body, annotations=annotations)
         elif isinstance(node, tir.BufferStore):
+            original = node
             node = tir.BufferStore(node.buffer, resolve(node.value), [resolve(i) for i in node.indices])
             reads = []
             tir.stmt_functor.post_order_visit(
@@ -277,7 +347,21 @@ class _Collector:
                 bool(opaque),
                 memory_unknown=any(_uses_global_buffer(value, self.buffers) for value in opaque),
             )
-            if node.buffer.scope().startswith("local") and len(node.indices) == 1 and _int(node.indices[0]) == 0:
+            if self.input_values:
+                self.operations[-1].reads = scalar_reads(original.value)
+                self.operations[-1].metadata = tir.BufferStore(original.buffer, original.value, node.indices)
+                if (
+                    node.buffer.scope() == "local.var"
+                    and not self.active_pipeline_stages
+                    and not predicates
+                    and all(kind == "4" for _, _, kind in loops)
+                    and len(node.indices) == 1
+                    and _int(node.indices[0]) == 0
+                ):
+                    self.scalar_values[node.buffer] = node.value
+                else:
+                    self.scalar_values.pop(node.buffer, None)
+            elif node.buffer.scope().startswith("local") and len(node.indices) == 1 and _int(node.indices[0]) == 0:
                 self.scalar_values[node.buffer] = node.value
         elif isinstance(node, tir.Evaluate) and isinstance(node.value, tir.Call):
             call = resolve(node.value)
@@ -303,10 +387,16 @@ class _Collector:
                     )
             else:
                 reads, writes = self.access(op)
+                regions = [[Region.from_ir(region) for region in items] for items in (reads, writes)]
+                if self.memory_only and self.input_values:
+                    # Extents determine scored work; canonicalize those with
+                    # launch bounds while leaving address offsets unsimplified.
+                    for region in regions[0] + regions[1]:
+                        region.ranges = [Range.from_min_extent(axis.min, simplify(axis.extent)) for axis in region.ranges]
                 self.add(
                     str(call.op.name).split(".")[-1],
-                    [Region.from_ir(r) for r in reads],
-                    [Region.from_ir(r) for r in writes],
+                    regions[0],
+                    regions[1],
                     op,
                     loops,
                     predicates,

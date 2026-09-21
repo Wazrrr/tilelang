@@ -195,6 +195,7 @@ def run_modules(context, pressure):
             "score": ranking["score"],
             "tie_break_score": ranking["tie_break_score"],
             "logical_byte_waves": ranking["logical_byte_waves"],
+            "logical_memory_access_waves": ranking["logical_memory_access_waves"],
             "score_formula": ranking["formula"],
             "ranking_metric": "memory",
             "precision": ranking["precision"],
@@ -208,7 +209,7 @@ def run_modules(context, pressure):
             import json
             from pathlib import Path
 
-            facts = {"version": 1, "backend": "memory.v1", **memory, "sm_count": (context.device_limits or {}).get("sm_count")}
+            facts = {"version": 1, "backend": "memory.v2", **memory, "sm_count": (context.device_limits or {}).get("sm_count")}
             path = Path(context.config.facts_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(facts, indent=2, allow_nan=False) + "\n")
@@ -330,7 +331,16 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
         memory_mode = config.ranking_metric == "memory"
         detailed_memory = memory_mode and config.memory_diagnostics
         strict_registers = memory_mode and _strict_register_analysis(config)
-        col = _Collector(func, track_dependencies=not memory_mode or detailed_memory)
+        col = _Collector(
+            func,
+            input_values=config.input_values,
+            track_dependencies=not memory_mode or detailed_memory,
+            memory_only=memory_mode and not detailed_memory,
+        )
+        if col.memory_only and col.input_values and col.unknown:
+            # Eager simplification can prove an unreachable opaque access or a
+            # metadata index safe. Retry it before declaring scored work unknown.
+            col = _Collector(func, input_values=config.input_values, track_dependencies=False)
         trace.record("col", lambda: collector_snapshot(col))
         from .ampere import is_ampere, prepare_analysis
 
@@ -343,9 +353,13 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
                 from .ampere import prepare_ownership_analysis
 
                 prepare_ownership_analysis(func, col, target, pass_configs)
+        accumulator_check = strict_registers and any(
+            hasattr(op.metadata, "cRegion") and not bool(getattr(op.metadata, "isTcgen05", False))
+            for op in col.operations
+        )
         tile_propagation = (
             _propagate_tiles(col, _kernel_outputs(col))
-            if not memory_mode or detailed_memory or strict_registers
+            if not memory_mode or detailed_memory or accumulator_check
             else None
         )
         trace.record(
@@ -384,6 +398,11 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
                 else _disabled_tile_propagation()
             ),
             "ir_context": {
+                "metadata_resolution": "not_needed"
+                if not col.input_values
+                else "deferred"
+                if col.memory_only
+                else "eager",
                 "launch_threads": {k: str(v) for k, v in col.threads.items()},
                 "explicit_layouts": {str(k): str(v) for k, v in col.layouts.items()},
             },

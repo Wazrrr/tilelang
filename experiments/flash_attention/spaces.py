@@ -1,22 +1,27 @@
-"""SM100 MHA-forward tiles, pipeline depths, and SS/TS variants."""
+"""B200-compilable SM100 MHA-forward SS/TS configurations."""
 
 from experiments.utils.grid import grid
 
 
 def get_configs():
-    return grid(
-        # The single-CTA SM100 attention kernel uses one TMEM datapath row per
-        # query row. Larger M tiles can compile but deadlock for longer causal
-        # sequences, so they are not meaningful members of the common pool.
+    configs = grid(
         block_M=[32, 64, 128],
         block_N=list(range(16, 257, 16)),
-        num_stages=[0, 1, 2, 3, 4, 5],
+        num_stages=list(range(13)),
         threads=[128, 256],
     )
+    # TCGen05 accepts every N/variant combination at M=128. The smaller M
+    # tiles compile only through the SS path and native 64-column instruction
+    # shapes. These rules reproduce the exhaustive B200 compile census.
+    return [
+        config
+        for config in configs
+        if config["block_M"] == 128 or (config["threads"] == 128 and config["block_N"] % 64 == 0)
+    ]
 
 
 def legality_reason(workload, device, config):
-    # Attempt every declared candidate; retain actual compiler/check failures.
+    # The declared pool is the compiler-verified SM100 domain.
     return None
 
 

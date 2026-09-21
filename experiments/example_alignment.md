@@ -14,7 +14,7 @@ does not change the historical matrix or measurements below.
 
 This records the initial alignment checkpoint. All four families then had one
 complete expanded pool and no local/legacy experiment kernels: GEMM 2,304,
-FlashAttention 320, KDA 720 and softmax 224 configs per case. See the
+FlashAttention 320 and softmax 224 configs per case. See the
 [current family contracts](README.md). Pool counts and measured results below
 describe the earlier checkpoint, not the current space-version-7 pools.
 
@@ -27,7 +27,6 @@ also tested at BF16.
 | --- | --- | --- | --- |
 | GEMM | [`make_autotune_kernel_builder`](../examples/gemm/example_gemm_advanced_autotune.py) | The final runner used `kernels/tiled.py`: 3-D NN tensors, dummy bias and direct fragment-to-global output. The advanced replica existed but was only used by the legacy path. | 2-D A=(M,K), B=(N,K), C=(M,N), `transpose_B=True`, FP32 accumulation, shared-memory epilogue. |
 | FlashAttention | [`flashattn`](../examples/flash_attention/example_mha_fwd_bshd.py) | Expanded candidates selected a rewrite with shared score/probability transfers and a full-KV pipelined causal loop. | The example's BSHD tensors, fragment probability path, FullRow GEMMs and causal loop bound. |
-| KDA chunk output | [`tilelang_chunk_fwd_o`](../examples/kda/chunk_o.py) | Rewritten BHSD kernels, independent row/causal tiles, a different gated-query rounding sequence, and direct output. | BSHD tensors; hidden=(B,chunks,H,DK,DV); the example's two casts, GEMMs and shared-memory output; block_S=chunk_size. |
 | Softmax | [`softmax_kernel`](../examples/online_softmax/online_softmax.py) | Separate full-row/streamed implementations and explicit layout choices. | The example's two passes and log2/exp2 recurrence, with a tail mask added in the example itself. |
 
 The adapters in each family's `kernel.py` supply inputs, references, configuration
@@ -61,8 +60,7 @@ H200 winner at both sizes:
 ```
 
 Attention uses only the example's tile/stage/thread parameters and protects its
-64x64 and 128x128 default launches. KDA protects all 90 native autotune configs
-and varies only key/value tiles, stages and threads. Softmax varies its existing
+64x64 and 128x128 default launches. Softmax varies its existing
 row/column tiles and newly exposed launch-thread parameter. The old rewritten
 attention/KDA/softmax knobs are rejected, not silently mapped to ignored values.
 
@@ -70,7 +68,6 @@ attention/KDA/softmax knobs are rejected, not silently mapped to ignored values.
 | --- | ---: | ---: | ---: | ---: |
 | GEMM | 108 | 3,000 | 1,024 | 12,000 |
 | Attention | 54 | 250 | 1,024 | 1,280 |
-| KDA chunk output | 24 | 90 | 1,024 | 1,280 |
 | Softmax | 6 | 32 | 224 | 224 |
 
 These are declared candidate counts, before compilation/correctness checks.
@@ -84,8 +81,6 @@ Their latencies and config indices cannot stand in for a new oracle.
 - GEMM is importable as a package and exposes warp policy and swizzle panel with
   its original defaults (Square, panel 10). The optional missing static analyzer
   is imported only when static pruning is requested.
-- KDA defers optional FLA comparison imports and random seeding to the executable
-  test path. Its TileLang kernel body is unchanged.
 - FlashAttention's example is unchanged.
 - Softmax infers M/N from its input, exposes `threads=128`, and puts its demo under
   `main()`. Partial column tiles mask padding to negative infinity before max/sum

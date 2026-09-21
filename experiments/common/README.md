@@ -33,23 +33,23 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 7 gives each final family exactly one `expanded` pool. Each pool
+Space version 11 gives each final family exactly one B200 `expanded` pool. Each pool
 uses the example's native parameters and includes its original configs/defaults.
 The same complete domain is used for both cases and all native targets.
 
 | Family | Configs per case | Example coverage |
 | --- | ---: | --- |
-| [GEMM](../gemm/README.md) | 2,304 | All 288 autotune configs; 8× expansion |
-| [FlashAttention](../flash_attention/README.md) | 320 | Single autotune config and explicit 128/128 launch |
-| [KDA chunk output](../kda/README.md) | 720 | All 90 autotune configs; 8× expansion |
-| [FP8 GEMM](../gemm_fp8/README.md) | 2,304 | Complete native grid plus expanded tile dimensions |
+| [GEMM](../gemm/README.md) | 1,473 | All 288 autotune configs plus the SM100 example launch |
+| [FlashAttention](../flash_attention/README.md) | 520 | Native/default launches and B200-compilable SS/TS tiles |
+| [KDA intra](../kda/README.md) | 513 | All 32 native autotune configs |
+| [FP8 GEMM](../gemm_fp8/README.md) | 533 | Complete native B200 grid |
+| [Grouped GEMM](../grouped_gemm/README.md) | 576 | Both explicit example launches |
 
 Shapes, dtype, causal mode and chunk size are workload properties. They do not
 multiply the config count. Full sweeps have no cap, protected subset or
-structural prefilter. Every candidate is attempted and actual compilation or
-correctness failures are recorded. These counts do not claim that all candidates
-compile, pass checks or generate distinct programs. Native target support still
-requires device validation.
+structural cap. Every declared candidate is in the compiler-verified B200 domain;
+correctness and launch failures remain recorded outcomes. Native support outside
+B200 still requires separate device validation.
 
 Explicit CUDA/HIP config lists must select members of the family's pool.
 Smoke/development and sampled training budgets retain original pool indices.
@@ -57,17 +57,17 @@ Smoke/development and sampled training budgets retain original pool indices.
 have changed from older presets: keep historical timings with their original
 source hashes and pools, and start new runs in new output directories.
 
-GEMM fixes the example's Square/panel-10 defaults. Attention keeps its example's
-QK/PV policies, fragment recurrence and causal loop bound. KDA keeps `block_S`
-equal to the chunk size. FP8 GEMM preserves the example's FP32 accumulator and
-FP8 output for both native encodings. There are no alternative experiment
+GEMM keeps the native TCGen05 program. Attention keeps its example's QK/PV
+policies, fragment recurrence and causal loop bound. KDA keeps chunk size 64 and
+sub-chunk size 16. FP8 GEMM preserves the example's FP32 accumulator and BF16
+output. There are no alternative experiment
 kernels. The shared configuration code accepts only the `expanded` pool.
 
 Inspect a space without loading TileLang or querying hardware:
 
 ```bash
 python -m experiments.common.run --plan --devices blackwell \
-  --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square \
+  --workloads gemm_square attention_noncausal kda_intra_regular gemm_fp8_square \
   --config-space expanded
 ```
 
@@ -93,7 +93,7 @@ Run the sampled baseline comparison on the full expanded pools:
 ```bash
 bash experiments/common/run_accelerator.sh \
   --device blackwell \
-  --workloads gemm_square attention_causal kda_chunk_regular gemm_fp8_square \
+  --workloads gemm_square attention_causal kda_intra_regular gemm_fp8_square \
   --methods tiletune xgboost --top-k 20 --xgb-sample-fraction 0.1 \
   --wait-idle --output experiments/results/expanded-comparison
 ```
@@ -193,7 +193,7 @@ still means exhaustive **report-only TileTune** analysis/measurement. The new
 Carver adapters map the exact supplied grids through one canonical template
 selector. Plain FP16/BF16 GEMM uses `MatmulTemplate`, FP8 GEMM uses the dedicated
 `FP8MatmulTemplate`, attention uses `FlashAttentionTemplate`, grouped GEMM uses
-`GroupedMatmulTemplate`, and KDA uses `KDAChunkTemplate`. Unsupported fused or
+`GroupedMatmulTemplate`. Token-parallel KDA-intra is unsupported. Other unsupported fused or
 batched GEMM forms are still rejected by their family contracts.
 
 Each test case records method outcomes, an independent oracle table, ranking
@@ -228,7 +228,7 @@ Run a small correctness/runner check on a Hopper machine:
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh -- \
   python -m experiments.common.run \
     --devices hopper --smoke --method exhaustive --config-indices 0 \
-    --workloads gemm_square attention_noncausal kda_chunk_regular gemm_fp8_square
+    --workloads gemm_square attention_noncausal kda_intra_regular gemm_fp8_square
 ```
 
 Run top-K selection over each workload's full default grid:
@@ -259,7 +259,7 @@ correctness checks; they do not add default experiment cases:
 | --- | --- |
 | `gemm_*` | Decode/prefill hidden projections and both FFN directions, pretransposed B |
 | `attention_*` | BSHD prefill attention from 512 to 8192 tokens, including matched causal/noncausal 4K cases |
-| `kda_chunk_*` | Chunk output from 2K to 16K context plus a batched case, DK=DV=128 |
+| `kda_intra_*` | Token-parallel intra coefficients from 2K to 16K plus a batched case, DK=128 |
 | `gemm_fp8_*` | FP8 decode/prefill projections and both FFN directions with FP32 accumulation |
 
 Each family's `kernel.py` and `reference.py` supply its builder,
@@ -270,13 +270,9 @@ FP32 before the specified output cast. Checks include both elementwise tolerance
 and a relative output-norm bound: all-zero output cannot pass solely because an
 attention result has small magnitude or FP8 quantization needs a wider tolerance.
 
-The chunk-output workload calls `examples/kda/chunk_o.py` directly. Inputs and
-outputs use BSHD; hidden states use (B,chunks,H,DK,DV). It computes
-`cast(cast(q * scale) * exp2(g)) @ hidden + tril(a) @ v`, preserving both
-input-dtype rounding points in the example. This is the chunk-output stage,
-not the complete KDA forward/backward computation. Its config keys are
-`block_DK`, `block_DV`, `num_stages` and `threads`; `block_S` equals chunk size.
-The recurrent baseline and old tiled implementation are retired from the suite.
+The KDA workload calls `examples/kda/chunk_intra_token_parallel.py` directly.
+Q/K/beta use BF16, cumulative gates use FP32, and the two coefficient outputs
+use BF16. Its config keys are `block_H`, `num_stages`, and `threads`.
 
 The numerical tests in `test_example_kernels.py`, `test_expanded_kernels.py`
 and `test_kda_example.py` check program identity, final shapes, causal masking,
@@ -496,8 +492,8 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 `python -m experiments.suite --suite smoke --plan` plans one representative
 shape from each of five families with deterministic subsets. Development uses
 twenty-five cases and up to 256
-configurations; final uses the complete `expanded` pools (GEMM 2,304,
-FlashAttention 320, KDA 720, FP8 GEMM 2,304, and grouped GEMM 192 per case) and three seeds. See
+configurations; final uses the complete `expanded` pools (GEMM 1,473,
+FlashAttention 520, KDA-intra 513, FP8 GEMM 533, and grouped GEMM 576 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 

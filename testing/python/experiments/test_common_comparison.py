@@ -31,7 +31,7 @@ def test_training_collection_samples_before_measurement_and_preserves_original_i
     workload = default_workloads()[0]
     configs = configurations(workload, device)
     sample = training_sample(workload, device, fraction=0.1, seed=123)
-    assert len(configs) == 2304 and len(sample["config_indices"]) == 231
+    assert len(configs) == 1473 and len(sample["config_indices"]) == 148
     assert sample["xgb_sampling"]["pool_configs"] == configs
     assert sample["config_indices"] == sample["xgb_sampling"]["selected_indices"]
     subset = [91, 40, 18, 72, 3, 5]

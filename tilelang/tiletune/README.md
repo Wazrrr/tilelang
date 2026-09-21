@@ -124,7 +124,10 @@ compilation. By default, selection includes the complete score group crossing
 `top_k`. Set `strict_top_k=True` to treat `top_k` as a hard budget: TileTune
 keeps a boundary group only when its conservative tail rank is at most the
 budget, so it never splits a tie and may select fewer than `top_k` candidates.
-Failed selected candidates are never replaced.
+`alpha` is a mutually exclusive first-class alternative: it uses
+`floor(alpha * original_pool_size)`, automatically enables the strict tie
+policy, counts failures and unknowns in the denominator, and selects only
+eligible scored candidates. Failed selected candidates are never replaced.
 
 For timing, read `compute.estimate_phase_cycles`,
 `schedule.buffer_transition`, `pipeline.estimate_pipeline_cycles`, then
@@ -136,9 +139,10 @@ propagate; the autotuner records `analysis_failed` and stops that candidate.
 ## Imports, profiling, and validation
 
 Package-root exports, settings, signatures, reports, and trace checkpoints are
-unchanged. Internal imports now use the source map above; obsolete forwarding
-modules are removed. Analysis version 17 and device-profile version 4 remain
-unchanged because the equations and schemas are unchanged.
+stable for the existing timing metrics. Internal imports use the source map
+above; obsolete forwarding modules are removed. Analysis version 35 includes
+the refined memory order, native alpha, lean diagnostics, and declared metadata
+contract; device-profile version 4 is unchanged.
 
 `profiling/device_profile.py` and `profiling/device_probes.py` moved together
 without content changes. Their source fingerprints are unchanged. Loading a
@@ -222,21 +226,27 @@ pipeline timing, warp-specialization prediction, and occupancy prediction.
 Explicit family hints are rejected so a new kernel cannot silently depend on a
 kernel-specific scoring adapter.
 
-The score is a lexicographic integer encoding of logical global byte-waves and
-the pipeline depth already present in the IR:
+The score is an exact lexicographic integer encoding of logical global
+byte-waves, the pipeline depth already present in the IR, and logical access
+waves:
 
 ```text
 logical_byte_waves = sum(access.bytes * access.visits)
                    * ceil(grid_blocks / SM_count)
-score = logical_byte_waves * 65536 + (65535 - pipeline_depth)
+logical_access_waves = sum(access.visits for nonempty accesses)
+                     * ceil(grid_blocks / SM_count)
+score = 65535 * B * (B + 1) // 2
+      + (65535 - pipeline_depth) * (B + 1)
+      + E
+where B = logical_byte_waves and E = logical_access_waves
 ```
 
 Byte work therefore always dominates: pipeline depth only orders candidates
-with identical byte-waves. A memory-event count and original index provide a
-stable display order but do not split an equal-score group for pruning. Every
-member of such a group receives the group's last position as its conservative
-rank, and runtime top-K selection retains the whole boundary group. The report
-records `budget_excess` when that makes the actual shortlist larger than K.
+with identical byte-waves, then fewer logical requests order equal bytes and
+depth. The summed band widths are exact because `0 <= E <= B`; no floating-point
+score or arbitrary event bound is used. Original index orders only identical
+triples. Every equal-score member receives the group's last position as its
+conservative rank, and default top-K retains the whole boundary group.
 
 This is logical work rather than measured traffic: it does not model cache
 behavior, coalescing, bandwidth, transaction size, compute throughput, or
@@ -249,14 +259,24 @@ pipeline depth can also be read from an asynchronous global-to-shared copy
 whose leading shared-buffer axis is indexed modulo that axis's extent. Other
 dynamic loops remain unknown and therefore cannot silently prune a candidate.
 
+When `input_values` supplies verified read-only one-dimensional integer
+metadata, memory analysis substitutes those values in its private analysis
+view. Lean mode resolves lookup indices, loop bounds, and scored extents while
+deferring complete address and predicate simplification; uncertainty retries
+the eager path. `ir_context.metadata_resolution` reports `deferred`, `eager`,
+or `not_needed`. The original PrimFunc remains unchanged for compilation.
+
 The direct softmax test in
 [test_memory.py](../../testing/python/tiletune/test_memory.py) supplies a new
 PrimFunc with masked loads/stores and two reductions. The test disables family
 dispatch and timing/occupancy policy calls, checks that the IR is unchanged,
-and replays the exported `memory.v1` facts through the dependency-free core.
+and replays the exported `memory.v2` facts through the dependency-free core.
 That verifies the direct-analysis boundary for softmax; it is not a claim that
 all future opaque primitives or performance orderings are already supported.
 
 On the frozen B200 five-family pool, all 25 oracle winners have conservative
-tail rank within 50%; 18 are within 20%. No kernel or GPU experiment was rerun.
-See [the replay methodology and limitations](../../experiments/MEMORY_RANKING.md).
+tail rank within 50%; 18 are within 20%. The completed live audit used a strict
+user-supplied `alpha` of 50%, so a boundary score group was excluded rather than
+split or expanded past the budget. All 25 oracle guards pass; the worst live
+oracle tail rank is 31.25%. See
+[the replay and GPU methodology](../../experiments/MEMORY_RANKING.md).

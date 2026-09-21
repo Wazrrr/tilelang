@@ -20,20 +20,20 @@ holdouts live in [grouped_gemm_final.json](../manifests/grouped_gemm_final.json)
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) declares 192 configurations in one deterministic
+[`spaces.py`](spaces.py) declares 576 configurations in one deterministic
 `expanded` pool:
 
 | Parameter | Values |
 | --- | --- |
 | `block_M` | 64 |
-| `block_N` | 32, 64, 96, 128, 192, 256 |
-| `block_K` | 16, 32, 48, 64 |
+| `block_N` | 16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256 |
+| `block_K` | 16, 32, 48, 64, 96, 128 |
 | `num_stages` | 0, 1, 2, 3 |
 | `threads` | 128, 256 |
 
-The example has no autotuning grid, so this is an absolute 192-candidate
+The example has no autotuning grid, so this is an absolute 576-candidate
 expansion. It includes the example's 64×64×64, 2-stage, 128-thread test launch
-(index 60) and 64×128×64, 2-stage, 256-thread CLI launch (index 125).
+(index 172) and 64×128×64, 2-stage, 256-thread CLI launch (index 365).
 
 `block_M` is fixed because the example receives padded group offsets as an input.
 Those offsets depend on the M tile. The shared runners reuse identical tensors
@@ -43,9 +43,9 @@ Input generation prepares the group sizes, offsets, and padded offsets outside
 kernel timing. Every declared tuning parameter reaches the example builder.
 
 All methods use the same ordered pool. Smoke/development runs select original
-indices; explicit configs must belong to this pool. There is no speculative
-legality filter. Compilation and correctness failures remain recorded outcomes;
-the pool size does not promise that every candidate compiles.
+indices; explicit configs must belong to this pool. The complete pool compiled
+in the B200 census. Correctness and launch failures remain recorded outcomes;
+other targets still need their own validation.
 
 ## Files and cases
 
@@ -86,7 +86,7 @@ python -m experiments.grouped_gemm.tiletune.run --suite full --device hopper --p
 # Check the two example launches through all system variants.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
   python -m experiments.grouped_gemm.system.run --variant all \
-  --config-indices 60 125 --output experiments/results/grouped_gemm/system-v1
+  --config-indices 172 365 --output experiments/results/grouped_gemm/system-v1
 
 # Compare complete pools and reuse saved baselines across TileTune revisions.
 .agents/skills/tl-conda-gpu-run/scripts/run_in_tl.sh --no-gpu -- \
@@ -122,7 +122,7 @@ planning without runtime imports, pool identities, frozen/disjoint workloads,
 source fingerprints, seeded metadata, independent references, and BF16
 structural equality with the example. The affected shared-framework regression
 suite passed 167 tests. Both final workloads generated Hopper CUDA source for
-indices 60 and 125. Grouped GEMM GPU correctness, grouped compilation execution,
+indices 172 and 365. Grouped GEMM GPU correctness, grouped compilation execution,
 system ablations, and baseline collection remain unverified: all local H200s
 had foreign compute processes attached during validation.
 

@@ -13,11 +13,11 @@ start in the family folder:
 | --- | --- | --- |
 | GEMM | Five continuous-batch decode/prefill projection and FFN shapes | [gemm/](gemm/README.md) |
 | FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
-| KDA | Five 2K–16K and batched chunk-output shapes at DK=DV=128 | [kda/](kda/README.md) |
+| KDA intra | Five 2K–16K token-parallel coefficient shapes at DK=128 | [kda/](kda/README.md) |
 | FP8 GEMM | Five E4M3 decode/prefill projection and FFN shapes | [gemm_fp8/](gemm_fp8/README.md) |
 | Grouped GEMM | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
 
-Grouped GEMM follows the same family structure with a 192-config pool. The
+Grouped GEMM follows the same family structure with a 576-config pool. The
 default matrix has five families and twenty-five cases. Its five holdouts have a
 separate frozen manifest, and `--families` can still select any subset.
 
@@ -29,7 +29,7 @@ experiments/
 ├── gemm_fp8/                Native E4M3 GEMM study
 ├── grouped_gemm/            Opt-in concatenated grouped forward GEMM study
 ├── flash_attention/         Same family conventions
-├── kda/                     Direct chunk-output example study
+├── kda/                     Token-parallel intra-coefficient study
 ├── common/                  Shared execution and comparison protocol
 ├── utils/                   Monitoring, baseline storage, result I/O and shared helpers
 ├── xgboost/                 Shared sampling, training, and prediction
@@ -54,9 +54,9 @@ python -m experiments.grouped_gemm.tiletune.run --suite development --device bla
 A development run uses five test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
 The five final kernels call their architecture-selected example builders directly.
-Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, FP8 GEMM 8, and grouped GEMM 192 configs per case. There is no cap or structural
-prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
+Each family has one complete B200 `expanded` pool: GEMM 1,473,
+FlashAttention 520, KDA-intra 513, FP8 GEMM 533, and grouped GEMM 576 configs
+per case. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
 ```bash
@@ -74,10 +74,11 @@ settings are 600 rounds, depth 10, learning rate 0.05, subsampling 0.8, and
 validation patience 20. Baselines use one fixed seed (123 by default) and are
 reused across TileTune's three repeats and later revisions. Each new TileTune
 winner receives seven checks. Preparation costs are recorded separately.
-Carver resolves every workload through one canonical template selector:
+Carver resolves supported workloads through one canonical template selector:
 `MatmulTemplate` for GEMM, `FP8MatmulTemplate` for FP8 GEMM,
-`FlashAttentionTemplate` for attention, `GroupedMatmulTemplate` for grouped
-GEMM, and `KDAChunkTemplate` for KDA. Every adapter scores the exact shared
+`FlashAttentionTemplate` for attention and `GroupedMatmulTemplate` for grouped
+GEMM. Token-parallel KDA-intra is explicitly unsupported because Carver has no
+matching semantic template. Every supported adapter scores the exact shared
 experiment pool rather than a separately generated grid. FP8 templates retain
 the kernel format while lowering `float8_e4m3fn` to Carver's tensorizable
 `float8_e4m3` spelling internally.

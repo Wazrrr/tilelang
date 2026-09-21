@@ -50,7 +50,7 @@ def test_blackwell_carver_rejects_native_tcgen05_illegal_tiles():
     assert result["selection"]["selected_indices"] == [1]
 
 
-@pytest.mark.parametrize("op", ["gemm", "attention", "kda_chunk_o", "gemm_fp8", "grouped_gemm"])
+@pytest.mark.parametrize("op", ["gemm", "attention", "gemm_fp8", "grouped_gemm"])
 def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -63,7 +63,6 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
     expected_template = {
         "gemm": "MatmulTemplate",
         "attention": "FlashAttentionTemplate",
-        "kda_chunk_o": "KDAChunkTemplate",
         "gemm_fp8": "FP8MatmulTemplate",
         "grouped_gemm": "GroupedMatmulTemplate",
     }[op]
@@ -85,3 +84,12 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
         assert all(result["configs"][index]["model"]["valid"] for index in result["selection"]["selected_indices"])
         if op == "attention":
             assert all(not record["model"]["valid"] for record in result["configs"][:8])
+
+
+def test_token_parallel_kda_carver_is_explicitly_unsupported():
+    from experiments.common.baselines import carver_support_reason
+    from experiments.common.spec import Device, TARGETS
+    from experiments.kda.cases import cases
+
+    reason = carver_support_reason(cases(holdout=True)[0], Device("blackwell", TARGETS["blackwell"]))
+    assert reason == "Carver has no template for token-parallel KDA intra coefficients"
