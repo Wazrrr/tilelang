@@ -46,7 +46,7 @@ def write(path, data):
     write_json(path, data)
 
 
-@pytest.mark.parametrize("family,count", [("gemm", 3456), ("flash_attention", 576), ("kda", 512), ("gemm_fp8", 576), ("grouped_gemm", 576)])
+@pytest.mark.parametrize("family,count", [("gemm", 576), ("flash_attention", 512), ("kda", 645), ("gemm_fp8", 576), ("grouped_gemm", 576)])
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
     assert len(plan) == 25
@@ -114,7 +114,7 @@ def test_kda_contract_change_preserves_other_family_baselines(monkeypatch, famil
     monkeypatch.setattr(baseline_store, "measurement_sources", lambda families: {})
     monkeypatch.setattr(baseline_store, "hash_files", lambda paths: {})
     measurement, _ = baseline_store.identities(plan, Device("hopper", TARGETS["hopper"]), settings, {})
-    assert measurement["kernel_contract_version"] == (3 if family == "kda" else 2)
+    assert measurement["kernel_contract_version"] == (4 if family == "gemm_fp8" else 3 if family == "kda" else 2)
     assert baseline_store.EXAMPLES["kda"] == "examples/kda/chunk_intra_token_parallel.py"
 
 
@@ -403,7 +403,7 @@ def test_monitor_kills_contended_worker_and_records_rejection(tmp_path, monkeypa
     monkeypatch.setattr(monitor.time, "sleep", lambda _: None)
 
     class Process:
-        pid = 123456
+        pid = 12576
         killed = False
 
         def poll(self):

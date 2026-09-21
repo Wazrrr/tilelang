@@ -136,7 +136,7 @@ def test_intra_requires_complete_chunks_and_sub_chunks(parameters, message):
         _workload(**parameters)
 
 
-def test_intra_carver_does_not_use_chunk_output_model(tmp_path):
+def test_intra_carver_reports_unsupported(tmp_path):
     from experiments.common.baselines import carver_support_reason
     from experiments.common.run import make_request, run_native
     from experiments.common.spec import Device, TARGETS
@@ -145,5 +145,5 @@ def test_intra_carver_does_not_use_chunk_output_model(tmp_path):
     assert "intra-chunk" in carver_support_reason(workload, device)
     result = run_native(make_request(workload, device, dict(method="carver")), tmp_path)
     assert result["status"] == "unsupported"
-    assert "chunk output" in result["reason"]
+    assert "intra-chunk" in result["reason"]
     assert not list(tmp_path.iterdir())

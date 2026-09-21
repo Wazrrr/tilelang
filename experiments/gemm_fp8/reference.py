@@ -1,7 +1,5 @@
-"""Independent FP32 dequantization reference for the common scale layout."""
+"""Independent FP32 reference with the original example's FP8 output."""
 
 
-def reference(a, b, scale_a, scale_b):
-    a_dequant = a.float() * scale_a.repeat_interleave(128, dim=1)
-    b_dequant = b.float() * scale_b.repeat_interleave(128, dim=1)
-    return (a_dequant @ b_dequant.T).bfloat16()
+def reference(a, b):
+    return (a.float() @ b.float().T).to(a.dtype)

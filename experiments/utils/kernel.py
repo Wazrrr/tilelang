@@ -30,7 +30,15 @@ class KernelCase:
         if len(actuals) != len(references):
             raise AssertionError("wrong number of kernel outputs")
         for actual, reference in zip(actuals, references):
-            torch.testing.assert_close(actual, reference, rtol=self.rtol, atol=self.atol)
+            if actual.dtype != reference.dtype:
+                raise AssertionError(f"output dtype {actual.dtype} differs from reference {reference.dtype}")
+            # Torch otherwise requests bitwise equality for FP8. Converting the
+            # stored values preserves the existing numerical tolerances, shape
+            # and device checks, without changing the kernel/output contract.
+            if actual.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                torch.testing.assert_close(actual.float(), reference.float(), rtol=self.rtol, atol=self.atol)
+            else:
+                torch.testing.assert_close(actual, reference, rtol=self.rtol, atol=self.atol)
             error = torch.linalg.vector_norm(actual.float() - reference.float())
             signal = torch.linalg.vector_norm(reference.float()).clamp_min(1e-12)
             if not torch.isfinite(error) or error / signal > self.rtol:

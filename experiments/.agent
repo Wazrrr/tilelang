@@ -1,8 +1,8 @@
 # Guide for adding or extending kernel experiments
 
 The active H200 matrix is defined by [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md)
-version 3: 25 final workloads, with KDA intra-chunk and its 512-config pool.
-That contract supersedes older case counts and KDA chunk-output descriptions
+version 4: 25 final workloads, with KDA intra-chunk and its 645-config pool.
+That contract supersedes older case counts and retired operation descriptions
 in this guide. Historical results retain their original contracts.
 
 Follow the organization in [gemm/](gemm/README.md) and
@@ -11,7 +11,7 @@ Follow the organization in [gemm/](gemm/README.md) and
 The [experiment README](README.md) describes the current execution protocol;
 [utils/README.md](utils/README.md) describes shared helpers.
 
-The current final matrix has five families and ten cases (FP16 and FP8). Preserve existing
+The current final matrix has five families and 25 cases (BF16 and FP8). Preserve existing
 cases, pools, and recorded results unless the task explicitly changes them.
 Softmax and the old vector families are retired. FP8 GEMM uses the current
 family structure and authoritative FP8 example.
@@ -63,7 +63,7 @@ alternative local kernels, or compatibility wrappers for removed paths.
 
 For orientation, GEMM uses `example_gemm_advanced_autotune.py` with A=(M,K),
 B=(N,K), `transpose_B=True`, and the shared-memory epilogue. Attention uses
-`example_mha_fwd_bshd.py`. KDA uses `examples/kda/chunk_o.py`; FP8 GEMM uses
+`example_mha_fwd_bshd.py`. KDA uses `examples/kda/chunk_intra_token_parallel.py`; FP8 GEMM uses
 `examples/gemm_fp8/example_tilelang_gemm_fp8.py`. These details are part of the kernel
 contract, not tuning-method choices.
 
@@ -71,7 +71,7 @@ contract, not tuning-method choices.
 
 - `cases(holdout=False)` supplies development workloads; `cases(holdout=True)`
   supplies final workloads with stable logical names. Existing core families have
-  two cases in each split. Record shape, layout, and semantic options in
+  five development and five final cases. Record shape, layout, and semantic options in
   `Workload.parameters`, and dtype in `Workload.dtype`; do not encode alternative
   implementations in the config grid.
 - `training_cases()` supplies two training workloads and one validation workload
@@ -84,19 +84,18 @@ contract, not tuning-method choices.
   ranges more finely or exposing meaningful example parameters. Every parameter
   must affect the example program. When the example has no meaningful autotuning
   grid, document the absolute expansion instead of claiming an artificial 8x.
-- Keep one target-independent declared domain and stable ordering/config IDs.
+- Keep one H200-qualified domain and stable ordering/config IDs.
   Do not maintain parallel small/large/exhaustive pools, cap final pools, silently
   map ignored knobs, or prune candidates with speculative legality filters.
-  Compilation, correctness, and runtime failures remain recorded outcomes.
+  Only successful CPU compilation across all final H200 cases admits a candidate
+  to the active pool. Correctness and runtime checks remain separate.
   Enforce mathematical support boundaries separately from candidate failures.
 - Follow the existing `canonical_config` and `legality_reason` interfaces.
   Smoke/development and explicit config requests select original pool indices;
   they do not define a new pool. All tuning methods use the same ordered pool.
 
-Current counts per case are GEMM 2,304 (288 × 8), attention 320, KDA 720 (90 × 8),
-FP8 GEMM 2,304 (288 × 8), and grouped GEMM 192. Counts describe declared candidates, not guaranteed compilable
-or distinct generated kernels. An intentional pool change needs new identities
-and results; review `common/spaces.py::SPACE_VERSION` and frozen manifests.
+Current compiled-pool counts and qualification scope are recorded in
+[BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md).
 
 ## Register the family and its source identity
 
@@ -152,8 +151,8 @@ Follow the existing fixed baseline seed and XGBoost training/validation protocol
 do not train on final oracle labels or resample baselines for each TileTune repeat.
 
 The reusable collection workflow currently runs on local CUDA. Reuse existing
-Carver templates where available. Grouped GEMM and chunk KDA have explicit
-mathematical templates; FP8 reuses MatmulTemplate. Preserve Carver's policy
+Carver templates where available. Grouped GEMM retains its existing template. KDA intra-chunk and the restored
+FP8 operation report Carver unsupported while adapter work is deferred. Preserve Carver's policy
 scores and feasibility limits, recording any template approximations. An entirely
 rejected pool records `model_unavailable` with a complete rejection report and
 no fallback. Blackwell remains unsupported by the existing policy. Do not present

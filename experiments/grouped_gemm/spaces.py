@@ -5,7 +5,7 @@ from experiments.utils.grid import grid
 BLOCK_M = 64
 
 
-def get_configs():
+def candidate_configs():
     return grid(
         block_M=[BLOCK_M],
         block_N=[32, 64, 96, 128, 192, 256],
@@ -13,6 +13,12 @@ def get_configs():
         num_stages=[0, 1, 2, 3, 4, 5, 6, 7],
         threads=[128, 256],
     )
+
+
+def get_configs():
+    from experiments.utils.compiled_pool import compiled_configs
+
+    return compiled_configs("grouped_gemm", candidate_configs())
 
 
 def support_reason(workload):

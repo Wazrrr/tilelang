@@ -209,7 +209,7 @@ def test_gpu_fp8_boundaries():
         pytest.skip("native Hopper FP8 correctness requires an SM90 GPU")
     w = Workload("fp8", "gemm_fp8", dict(m=128, n=128, k=128, transpose_b=True), dtype="float8_e4m3fn")
     case = make_case(w)
-    program = case.build(block_M=64, block_N=16, block_K=128, num_stages=4, threads=128)
+    program = case.build(block_M=64, block_N=64, block_K=32, num_stages=3, threads=128, enable_rasteration=False)
     kernel = tilelang.compile(program, target=current_target(), execution_backend="tvm_ffi", out_idx=case.out_idx)
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(123))
     result = kernel(*inputs)

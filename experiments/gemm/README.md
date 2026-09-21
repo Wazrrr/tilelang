@@ -12,30 +12,16 @@ requests are unsupported by this experiment.
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 3,456 configurations:
-twelve times the example's 288 configurations. Tile sizes are sampled more
-finely and pipeline depths extend through five stages.
+[`spaces.py`](spaces.py) expands the original 288-config grid by adding N tiles
+32, 96 and 192. Candidate axes are M=64/128/256, N=32/64/96/128/192/256,
+K=32/64, stages=0–3, threads=128/256, and rasterization on/off: 576 candidates.
+The active pool is the intersection compiled successfully for all five final
+H200 shapes. Its certificate lives in `../compilation/gemm.json`.
 
-| Parameter | Values |
-| --- | --- |
-| `block_M` | 32, 64, 96, 128, 192, 256 |
-| `block_N` | 32, 64, 96, 128, 192, 256 |
-| `block_K` | 16, 32, 48, 64 |
-| `num_stages` | 0, 1, 2, 3, 4, 5 |
-| `thread_num` | 128, 256 |
-| `enable_rasteration` | True, False |
-
-The example fixes warp policy to Square and enabled rasterization to panel 10.
-The complete original grid and its measured Hopper winner (128x256x64, 3 stages,
-256 threads, rasterization enabled) are included. Every method uses the same
-configuration dictionaries and order. There is no 1,024-config cap, protected
-subset or `current`/`large`/`exhaustive` GEMM preset. Smoke/development budgets
-select recorded indices from this pool. Explicit CUDA/HIP configs must also be
-members of it.
-
-The pool is identical across target devices. All declared candidates are
-attempted; compilation and correctness failures are recorded. The 3,456 count
-does not assert that every candidate compiles or yields distinct device code.
+The original grid and its measured Hopper winner (128x256x64, 3 stages,
+256 threads, rasterization enabled) are retained. Every method uses the same
+ordered pool. Smoke/development and explicit requests select subsets of it.
+Compilation qualification does not establish correctness or performance.
 
 ## Files and cases
 
@@ -57,7 +43,7 @@ does not assert that every candidate compiles or yields distinct device code.
 | Development FFN down | 512,4096,14336 |
 | Development large projection | 2048,4096,4096 |
 | Development FFN up | 2048,14336,4096 |
-| Final decode | 128,4096,4096 |
+| Final decode | 256,4096,4096 |
 | Final prefill | 1024,4096,4096 |
 | Final FFN down | 1024,4096,14336 |
 | Final large projection | 4096,4096,4096 |

@@ -578,6 +578,9 @@ def run_case(request, output):
 
 
 def worker_main(request_path, result_path):
+    from experiments.utils.imports import use_local_tilelang
+
+    use_local_tilelang()
     request = json.loads(Path(request_path).read_text())
     workload, device = validate_request(request)
     output = Path(result_path).resolve().parent

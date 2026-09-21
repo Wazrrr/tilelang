@@ -20,7 +20,7 @@ EXAMPLES = {
     "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
     "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
     "kda": "examples/kda/chunk_intra_token_parallel.py",
-    "gemm_fp8": "examples/gemm_fp8/example_blockscaled_gemm.py",
+    "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
 }
 
 
@@ -137,9 +137,8 @@ def identities(plan, device, settings, runtime, baseline_seed=123):
     families = sorted({FAMILIES[w.op] for w in workloads})
     measurement = dict(
         version=1,
-        # Only KDA changed semantics; keep compatible baseline bundles for
-        # the four unchanged families reusable under contract version 2.
-        kernel_contract_version=3 if "kda" in families else 2,
+        # FP8 now uses the original unscaled example and output dtype.
+        kernel_contract_version=4 if "gemm_fp8" in families else 3 if "kda" in families else 2,
         sources=measurement_sources(families),
         runtime=runtime,
         timing={k: settings[k] for k in ("warmup", "rep", "timeout", "workers", "case_timeout")},

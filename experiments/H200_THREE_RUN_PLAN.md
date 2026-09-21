@@ -12,9 +12,9 @@ and runs monitored preflights before the complete oracle-retention study.
 
 Use `dev-h200-new`, including grouped-compile recovery and the KDA intra-chunk
 migration. Freeze the actual code revision after the runner changes below. Use the current
-[benchmark contract](BENCHMARK_CONTRACT.md), contract version 3 and configuration
-space version 8. The older FP16/E4M3 29,200-candidate study does not establish
-oracle retention for this BF16/block-scaled suite.
+[benchmark contract](BENCHMARK_CONTRACT.md), contract version 4 and configuration
+space version 9. The older FP16/E4M3 29,200-candidate study does not establish
+oracle retention for this BF16/original-FP8 suite.
 
 ## Experiment matrix
 
@@ -51,20 +51,20 @@ Use `common.spec.default_workloads(smoke=False)` and each family's complete
 
 | Family | Five final workload names | Pool per workload | E3 maximum selected per workload |
 | --- | --- | ---: | ---: |
-| GEMM | gemm_decode, gemm_prefill, gemm_ffn_down, gemm_square, gemm_square_large | 3456 | 1728 |
-| Attention | attention_short_causal, attention_batched_causal, attention_noncausal, attention_causal, attention_long_causal | 576 | 288 |
-| KDA intra-chunk | kda_intra_short, kda_intra_medium, kda_intra_regular, kda_intra_batched, kda_intra_long | 512 | 256 |
+| GEMM | gemm_decode, gemm_prefill, gemm_ffn_down, gemm_square, gemm_square_large | 576 | 288 |
+| Attention | attention_short_causal, attention_batched_causal, attention_noncausal, attention_causal, attention_long_causal | 512 | 256 |
+| KDA intra-chunk | kda_intra_short, kda_intra_medium, kda_intra_regular, kda_intra_batched, kda_intra_long | 645 | 322 |
 | FP8 GEMM | gemm_fp8_decode, gemm_fp8_prefill, gemm_fp8_ffn_down, gemm_fp8_square, gemm_fp8_square_large | 576 | 288 |
 | Grouped GEMM | grouped_gemm_decode, grouped_gemm_prefill, grouped_gemm_aligned, grouped_gemm_down_aligned, grouped_gemm_ragged | 576 | 288 |
 
-Each exhaustive experiment attempts 28,480 candidates. E3 elaborates/analyzes
-all 28,480 and selects at most 14,240 for compilation. Whole equal-score groups
+Each exhaustive experiment attempts 14,425 candidates. E3 elaborates/analyzes
+all 14,425 and selects at most 7,210 for compilation. Whole equal-score groups
 must fit inside `floor(0.5 * original_pool_size)`. A group crossing the boundary
 is excluded; ties are not split or expanded. Failures and unknown scores stay
 in the original denominator. Do not refill after analysis, compilation,
 post-compile rejection, correctness, or benchmark failures.
 
-There are at most 71,200 candidate slots submitted for compilation across
+There are at most 36,060 candidate slots submitted for compilation across
 the three full experiments, excluding preflight and winner verification.
 Failed shared builds add retry attempts, which must be counted and timed.
 Actual benchmark counts will be smaller when candidates fail or are filtered.
@@ -81,10 +81,11 @@ Akk (B,S,H,16). Head dimension=128, chunk=64, sub-chunk=16.
 | kda_intra_batched | 2 | 4096 | 32 |
 | kda_intra_long | 1 | 16384 | 64 |
 
-Use block_H=1–16, stages=0–7, threads={32,64,128,256}: 512 configs per
+Use the 645 compiler-qualified configs from block_H=1–16, stages=0–15,
+threads={32,64,128,256} per
 workload. This includes all 32 original example configs (block_H={1,2,4,8},
 stages=0–3, threads={128,256}). See [the KDA contract](kda/README.md).
-Previous chunk-output oracle and spill validations do not establish retention
+Previous oracle and spill validations do not establish retention
 for this intra-chunk operation.
 
 E3's grouped compiler isolates per-config elaboration/lowering failures and

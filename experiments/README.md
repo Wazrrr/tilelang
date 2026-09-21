@@ -13,7 +13,7 @@ Saved measurements belong under each kernel's `results/` directory. The
 validation records and historical data.
 
 For unified memory scoring and strict `alpha=0.5` selection, see the
-[H200 analysis and all 25 oracle scores](H200_UNIFIED_MEMORY.md). The common
+[H200 memory model and validation status](H200_UNIFIED_MEMORY.md). The common
 runner accepts `--method top_k --metric memory --alpha 0.5`.
 
 For a new kernel family, follow the [agent guide](.agent). For existing kernels,
@@ -24,7 +24,7 @@ start in the family folder:
 | GEMM | Five continuous-batch decode/prefill projection and FFN shapes | [gemm/](gemm/README.md) |
 | FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
 | KDA | Token-parallel intra-chunk: five 2K–16K and batched shapes, D=128, chunk=64, sub-chunk=16 | [kda/](kda/README.md) |
-| FP8 GEMM | Five block-scaled E4M3-input, BF16-output projection and FFN shapes | [gemm_fp8/](gemm_fp8/README.md) |
+| FP8 GEMM | Five original E4M3-input/output projection and FFN shapes | [gemm_fp8/](gemm_fp8/README.md) |
 | Grouped GEMM | Five MoE 7168↔2048 shapes with realistic expert loads | [grouped_gemm/](grouped_gemm/README.md) |
 
 The default matrix contains these five families, five operations and twenty-five cases. FP8 GEMM
@@ -95,9 +95,9 @@ python -m experiments.grouped_gemm.tiletune.run --suite development --device hop
 A development run uses five test cases per operation, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case per operation and up to 16 configurations.
 All five families call their example builders directly; each family README identifies its source.
-Each operation has one complete `expanded` pool: GEMM 3,456, FlashAttention 576,
+Each operation has one complete `expanded` pool: GEMM 576, FlashAttention 512,
 FP8 GEMM 576, grouped GEMM 576, and KDA intra-chunk
-512 configs per case. There is no cap or structural prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
+645 configs per case. There is no cap or structural prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
 ```bash
@@ -116,7 +116,7 @@ validation patience 20. Baselines use one fixed seed (123 by default) and are
 read without updates across TileTune's three repeats and later revisions. Each new TileTune
 winner receives seven checks. Preparation costs are recorded separately.
 Carver uses existing matmul and attention templates, plus a grouped-matmul template. KDA intra-chunk currently reports
-unsupported for Carver; the chunk-output template describes a different operation. Its policy equations and feasibility limits are retained.
+unsupported for Carver; implementing that adapter is deferred.
 FP8 uses the matmul template with its actual dtype. Blackwell remains unsupported
 by Carver. Attention, ragged groups and KDA tails can have fully rejected pools;
 these record `model_unavailable`, complete rejection reports and N/A Oracle@K.

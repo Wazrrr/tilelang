@@ -5,12 +5,14 @@ def carver_support_reason(workload, device):
     if device.target["kind"] != "cuda":
         return "the Carver experiment adapters require CUDA"
     if workload.op == "kda_chunk_intra_token_parallel":
-        return "no Carver template for token-parallel KDA intra-chunk; KDAChunkTemplate models chunk output"
+        return "no Carver template for token-parallel KDA intra-chunk"
     from .spec import support_reason
 
     reason = support_reason(workload, device)
     if reason:
         return reason
+    if workload.op == "gemm_fp8":
+        return "Carver support for the restored original FP8 example is deferred"
     from experiments.families import family_module
 
     try:

@@ -30,27 +30,17 @@ All named-suite cases use BF16. Smoke uses the first development case.
 
 ## Configuration space
 
-Every case uses the same complete **576-config `expanded` pool**:
+Every case uses the same **512-config compiler-qualified pool**. Candidates use
+M tiles 32/64/128/256, N tiles 16–256 in steps of 16, stages 0–7, and
+128/256 threads. The successful intersection across all five H200 final shapes
+retains M=64 with 128 threads, M=128 with either thread count, and M=256 with
+128 threads. All N tiles and stage choices remain in those combinations.
 
-| Parameter | Values |
-| --- | --- |
-| `block_M` | 32, 64, 128 |
-| `block_N` | 16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256 |
-| `num_stages` | 0, 1, 2, 3, 4, 5, 6, 7 |
-| `threads` | 128, 256 |
+The original example config and explicit 128/128 launch are included.
+[The certificate](../compilation/flash_attention.json) records the compiler,
+sources, and per-workload evidence. This pool is specific to the recorded H200
+compilation contract; it does not claim correctness or performance validation.
 
-The example's `get_configs()` contains one config: 64/64/1/128.
-Its explicit 128/128/1/128 launch is also included. The pool expands these
-native tile, stage and thread parameters; it preserves the example's causal
-loop, fragment recurrence, FullRow GEMMs and shared output.
-
-Space version 7 has no alternative `current`, `large` or `exhaustive` presets
-for this family. There is no cap, protected subset, target-dependent domain or
-structural prefilter. Every declared candidate is attempted in a full sweep;
-compilation and correctness failures remain recorded. Counts describe candidate
-configs, not a guarantee of that many valid or distinct compiled programs.
-Explicit CUDA/HIP configs must select members of this pool. Smoke and
-development budgets select original indices without changing the pool.
 
 ## Commands
 
@@ -142,5 +132,5 @@ attention winner latency was measured in this adapter validation; see the
 python -m experiments.common.run --devices hopper --method carver \
   --workloads attention_noncausal attention_causal --top-k 20 \
   --output experiments/flash_attention/results/carver-final
-# Add --smoke to run the two development shapes with the same 576-config pool.
+# Add --smoke to run the two development shapes with the same 512-config pool.
 ```

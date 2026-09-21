@@ -54,7 +54,7 @@ def test_example_attention_masks_and_tail_rows(gpu_target, causal, stages):
 @pytest.mark.parametrize("m,n,k", [(128, 128, 128), (128, 256, 256)])
 def test_example_fp8_masked_tiles(gpu_target, m, n, k):
     w = Workload("fp8", "gemm_fp8", dict(m=m, n=n, k=k, transpose_b=True), dtype="float8_e4m3fn")
-    _check(w, dict(block_M=64, block_N=128, block_K=128, threads=128, num_stages=1), gpu_target)
+    _check(w, dict(block_M=64, block_N=128, block_K=64, threads=128, num_stages=1, enable_rasteration=False), gpu_target)
 
 
 def test_retired_rewrite_knobs_are_not_silently_ignored():

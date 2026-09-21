@@ -3,7 +3,7 @@
 The active KDA operation is `kda_chunk_intra_token_parallel`, built directly
 through [the example](../../examples/kda/chunk_intra_token_parallel.py)'s
 `tilelang_chunk_kda_fwd_intra_token_parallel.jit_impl.get_tir`.
-The implementation, cases, pool and reference follow `dev-b200-tiletune` at
+The implementation, cases and reference follow `dev-b200-tiletune` at
 `133bfa89506b3e763e562cd51fcc471faf98dc90`. H200 retains its own compiler backend
 and unified TileTune model.
 
@@ -46,31 +46,32 @@ validation case; training/validation shapes are disjoint from the final shapes.
 
 ## Configuration pool
 
-Use the proposed **512-config** Cartesian product without modification:
+The active pool contains **645 compiler-qualified configs**. Candidate axes are:
 
 | Parameter | Values |
 | --- | --- |
 | block_H | 1–16 inclusive |
-| num_stages | 0–7 inclusive |
+| num_stages | 0–15 inclusive |
 | threads | 32, 64, 128, 256 |
 
 The example's original grid is `block_H={1,2,4,8}`,
 `num_stages={0,1,2,3}`, `threads={128,256}`: **32 configs**.
-Every original config and the example's default are included. The expanded
-pool is 16 times the original grid. Config IDs and ordering are deterministic;
-compile/correctness failures remain outcomes, without pruning or replacement.
-Strict alpha=0.5 has a maximum budget of **256** per workload.
+Every original config and the example's default are included. Qualification
+retained 645 of 1,024 candidates across all five final shapes. The other 379
+failed compiler layout checks and are excluded from the active pool. The first
+512-candidate attempt retained only 325, so stage choices were extended through
+15, the last position in a 16-token sub-chunk. No kernel algorithm was changed.
+
+Config IDs and ordering are deterministic. Strict alpha=0.5 has a maximum
+budget of **322** per workload, with complete score ties kept together.
 
 ## Execution and provenance
 
 `kernel.py` supplies inputs and calls the example; `reference.py` defines the
 independent numerical check. Both output tensors are checked. Source fingerprints
-name the intra example. Contract version 3 / space version 8 replace the
-chunk-output operation; its saved results and heuristics remain historical and
-cannot serve as intra-chunk oracles.
+name the intra example. Saved results require matching kernel and pool identities.
 
-Carver's existing `KDAChunkTemplate` describes chunk output. Intra-chunk Carver
-requests report unsupported instead of using that unrelated model. This does
+Intra-chunk Carver requests report unsupported. This does
 not affect the three brute-force/TileTune experiments.
 
 ```bash
@@ -82,13 +83,11 @@ See the [three-run plan](../H200_THREE_RUN_PLAN.md) for the 128-worker H200 stud
 
 ## H200 validation
 
-The expanded pool was checked against both the pre-migration example grid and
-the B200 pool: all 32 original configs are present, and the B200 cases/pool match.
-Both outputs passed H200 correctness checks for all five final shapes, plus
-FP16/BF16 head-tail and mask checks. Eight original-pool configs compiled in one
-group and passed both numerical checks and the H200 post-compile resource policy.
+[The compilation certificate](../compilation/kda.json) covers every active config
+on all five final workloads using SM90a and the recorded compiler. It also
+checks that all 32 original configs remain included. GPU execution was disabled.
 
-CPU analysis of all 2,560 final KDA candidates produced finite memory scores;
-strict alpha=0.5 selected 256 per workload. The unified analyzer was unchanged.
-These checks establish integration and score coverage. Exhaustive oracle
-collection and oracle-retention validation remain part of the planned study.
+Earlier integration checks covered both outputs and representative original
+configs; they are not an exhaustive correctness or ranking validation of this
+new pool. Numerical correctness, oracle collection, and alpha=0.5 retention
+remain part of the paused GPU study. TileTune's unified analyzer is unchanged.

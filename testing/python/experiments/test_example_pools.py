@@ -11,8 +11,8 @@ from experiments.families import family_module
 from experiments.suite import core_cases, study_plan
 
 COUNTS = {
-    "attention": 576,
-    "kda_chunk_intra_token_parallel": 512,
+    "attention": 512,
+    "kda_chunk_intra_token_parallel": 645,
     "gemm_fp8": 576,
     "grouped_gemm": 576,
 }
@@ -54,6 +54,7 @@ def test_explicit_native_configs_must_select_from_same_pool(w):
 def test_every_example_config_and_explicit_default_is_included():
     from examples.flash_attention.example_mha_fwd_bshd import get_configs as fa_configs
     from examples.kda.chunk_intra_token_parallel import get_configs as kda_configs
+    from examples.gemm_fp8.example_gemm_fp8_tiletune import get_configs as fp8_configs
 
     fa = family_module("attention", "spaces").get_configs()
     kda = family_module("kda_chunk_intra_token_parallel", "spaces").get_configs()
@@ -65,11 +66,13 @@ def test_every_example_config_and_explicit_default_is_included():
     assert all(c in kda for c in kda_configs())
     assert dict(block_H=1, num_stages=1, threads=128) in kda
     assert {c["block_H"] for c in kda} == set(range(1, 17))
-    assert {c["num_stages"] for c in kda} == set(range(8))
+    assert {c["num_stages"] for c in kda} == set(range(16))
     assert {c["threads"] for c in kda} == {32, 64, 128, 256}
     assert len(fp8) == COUNTS["gemm_fp8"]
-    assert {c["block_K"] for c in fp8} == {128}
-    assert dict(block_M=64, block_N=128, block_K=128, num_stages=1, threads=128) in fp8
+    assert len(fp8_configs()) == 288
+    assert all(c in fp8 for c in fp8_configs())
+    assert {c["block_K"] for c in fp8} == {32, 64}
+    assert dict(block_M=128, block_N=128, block_K=64, num_stages=3, threads=128, enable_rasteration=False) in fp8
 
 
 def test_every_case_split_and_frozen_manifest_use_the_single_pool():
@@ -83,7 +86,7 @@ def test_every_case_split_and_frozen_manifest_use_the_single_pool():
         assert len(plan["subsets"]["hopper"][w.name]["indices"]) == COUNTS[w.op]
     smoke = study_plan("smoke", [Device("hopper", TARGETS["hopper"])])
     for w in core_cases("smoke"):
-        assert len(smoke["subsets"]["hopper"][w.name]["indices"]) == min(16, COUNTS.get(w.op, 3456))
+        assert len(smoke["subsets"]["hopper"][w.name]["indices"]) == min(16, COUNTS.get(w.op, 576))
 
 
 @pytest.mark.parametrize("op", ["kda_recurrent", "kda_chunk_o"])

@@ -1,18 +1,24 @@
-"""One 512-config pool using token-parallel KDA scheduling parameters."""
+"""Candidate KDA schedules; compilation qualification defines the final pool."""
 
 from experiments.utils.grid import grid
 
 
-def get_configs():
+def candidate_configs():
     return grid(
         block_H=list(range(1, 17)),
-        num_stages=list(range(8)),
+        num_stages=list(range(16)),
         threads=[32, 64, 128, 256],
     )
 
 
+def get_configs():
+    from experiments.utils.compiled_pool import compiled_configs
+
+    return compiled_configs("kda", candidate_configs())
+
+
 def legality_reason(workload, device, config):
-    # Attempt every declared candidate; retain actual compiler/check failures.
+    # The active pool is qualified before ranking; no model-time pruning.
     return None
 
 

@@ -122,7 +122,6 @@
       "examples/kda/FLA_KDA/fla_chunk_inter.py": "007c09fa7398b0cef662d360c6b49d9ac30bdf5d2e8656e34e8b72de0f3a5004",
       "examples/kda/FLA_KDA/fla_chunk_intra.py": "3df349bc2582f18d99b31d06c9154a3ef9fd199d42e5fd6545960bb3920afd69",
       "examples/kda/FLA_KDA/fla_chunk_intra_token_parallel.py": "841f6a0a6f7ffff1b89527d59d742a56664cdf607ab35f216213c88aa7297d60",
-      "examples/kda/FLA_KDA/fla_chunk_o.py": "2ce0f9925568d99a62a1d71cc7f719a75ed256f5b849e50a70c044039203f2a2",
       "examples/kda/FLA_KDA/fla_utils.py": "e69a16f5e1a7cc166efce3bce5c3e16e57c29c9e776585d8aa60986fb72217b5",
       "examples/kda/FLA_KDA/fla_wy_fast.py": "54b1aa0cb7449eccecb90f79a9c1ecdfcbec6169f9fb265a996f6d18cacb931d",
       "examples/kda/chunk_bwd_dqkwg.py": "428825997149a35d162ce4943e5f433a9589f7c549be5f36f36f9621be17aeb0",
@@ -133,7 +132,6 @@
       "examples/kda/chunk_delta_h_fwd.py": "629b4460febd4c78c697da3f19205d27c2a7434465c174f3e398fd5182120776",
       "examples/kda/chunk_inter_solve_fused.py": "fa7913bdb9dac2c6e24fc73ed35a4a76ba9cf7615dcd8cb41d913ce07a61f8b5",
       "examples/kda/chunk_intra_token_parallel.py": "9af3731bb3e5b3a053bfe772c0cf7800604e569e80a8604e94938cdb984fdb4a",
-      "examples/kda/chunk_o.py": "a1bfcdb3980f1b22ad950d07ec1a0e522a40d9fea84a36090a5f19ddebfb31d5",
       "examples/kda/test_utils_kda.py": "dbbfbdc3adcfb6f6c3d212bec5c5f9e2bf0b72c7cf98733ee7cb845f8c55f340",
       "examples/kda/wy_fast.py": "7f9949bc89951d5a9605ce8a9b9905d0d22321a2a45f0cd8ee25f2f33e92d307",
       "examples/kda/wy_fast_bwd.py": "623a43d5df8ab3ddb04ee3829c4c4df83eaeac3ff1cf640b508a0577c27bdd4c",
@@ -364,5 +362,6 @@
     "clocks.sm": "1830",
     "temperature.gpu": "29",
     "power.draw": "117.06"
-  }
+  },
+  "source_inventory_note": "Unrelated retired KDA source entries removed; original inventory remains in Git history."
 }

@@ -35,16 +35,16 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 8 gives each final operation exactly one `expanded` pool. Each pool
+Space version 9 gives each final operation exactly one `expanded` pool. Each pool
 uses the parameters declared in the common benchmark contract.
 The same complete domain is used for all cases and all native targets.
 
 | Family | Configs per case | Example coverage |
 | --- | ---: | --- |
-| [GEMM](../gemm/README.md) | 3,456 | All 288 autotune configs; 12× expansion |
-| [FlashAttention](../flash_attention/README.md) | 576 | Single autotune config and explicit 128/128 launch |
-| [KDA intra-chunk](../kda/README.md) | 512 | Includes all 32 example autotune configs |
-| [FP8 GEMM](../gemm_fp8/README.md) | 576 | Fixed 128-K blocks and explicit row scales |
+| [GEMM](../gemm/README.md) | 576 | All 288 original configs; finer N tiles |
+| [FlashAttention](../flash_attention/README.md) | 512 | Single autotune config and explicit 128/128 launch |
+| [KDA intra-chunk](../kda/README.md) | 645 | Includes all 32 example autotune configs |
+| [FP8 GEMM](../gemm_fp8/README.md) | 576 | All 288 original configs, including K tiles and rasterization |
 | [Grouped GEMM](../grouped_gemm/README.md) | 576 | Fixed 64-row tiles and native example knobs |
 
 Shapes, dtype, causal mode and chunk size are workload properties. They do not
@@ -194,9 +194,8 @@ published results are historical and do not measure this sampled protocol.
 candidate independently of TileTune analysis. The older `exhaustive` method
 still means exhaustive **report-only TileTune** analysis/measurement. The new
 Carver adapters map the exact supplied grids through one canonical template
-selector. Plain FP16/BF16 GEMM uses `MatmulTemplate`, FP8 GEMM uses the dedicated
-`FP8MatmulTemplate`, attention uses `FlashAttentionTemplate`, grouped GEMM uses
-`GroupedMatmulTemplate`, and KDA uses `KDAChunkTemplate`. Rejection of the
+selector. Plain FP16/BF16 GEMM uses `MatmulTemplate`, FP8 Carver support is deferred, attention uses `FlashAttentionTemplate`, grouped GEMM uses
+`GroupedMatmulTemplate`. KDA intra-chunk reports unsupported. Rejection of the
 entire pool produces `model_unavailable` with all candidate records and no
 replacement shortlist. See [model contracts](../model_contracts.md) for the
 remaining feasibility limits and approximations.
@@ -280,8 +279,7 @@ The KDA intra workload calls `examples/kda/chunk_intra_token_parallel.py`.
 BF16 Q/K and FP32 gates use (B,S,H,128); BF16 beta uses (B,S,H).
 Its BF16 Aqk/Akk outputs use (B,S,H,64)/(B,S,H,16). It computes sub-chunk
 causal coefficients, with gate preprocessing outside timing. Scheduling knobs
-are `block_H`, `num_stages` and `threads`. The existing chunk-output Carver
-template is not used for this operation; Carver reports unsupported.
+are `block_H`, `num_stages` and `threads`. Carver reports unsupported for this operation.
 
 The numerical tests in `test_example_kernels.py`, `test_expanded_kernels.py`
 and `test_kda_example.py` check program identity, final shapes, causal masking,
@@ -500,8 +498,8 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 
 `python -m experiments.suite --suite smoke --plan` plans five families
 with one representative shape per operation (five cases). Development uses twenty-five cases and up to 256
-configurations; final uses the complete `expanded` pools (GEMM 3,456,
-FlashAttention 576, KDA intra-chunk 512, FP8 GEMM 576 and grouped GEMM 576 per case) and three seeds. See
+configurations; final uses the complete `expanded` pools (GEMM 576,
+FlashAttention 512, KDA intra-chunk 645, FP8 GEMM 576 and grouped GEMM 576 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.
 

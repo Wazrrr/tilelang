@@ -1,17 +1,23 @@
-"""One 3,456-config expansion of the advanced example's 288-config grid."""
+"""H200 candidates expanding the original GEMM grid with finer N tiles."""
 
 from experiments.utils.grid import grid
 
 
-def get_configs():
+def candidate_configs():
     return grid(
-        block_M=[32, 64, 96, 128, 192, 256],
+        block_M=[64, 128, 256],
         block_N=[32, 64, 96, 128, 192, 256],
-        block_K=[16, 32, 48, 64],
-        num_stages=[0, 1, 2, 3, 4, 5],
+        block_K=[32, 64],
+        num_stages=[0, 1, 2, 3],
         thread_num=[128, 256],
         enable_rasteration=[True, False],
     )
+
+
+def get_configs():
+    from experiments.utils.compiled_pool import compiled_configs
+
+    return compiled_configs("gemm", candidate_configs())
 
 
 def support_reason(workload):
@@ -24,7 +30,7 @@ def support_reason(workload):
 
 
 def legality_reason(w, device, c):
-    # Compile every declared candidate; record actual compiler/correctness failures.
+    # The active pool is qualified before ranking; no model-time pruning.
     return None
 
 

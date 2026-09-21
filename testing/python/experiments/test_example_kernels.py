@@ -9,7 +9,7 @@ EXAMPLE_CONFIGS = {
     "gemm": dict(block_M=128, block_N=256, block_K=64, num_stages=3, thread_num=256, enable_rasteration=True),
     "attention": dict(block_M=64, block_N=64, num_stages=1, threads=128),
     "kda_chunk_intra_token_parallel": dict(block_H=4, num_stages=1, threads=128),
-    "gemm_fp8": dict(block_M=64, block_N=128, block_K=128, num_stages=1, threads=128),
+    "gemm_fp8": dict(block_M=64, block_N=128, block_K=64, num_stages=1, threads=128, enable_rasteration=False),
     "grouped_gemm": dict(block_M=64, block_N=128, block_K=64, num_stages=0, threads=128),
 }
 
@@ -53,18 +53,14 @@ def example_program(w, c):
             num_stages=c["num_stages"],
         )
     if w.op == "gemm_fp8":
-        from examples.gemm_fp8.example_blockscaled_gemm import blockscaled_gemm
-        from experiments.backend import FP8_COMPUTE_DTYPE
+        from examples.gemm_fp8.example_tilelang_gemm_fp8 import matmul
 
-        return blockscaled_gemm.get_tir(
+        return matmul.get_tir(
             M=p["m"],
             N=p["n"],
             K=p["k"],
-            block_M=c["block_M"],
-            block_N=c["block_N"],
-            num_stages=c["num_stages"],
-            threads=c["threads"],
-            compute_dtype=FP8_COMPUTE_DTYPE,
+            dtype=w.dtype,
+            **c,
         )
     from examples.grouped_gemm.example_grouped_gemm_fwd import grouped_gemm
 
@@ -91,7 +87,7 @@ def test_expanded_retains_every_advanced_example_configuration(target):
     d = Device(target, TARGETS[target])
     for w in core_cases("final")[:2]:
         pool = configurations(w, d)
-        assert len(pool) == 3456
+        assert len(pool) == 576
         for c in get_configs(w.parameters["m"], w.parameters["n"], w.parameters["k"]):
             assert c in pool
 
