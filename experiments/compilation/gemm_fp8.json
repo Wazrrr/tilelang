@@ -589,25 +589,21 @@
     575
   ],
   "kernel_sources": {
-    "experiments/gemm_fp8/cases.py": "3f4899811985f5a207cb55b606be9a39f6881ff186709609c79acc583de3e5fd",
-    "experiments/gemm_fp8/kernel.py": "8e65084fc9a9d5f3e6f0b8763ee6e01e019d77cb33687a15c09f1c2bd815541d",
     "examples/gemm_fp8/example_gemm_fp8_tiletune.py": "aec25f1286a22c7c6af8647c9c46be46dd810757245fc0502e9c8ab17976d7e7",
-    "examples/gemm_fp8/example_tilelang_gemm_fp8.py": "ef34b29aef78c2258f162f3d4fcc6e83301b676714045c8a7a4299ea87017653"
+    "examples/gemm_fp8/example_tilelang_gemm_fp8.py": "ef34b29aef78c2258f162f3d4fcc6e83301b676714045c8a7a4299ea87017653",
+    "experiments/gemm_fp8/cases.py": "3f4899811985f5a207cb55b606be9a39f6881ff186709609c79acc583de3e5fd",
+    "experiments/gemm_fp8/kernel.py": "d511f27f53ef51d16f30be33cfa90764ce8f0c3dfe95a26c2066a19f48110950"
   },
   "compiler_libraries": {
-    "build/lib/libcuda_stub.so": "9b5a2433f7ae05778743902fef16854e3b33aa823a5a240fd2bf115b83d5915a",
-    "build/lib/libcudart_stub.so": "46d8c50d55904e7042028b19762f537f96e51db3bb702b30de4a5ef3f262049c",
-    "build/lib/libnvrtc_stub.so": "8da95343ff2b2ca7a487284efdc39a96c21bbc61985c7edfcf9275554c097ea3",
     "build/lib/libstub_cuda.so": "91996d3656017c94ebc45db9c575bd46c1857995d7a68b7c6098202b0a14350d",
     "build/lib/libstub_cudart.so": "f545ab6eed0a14000d673a4458497e662c7c9a317067ddc013c36e7e5a9228cc",
     "build/lib/libstub_nvrtc.so": "c595a9780e85b94fd86811133bd74c7ea107e26939e64ae49a77e40f27247d19",
-    "build/lib/libtilelang.so": "60ae4d1b170a8f8b8f8c802006365c166e5018154709ae49b742790d8e853c5c",
-    "build/lib/libtvm.so": "629eca63e8e8f1ce91fe83f16d714705037fe4f3107359a71d193a03fb074228",
-    "build/lib/libtvm_compiler.so": "b5131a40f8b37abce8fd29dab2fb4cb7b27119047249f7c90e7547d5694b9cc4",
-    "build/lib/libtvm_ffi.so": "19bb289c596c544408fd89a0f57c7f2d86ac3623f1c49f011a2a70a19da4fec1",
-    "build/lib/libtvm_runtime.so": "aa093eee7cf8ce4eaad29ae4a4be9d3a414153e35b074a929f60207df84bf68e",
+    "build/lib/libtilelang.so": "29fd10862d453a01099af11f5441078dfa290d39cafc6af7203c9470b22857a9",
+    "build/lib/libtvm_compiler.so": "f0fad4ba7dde7e805c35f298a3e7f74a20021bbab550b72ffb7c17e933d74e6a",
+    "build/lib/libtvm_ffi.so": "2683b568294a34cefd86ab786818600027b3d0aa53bec669a1e45b5e29415271",
+    "build/lib/libtvm_runtime.so": "7d95e53695d181c9a047995925a41d96609124b6c46d78b352e0fa904f380775",
     "build/lib/libz3.so": "56d9977b9276bcb8cda9973a14058fcaa9f3bfee14ed57408b9faacd76d4d8f3",
-    "build/lib/tilelang_cython_wrapper.abi3.so": "b7f6b30f26b30af6db97569781dbda47e688d4f642f063aad7280fc0be20b222"
+    "build/lib/tilelang_cython_wrapper.cpython-311-x86_64-linux-gnu.so": "940a0ca266ecb36ea623dfc21ea1de2b7ea3ab931b163400bff3308e4246425b"
   },
   "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Tue_May_27_02:21:03_PDT_2025\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0\n",
   "workloads": [
@@ -699,6 +695,6 @@
       "records_sha256": "22a9db510466d299439c5302e82a8d817d013cd7e68e5739a761526f29bc1977"
     }
   },
-  "evidence_directory": "/m-coriander/coriander/tmp/h200-compile-valid-v1/gemm_fp8",
-  "evidence_manifest_sha256": "b4db3b07d5bfa4d94804e1c767fe5f56fe7cc99e89b52de39f6bf70066a85335"
+  "evidence_directory": "/m-coriander/coriander/ziren/code/tilelang-dev-h200-new/experiments/results/compilation-gemm-fp8-20260921T2352Z",
+  "evidence_manifest_sha256": "34f5308c1198cc053a7be1fe59c23cbdcca756931223c4c4732bace72d838880"
 }
