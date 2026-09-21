@@ -87,15 +87,24 @@ def test_plan_is_75_resource_scheduled_workloads_with_identical_pools():
 def test_four_gpu_limit_respects_visibility_and_frozen_order(monkeypatch):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     observation = dict(gpus=devices(), processes=[])
+    assert [g["index"] for g in h200.select_gpus(observation, count=1)] == ["0"]
+    assert [g["index"] for g in h200.select_gpus(observation, [3], count=1)] == ["3"]
     assert [g["index"] for g in h200.select_gpus(observation)] == ["0", "1", "2", "3"]
     assert [g["index"] for g in h200.select_gpus(observation, [3, 2, 1, 0])] == ["3", "2", "1", "0"]
     for requested in ([0, 1, 2, 3, 4], [0, 1, 2], [0, 1, 1, 2], [0, 1, 2, 10]):
         with pytest.raises(ValueError):
             h200.select_gpus(observation, requested)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
+    assert [g["index"] for g in h200.select_gpus(observation, count=1)] == ["4"]
     assert [g["index"] for g in h200.select_gpus(observation)] == ["4", "5", "6", "7"]
     with pytest.raises(ValueError):
         h200.select_gpus(observation, [0, 1, 2, 3])
+
+
+def test_e1_only_plan_requires_one_gpu_and_skips_cross_experiment_audit(tmp_path):
+    plan = h200.study_plan(experiments=["E1"])
+    assert len(plan) == 25 and {item["gpu_count"] for item in plan} == {1}
+    assert h200.oracle_audit(tmp_path, plan) is None
 
 
 def test_e1_concurrency_comes_from_disjoint_cpu_and_gpu_slots(tmp_path):

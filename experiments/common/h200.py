@@ -1,6 +1,7 @@
-"""Resource-scheduled, resumable H200 E1/E2/E3 study on four GPUs.
+"""Resource-scheduled, resumable H200 E1/E2/E3 study on up to four GPUs.
 
 python -m experiments.common.h200 --plan
+python -m experiments.common.h200 --gpus 0 --experiments E1 --output experiments/results/h200-e1
 python -m experiments.common.h200 --gpus 0 1 2 3 --output experiments/results/h200-study
 python -m experiments.common.h200 --gpus 0 1 2 3 --output experiments/results/h200-study --resume
 """
@@ -85,21 +86,23 @@ def study_plan(*, workloads=None, experiments=None, preflight=False):
     return rows
 
 
-def select_gpus(observation, requested=None):
+def select_gpus(observation, requested=None, *, count=4):
     from experiments.utils.monitor import visible_gpus
 
+    if count not in (1, 4):
+        raise ValueError("the H200 study supports one-GPU E1 or four-GPU E2/E3 allocations")
     visible = visible_gpus(observation)
     if requested is not None:
-        if len(requested) != 4 or len(set(requested)) != 4:
-            raise ValueError("the study requires exactly four distinct GPU indices")
+        if len(requested) != count or len(set(requested)) != count:
+            raise ValueError(f"the requested experiment phases require exactly {count} distinct GPU indices")
         by_index = {int(g["index"]): g for g in visible}
         if set(requested) - by_index.keys():
             raise ValueError("requested GPUs are not all visible")
         selected = [by_index[i] for i in requested]
     else:
-        selected = [g for g in visible if "H200" in g["name"]][:4]
-    if len(selected) != 4 or len({g["name"] for g in selected}) != 1 or any("H200" not in g["name"] for g in selected):
-        raise ValueError("four matching H200 GPUs are required")
+        selected = [g for g in visible if "H200" in g["name"]][:count]
+    if len(selected) != count or len({g["name"] for g in selected}) != 1 or any("H200" not in g["name"] for g in selected):
+        raise ValueError(f"{count} matching H200 GPU(s) are required")
     return [{key: gpu[key] for key in ("index", "uuid", "name", "compute_cap")} for gpu in selected]
 
 
@@ -424,7 +427,7 @@ def run_queue(root, plan, gpus, cpu_pools, lease_fds, *, run=None, max_contentio
 
 def oracle_audit(root, plan):
     """Retain every exact E1/E2 minimum and audit all four E3 retention stages."""
-    if any(item["settings"]["preflight"] for item in plan):
+    if any(item["settings"]["preflight"] for item in plan) or {item["experiment"] for item in plan} != set(MODES):
         return None
     by_name = {}
     for item in plan:
@@ -493,7 +496,7 @@ def oracle_audit(root, plan):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gpus", type=int, nargs=4)
+    parser.add_argument("--gpus", type=int, nargs="+")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--plan", action="store_true")
@@ -502,15 +505,23 @@ def main(argv=None):
     parser.add_argument("--experiments", choices=list(MODES), nargs="+")
     args = parser.parse_args(argv)
     plan = study_plan(workloads=args.workloads, experiments=args.experiments, preflight=args.preflight)
+    required_gpu_count = max(item["gpu_count"] for item in plan)
     if args.plan:
+        experiments = {item["experiment"] for item in plan}
+        concurrency = {}
+        if "E1" in experiments:
+            concurrency["E1"] = "min(allocated GPUs, available CPU pools)"
+        for experiment in ("E2", "E3"):
+            if experiment in experiments:
+                concurrency[experiment] = 1
         print(
             json.dumps(
                 dict(
                     plan=plan,
-                    max_gpus=4,
+                    max_gpus=required_gpu_count,
                     scheduling="resource_driven",
                     cpu_ids_per_workload=SETTINGS["workers"] + 8,
-                    concurrency=dict(E1="min(4 GPUs, available CPU pools)", E2=1, E3=1),
+                    concurrency=concurrency,
                 ),
                 indent=2,
             )
@@ -529,7 +540,7 @@ def main(argv=None):
     frozen = read(root / "manifest.json") if args.resume else None
     observed = snapshot()
     requested = args.gpus if args.gpus is not None else [int(g["index"]) for g in frozen["gpus"]] if frozen else None
-    gpus = select_gpus(observed, requested)
+    gpus = select_gpus(observed, requested, count=required_gpu_count)
     identity = dict(
         version=2,
         plan=plan,
