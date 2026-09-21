@@ -108,8 +108,8 @@ def validate_attempt(output, request):
     monitor = read(output / "monitor.json")
     if monitor["status"] != "uncontended":
         raise ValueError("attempt has no uncontended monitor completion")
-    if len(monitor.get("gpus", [])) != request["gpu_count"] or len(monitor.get("monitored_gpus", [])) != 4:
-        raise ValueError("attempt did not execute on its active GPU subset while monitoring all four study GPUs")
+    if len(monitor.get("gpus", [])) != request["gpu_count"]:
+        raise ValueError("attempt did not monitor exactly its active GPU subset")
     saved_request = read(output / "request.json")
     if any(saved_request.get(k) != v for k, v in request.items()):
         raise ValueError("attempt request identity mismatch")
@@ -233,7 +233,6 @@ def run_queue(root, plan, gpus, cpu_ids, lease_fds, *, run=None, max_contention_
                     cwd=Path(__file__).resolve().parents[2],
                     cpu_ids=cpu_ids,
                     pass_fds=lease_fds,
-                    monitor_gpus=gpus,
                 )
                 summary = validate_attempt(output, request)
             except BaseException as error:

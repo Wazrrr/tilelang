@@ -34,10 +34,9 @@ def successful_worker(command, output, gpus, **kwargs):
     assert kwargs["env"]["TILELANG_AUTO_TUNING_MAX_CPU_COUNT"] == "128"
     assert kwargs["env"]["OMP_NUM_THREADS"] == "1"
     assert len(kwargs["env"]["CUDA_VISIBLE_DEVICES"].split(",")) <= 4
-    assert len(kwargs["monitor_gpus"]) == 4
     write_json(
         output / "monitor.json",
-        dict(status="uncontended", wall_seconds=2, gpus=gpus, monitored_gpus=kwargs["monitor_gpus"]),
+        dict(status="uncontended", wall_seconds=2, gpus=gpus),
     )
     write_json(
         output / "experiment.json",

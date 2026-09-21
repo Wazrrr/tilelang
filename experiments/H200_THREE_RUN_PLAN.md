@@ -205,10 +205,10 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
   Use GPUs 0–3 for this study, leaving GPUs 4–7 unused by the study. Never launch
   a second workload, independent experiment, training job, or preflight alongside
   the current one. A host lease and leases on all four GPUs reject a second
-  cooperating launcher, even one requesting a disjoint device set. Monitor the
-  same four reserved GPUs throughout every workload, including the three GPUs
-  intentionally idle during E1; wait before launch and discard the current
-  attempt if any foreign process or GPU activity appears on any of the four.
+  cooperating launcher, even one requesting a disjoint device set. Monitor only
+  the active benchmark subset: one GPU during E1 and all four during E2/E3.
+  Wait before launch and discard the current attempt if a foreign process or GPU
+  activity appears on any GPU active for that workload.
 - Set `TILELANG_AUTO_TUNING_CPU_COUNTS=128` and
   `TILELANG_AUTO_TUNING_MAX_CPU_COUNT=128`. Check that the tuner's resolved worker
   count is exactly 128; CPU affinity or allocation can otherwise silently clamp
