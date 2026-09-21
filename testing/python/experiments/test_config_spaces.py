@@ -93,7 +93,7 @@ from dataclasses import replace
 from experiments.common.spec import *
 w = default_workloads()[0]
 assert w.config_space == 'expanded'
-assert len(configurations(w, Device('ampere', TARGETS['ampere']))) == 576
+assert len(configurations(w, Device('ampere', TARGETS['ampere']))) == 1920
 assert not {'torch','tilelang','xgboost','numpy'} & sys.modules.keys()
 """
     subprocess.run([sys.executable, "-c", code], check=True)

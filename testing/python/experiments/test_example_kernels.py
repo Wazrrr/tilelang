@@ -87,7 +87,7 @@ def test_expanded_retains_every_advanced_example_configuration(target):
     d = Device(target, TARGETS[target])
     for w in core_cases("final")[:2]:
         pool = configurations(w, d)
-        assert len(pool) == 576
+        assert len(pool) == 1920
         for c in get_configs(w.parameters["m"], w.parameters["n"], w.parameters["k"]):
             assert c in pool
 

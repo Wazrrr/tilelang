@@ -7,7 +7,7 @@ this contract.
 
 | Family / operation | Contract | Configurations per case |
 | --- | --- | ---: |
-| BF16 GEMM | BF16 A/B/C; FP32 accumulation; A=(M,K), B=(N,K) | 576 |
+| BF16 GEMM | BF16 A/B/C; FP32 accumulation; A=(M,K), B=(N,K) | 1,920 |
 | FP8 GEMM | E4M3 A/B/C; FP32 accumulation; A=(M,K), B=(N,K) | 576 |
 | Grouped GEMM | Packed BF16 A/B/C; FP32 accumulation; fixed 64-row scheduling tiles | 576 |
 | FlashAttention | BF16 forward; FP32 online softmax and accumulators | 512 |
@@ -19,7 +19,7 @@ NVCC and native-library versions, source hashes, original-grid inclusion, and
 per-workload evidence. This proves device compilation, not GPU execution,
 numerical correctness, post-compile-filter acceptance, or oracle retention.
 
-## Scheduling domains, space version 9
+## Scheduling domains, space version 10
 
 Every active pool contains more than 500 configurations and includes its example's original pool.
 Rows below describe candidate axes before measured compilation failures are removed. M/N/K and block_H
@@ -27,7 +27,7 @@ refer to scheduling tiles, not workload dimensions.
 
 | Operation | Tile choices | Threads | Stages | Other fixed/tuned settings |
 | --- | --- | --- | --- | --- |
-| BF16 GEMM | M: 64,128,256; N: 32,64,96,128,192,256; K: 32,64 | 128,256 | 0–3 | Rasterization on/off |
+| BF16 GEMM | M: 32,64,128 with N: 32,64,96,128,192,256 and K: 16,32,48,64; M=256 retains N: 32,64,96,128,192,256 and K: 32,64 | 128,256 | 0–5 for M≤128; 0–3 for M=256 | Rasterization on/off |
 | FP8 GEMM | M,N each: 64,128,256; K: 32,64 | 128,256 | 0–7 | Rasterization on/off |
 | Grouped GEMM | N: 32,64,96,128,192,256; K: 16,32,48,64,96,128 | 128,256 | 0–7 | M=64; fixed metadata |
 | Attention | M: 32,64,128,256; N: 16–256, step 16 | 128,256 | 0–7 | Workload causal flag |
@@ -38,7 +38,7 @@ KDA intra example contains 32. The active pools must contain every original
 configuration. Compilation qualification and numerical correctness are separate.
 Smoke/development use recorded subsets; final/full use the complete pools.
 
-FP8 contract version 4 and pool version 9 invalidate incompatible cached
+FP8 contract version 4 and pool version 10 invalidate incompatible cached
 measurements. Source fingerprints identify the actual example and adapter.
 
 ## Shapes

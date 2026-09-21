@@ -35,13 +35,13 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 9 gives each final operation exactly one `expanded` pool. Each pool
+Space version 10 gives each final operation exactly one `expanded` pool. Each pool
 uses the parameters declared in the common benchmark contract.
 The same complete domain is used for all cases and all native targets.
 
 | Family | Configs per case | Example coverage |
 | --- | ---: | --- |
-| [GEMM](../gemm/README.md) | 576 | All 288 original configs; finer N tiles |
+| [GEMM](../gemm/README.md) | 1,920 | All 288 original configs; expanded M/K/stage choices and finer N tiles |
 | [FlashAttention](../flash_attention/README.md) | 512 | Single autotune config and explicit 128/128 launch |
 | [KDA intra-chunk](../kda/README.md) | 645 | Includes all 32 example autotune configs |
 | [FP8 GEMM](../gemm_fp8/README.md) | 576 | All 288 original configs, including K tiles and rasterization |
@@ -498,7 +498,7 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 
 `python -m experiments.suite --suite smoke --plan` plans five families
 with one representative shape per operation (five cases). Development uses twenty-five cases and up to 256
-configurations; final uses the complete `expanded` pools (GEMM 576,
+configurations; final uses the complete `expanded` pools (GEMM 1,920,
 FlashAttention 512, KDA intra-chunk 645, FP8 GEMM 576 and grouped GEMM 576 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.

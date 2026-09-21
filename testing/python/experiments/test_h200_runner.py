@@ -68,7 +68,7 @@ def test_plan_is_75_serial_workloads_with_identical_pools():
         assert e1["configs"] == e2["configs"] == e3["configs"]
         assert [e["gpu_count"] for e in (e1, e2, e3)] == [1, 4, 4]
         assert e3["settings"]["group_size"] == 8
-    assert sum(len(p["configs"]) for p in plan[:25]) == 14425
+    assert sum(len(p["configs"]) for p in plan[:25]) == 21145
     preflight = h200.study_plan(preflight=True)
     assert len(preflight) == 15
     assert all(len(p["configs"]) == 8 for p in preflight if p["experiment"] != "E3")

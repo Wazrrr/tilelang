@@ -1,17 +1,28 @@
-"""H200 candidates expanding the original GEMM grid with finer N tiles."""
+"""H200 GEMM candidates qualified by compilation on every final workload."""
 
 from experiments.utils.grid import grid
 
 
 def candidate_configs():
-    return grid(
-        block_M=[64, 128, 256],
+    expanded = grid(
+        block_M=[32, 64, 128],
+        block_N=[32, 64, 96, 128, 192, 256],
+        block_K=[16, 32, 48, 64],
+        num_stages=[0, 1, 2, 3, 4, 5],
+        thread_num=[128, 256],
+        enable_rasteration=[True, False],
+    )
+    # Keep the complete block_M=256 portion of the previously qualified pool.
+    # The original example grid is therefore a subset of this candidate space.
+    block_m_256 = grid(
+        block_M=[256],
         block_N=[32, 64, 96, 128, 192, 256],
         block_K=[32, 64],
         num_stages=[0, 1, 2, 3],
         thread_num=[128, 256],
         enable_rasteration=[True, False],
     )
+    return expanded + block_m_256
 
 
 def get_configs():
