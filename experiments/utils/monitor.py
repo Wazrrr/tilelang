@@ -133,7 +133,7 @@ def cuda_device(device):
             os.environ["CUDA_VISIBLE_DEVICES"] = visible
 
 
-def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wait_idle=True):
+def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wait_idle=True, cpu_ids=None, pass_fds=()):
     """Reject the whole invocation if a foreign process is observed on any GPU.
 
     Logs and partial artifacts remain inspectable; callers must not publish them
@@ -143,18 +143,41 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
     output.mkdir(parents=True, exist_ok=True)
     process = None
     started = time.monotonic()
+    waiting_started = started
     previous_poll = None
     audit = dict(gpus=gpus, poll_interval_seconds=1, max_poll_gap_seconds=MAX_POLL_GAP_SECONDS, status="waiting")
+    cpu_monitor = None
+    quiet_samples = cpu_contention_samples = 0
+    if cpu_ids is not None:
+        from .isolation import CpuMonitor
+
+        cpu_monitor = CpuMonitor(cpu_ids)
+        audit.update(
+            cpu_ids=cpu_ids,
+            max_external_busy_cores=2,
+            max_iowait_cores=1,
+            max_steal_cores=0.1,
+            excessive_cpu_samples_required=2,
+            quiet_samples_required=5,
+        )
+    write_json(output / "monitor.json", audit)
     try:
         with (output / "gpu_observations.jsonl").open("a") as observations, (output / "worker.log").open("w") as log:
             while True:
                 poll_started = time.monotonic()
                 observed = snapshot()
+                cpu = cpu_monitor.sample(process.pid if process else None) if cpu_monitor else None
                 poll_finished = time.monotonic()
                 gap = poll_gap(previous_poll, poll_started, poll_finished)
                 previous_poll = poll_finished
                 delayed = gap > MAX_POLL_GAP_SECONDS
                 overloaded = host_overloaded(observed)
+                cpu_busy = cpu is not None and (
+                    not cpu["ready"] or cpu["external_busy_cores"] > 2 or cpu["iowait_cores"] > 1 or cpu["steal_cores"] > 0.1
+                )
+                cpu_contention_samples = cpu_contention_samples + 1 if cpu_busy else 0
+                if cpu is not None:
+                    observed["cpu_observation"] = cpu
                 observed["poll_gap_seconds"] = gap
                 foreign = [
                     p
@@ -166,19 +189,34 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
                 observations.flush()
                 if process is None:
                     busy = any(float(next(g for g in observed["gpus"] if g["uuid"] == gpu["uuid"])["utilization.gpu"]) > 5 for gpu in gpus)
-                    if foreign or busy or delayed or overloaded:
+                    if foreign or busy or delayed or overloaded or cpu_busy:
+                        quiet_samples = 0
                         if not wait_idle:
-                            raise RuntimeError("requested GPU is busy")
+                            raise RuntimeError("requested CPU/GPU resources are busy")
                         time.sleep(1)
                         continue
-                    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    quiet_samples += 1
+                    if cpu_monitor and quiet_samples < 5:
+                        time.sleep(1)
+                        continue
+                    process = subprocess.Popen(
+                        command,
+                        cwd=cwd,
+                        env=env,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        pass_fds=pass_fds,
+                    )
                     started = time.monotonic()
-                    audit.update(status="running", worker_pid=process.pid)
-                elif delayed or overloaded:
+                    audit.update(status="running", worker_pid=process.pid, idle_wait_seconds=started - waiting_started)
+                    write_json(output / "monitor.json", audit)
+                elif delayed or overloaded or cpu_contention_samples >= 2:
                     audit.update(
                         status="monitor_gap" if delayed else "host_contended",
                         observed_poll_gap_seconds=gap,
                         host_load_1m=observed.get("host_load_1m"),
+                        cpu_observation=cpu,
                     )
                     raise RuntimeError("monitoring gap or host overload; discard this invocation's measurements")
                 elif foreign:
@@ -193,8 +231,13 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
                     audit["status"] = "timeout"
                     raise TimeoutError(f"worker exceeded {timeout} seconds")
                 time.sleep(1)
+    except KeyboardInterrupt:
+        audit["status"] = "interrupted"
+        raise
     finally:
-        if process is not None and process.poll() is None:
+        if process is not None:
             stop_worker(process)
-        audit["wall_seconds"] = time.monotonic() - started
+        audit["wall_seconds"] = time.monotonic() - started if process is not None else 0
+        if process is None:
+            audit["idle_wait_seconds"] = time.monotonic() - waiting_started
         write_json(output / "monitor.json", audit)

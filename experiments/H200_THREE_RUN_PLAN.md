@@ -1,11 +1,12 @@
 # H200: exhaustive, multi-GPU, and pipelined TileTune experiments
 
-Status: planned; these three full sweeps have not been launched.
+Status: runner implemented; full-sweep results and oracle retention are pending.
 
 The grouped-compile recovery below is implemented and covered by focused
 failure-isolation tests and H200 pipeline/alpha tests in
-`testing/python/autotune/test_grouped_compile_fallback.py`. Experiment-runner
-wiring and the complete oracle-retention study remain to be executed.
+`testing/python/autotune/test_grouped_compile_fallback.py`. The sequential study
+runner is `python -m experiments.common.h200`; it wires the exact E1/E2/E3 modes
+and runs monitored preflights before the complete oracle-retention study.
 
 Use `dev-h200-new`, including grouped-compile recovery and the KDA intra-chunk
 migration. Freeze the actual code revision after the runner changes below. Use the current
@@ -97,6 +98,10 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
 - Use four idle H200 GPUs of the same model for E2/E3 and the first of those
   devices for E1. Bind explicit physical GPU UUIDs and record the logical mapping.
   Process workloads sequentially and experiments in E1, E2, E3 order.
+  Use GPUs 0–3 for this study, leaving GPUs 4–7 unused by the study. Never launch
+  a second workload, independent experiment, training job, or preflight alongside
+  the current one. A host lease and leases on all four GPUs reject a second
+  cooperating launcher, even one requesting a disjoint device set.
 - Set `TILELANG_AUTO_TUNING_CPU_COUNTS=128` and
   `TILELANG_AUTO_TUNING_MAX_CPU_COUNT=128`. Check that the tuner's resolved worker
   count is exactly 128; CPU affinity or allocation can otherwise silently clamp
@@ -106,8 +111,9 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
   `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`. Give each run a new output directory.
   Keep compiler options, authoritative example builders, inputs, references,
   tolerances and benchmark backend identical across the three experiments.
-- Fix input seed 123, event timing, 10 warmup iterations, 50 timing iterations,
-  and a 60-second per-candidate benchmark timeout. Preserve the same input and
+- Fix input seed 123, event timing, `warmup=10` ms, `rep=50` ms,
+  and a 60-second per-candidate benchmark timeout. These are the profiler's time
+  budgets; it determines iteration counts automatically. Preserve the same input and
   cache-conditioning behavior in all modes. Record those settings explicitly.
 - Keep memory diagnostics opt-in/off. E3 receives the same generic integer
   `input_values` metadata used by the existing runner, and queried H200 device
@@ -115,17 +121,65 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
 - Monitor GPU/process activity through `experiments.utils.monitor.run_monitored`.
   Discard and retry contaminated workload runs, preserving their logs. Record
   device UUIDs, clocks, driver/toolchain versions, source hashes and pool hashes.
+  Pin workers to one frozen set of sibling-complete CPU cores with at least 136
+  logical CPUs: 128 compiler workers plus eight CPUs of benchmark/runtime
+  headroom. Place the coordinator outside that set and set OpenMP, MKL,
+  OpenBLAS, NumExpr, TVM and Torch thread counts to one to prevent nested thread
+  pools. CPU affinity is not an exclusive OS reservation: sample CPU busy time
+  and subtract the worker process group's own CPU usage. Require five quiet
+  one-second samples before starting. Reject two consecutive samples exceeding
+  two external busy CPU cores, one I/O-wait core, or 0.1 stolen CPU cores. These
+  small allowances cover scheduler/monitor noise and are recorded in the audit.
+  Foreign GPU activity and monitor gaps invalidate the attempt immediately.
+  Never kill or reconfigure unrelated jobs. Contended attempts are retried at
+  most three times per invocation, waiting for quiet resources before each retry.
+
+## Sequential execution and interruption recovery
+
+```bash
+# Planning imports no CUDA/compiler packages and creates no results.
+python -m experiments.common.h200 --plan
+
+# Runs 15 small preflights, then the 75 full workload runs, one at a time.
+python -m experiments.common.h200 --gpus 0 1 2 3 \
+  --output experiments/results/h200-three-run-20260921
+
+# Same command and output, with --resume, after Ctrl-C/SIGTERM or a restart.
+python -m experiments.common.h200 --gpus 0 1 2 3 \
+  --output experiments/results/h200-three-run-20260921 --resume
+```
+
+Use the `tl` environment. The runner selects/binds the GPUs; a wrapper must not
+reduce CUDA visibility to one GPU. It runs preflight and full-sweep phases
+sequentially, with no background compilation from another workload. Preflight
+tries at most eight candidates per family/mode. E3 still analyzes/selects from
+the complete pool, then marks selected candidates beyond those eight as
+`preflight_omitted`; preflight results never establish an exhaustive oracle.
+
+The frozen manifest includes source/native-build identity, settings, complete
+ordered pools, interpreter, CPU affinity and GPU UUIDs. Resume rejects changed
+identities. Each workload has immutable numbered attempt directories and an
+atomic completion marker containing result hashes. Only a complete terminal
+outcome set with an uncontended monitor completion can be reused. SIGINT,
+SIGTERM and SIGHUP stop the current owned worker process group and preserve
+all earlier completed workloads. Worker parent-death cleanup and inherited
+lease descriptors prevent an orphaned worker from overlapping a new launcher.
+
+An interrupted or contaminated workload restarts from the beginning with cold
+caches. Partial compilation/benchmark logs remain available for diagnosis but
+are not spliced into a measured end-to-end run. This preserves valid timing
+comparisons. Atomic progress files report the phase, active workload/attempt and
+completed count. Stale partial attempts are ignored on resume; completed files
+are checked for identity, content hashes, counts, outcomes and selection budget.
+Queue/idle waits and discarded attempts remain separate from accepted tuning
+times. The final queue step writes the E1/E2 oracle-retention CSV and JSON.
 
 ## Runner preparation and execution order
 
-1. Extend `experiments/common/system.py` to support E3, reusing its monitored
-   multi-GPU orchestration and `common/run.py`'s TileTune configuration and
-   resource-policy setup. Its existing `baseline` and `multi_gpu` variants cover
-   E1 and E2. Its existing `combined` variant supplies pipeline, multi-GPU and
-   grouped compilation, but still needs TileTune enabled and group size 8 for
-   E3. `common/run.py` currently supports
-   memory alpha selection but does not pass multi-GPU/pipeline options to the
-   tuner. Wire the requested combination explicitly before execution.
+1. Use `experiments/common/h200.py` as the coordinator and
+   `experiments/common/system.py` as its fresh-process worker. The worker's
+   `baseline`, `multi_gpu` and `tiletune` modes implement E1/E2/E3. The older
+   `combined` ablation still does not imply TileTune; do not substitute it for E3.
 2. Make the runner save complete per-config outcomes and TileTune reports,
    including selection IDs, scores, equal-score tail ranks, effective resource
    policy, compiler resource counters, rejection reasons, correctness and
@@ -187,6 +241,25 @@ selected/rejected/success/failure counts and best latency. Include E3's complete
 analysis and selection cost in tuning time. Separate overlapping stage timings
 from elapsed wall time; do not sum parallel work as though it were serial.
 Keep verification and preflight costs separate from tuning costs.
+
+For any accompanying XGBoost comparison, include training in the primary
+end-to-end timing: training/validation sample collection (including compilation,
+correctness checks and benchmarking), feature preparation, model fitting with
+validation/early stopping, model loading, prediction/selection, and selected
+candidate compilation/checking/benchmarking. Measure elapsed wall time across
+these stages; do not substitute prediction-only timing or sum overlapping work.
+Report collection, fitting, and online tuning times separately as a breakdown.
+Keep held-out oracle collection and post-run winner verification separate from
+the method's end-to-end time, and never use held-out labels for training.
+
+Charge each shared training/validation collection and model-training run once
+in the suite total. Report its reuse scope and the online cost for each workload;
+any amortized per-workload figure must show the allocation explicitly. Reusing
+a frozen model must carry its recorded collection/training cost into a reported
+training-inclusive comparison, rather than treating training as free. If that
+cost is unavailable, mark training-inclusive timing incomplete. E1/E2/E3 remain
+the three modes above; this accounting rule applies when reporting an XGBoost
+baseline alongside them.
 
 Report shortlist quality against each exhaustive table using that table's own
 latencies, and report common-GPU winner remeasurements separately. E2/E3 compares
