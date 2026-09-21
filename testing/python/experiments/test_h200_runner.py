@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -30,6 +31,8 @@ def small_plan():
 def successful_worker(command, output, gpus, **kwargs):
     request = h200.read(output / "request.json")
     assert len(gpus) == request["gpu_count"]
+    assert [gpu["uuid"] for gpu in gpus] == request["gpu_uuids"]
+    assert kwargs["cpu_ids"] == request["cpu_ids"]
     assert kwargs["env"]["TILELANG_AUTO_TUNING_CPU_COUNTS"] == "64"
     assert kwargs["env"]["TILELANG_AUTO_TUNING_MAX_CPU_COUNT"] == "64"
     assert kwargs["env"]["OMP_NUM_THREADS"] == "1"
@@ -66,7 +69,7 @@ def successful_worker(command, output, gpus, **kwargs):
     )
 
 
-def test_plan_is_75_serial_workloads_with_identical_pools():
+def test_plan_is_75_resource_scheduled_workloads_with_identical_pools():
     plan = h200.study_plan()
     assert len(plan) == 75
     for index in range(25):
@@ -95,6 +98,91 @@ def test_four_gpu_limit_respects_visibility_and_frozen_order(monkeypatch):
         h200.select_gpus(observation, [0, 1, 2, 3])
 
 
+def test_e1_concurrency_comes_from_disjoint_cpu_and_gpu_slots(tmp_path):
+    plan = h200.study_plan(experiments=["E1"])[:4]
+    for item in plan:
+        item["indices"], item["configs"] = item["indices"][:2], item["configs"][:2]
+    barrier = threading.Barrier(3)
+    lock = threading.Lock()
+    state = dict(calls=0, active=0, maximum=0, assignments=[])
+
+    def concurrent_worker(command, output, gpus, **kwargs):
+        with lock:
+            ordinal = state["calls"]
+            state["calls"] += 1
+            state["active"] += 1
+            state["maximum"] = max(state["maximum"], state["active"])
+            state["assignments"].append((tuple(g["uuid"] for g in gpus), tuple(kwargs["cpu_ids"])))
+        try:
+            if ordinal < 3:
+                barrier.wait(timeout=5)
+            successful_worker(command, output, gpus, **kwargs)
+        finally:
+            with lock:
+                state["active"] -= 1
+
+    rows = h200.run_queue(tmp_path, plan, devices(4), [[0], [1], [2]], (), run=concurrent_worker)
+    assert len(rows) == 4 and state["maximum"] == 3
+    assert len({assignment[0] for assignment in state["assignments"][:3]}) == 3
+    assert len({assignment[1] for assignment in state["assignments"][:3]}) == 3
+
+
+def test_four_gpu_modes_remain_one_workload_at_a_time(tmp_path):
+    plan = h200.study_plan(experiments=["E2"])[:2]
+    for item in plan:
+        item["indices"], item["configs"] = item["indices"][:2], item["configs"][:2]
+    lock = threading.Lock()
+    state = dict(active=0, maximum=0)
+
+    def worker(command, output, gpus, **kwargs):
+        with lock:
+            state["active"] += 1
+            state["maximum"] = max(state["maximum"], state["active"])
+        try:
+            time.sleep(0.01)
+            successful_worker(command, output, gpus, **kwargs)
+        finally:
+            with lock:
+                state["active"] -= 1
+
+    rows = h200.run_queue(tmp_path, plan, devices(4), [[0], [1], [2]], (), run=worker)
+    assert len(rows) == 2 and state["maximum"] == 1
+
+
+def test_cpu_pool_selection_is_disjoint_and_keeps_siblings_together(monkeypatch):
+    class TopologyPath:
+        def __init__(self, value):
+            self.value = str(value)
+
+        def __truediv__(self, name):
+            return TopologyPath(f"{self.value}/{name}")
+
+        def read_text(self):
+            if self.value.endswith("physical_package_id"):
+                return "0"
+            cpu = int([part for part in self.value.split("/") if part.startswith("cpu") and part[3:].isdigit()][-1][3:])
+            return str(cpu // 2)
+
+    ticks = {cpu: (100, cpu, 0, 0) for cpu in range(12)}
+    monkeypatch.setattr(isolation.os, "sched_getaffinity", lambda pid: set(range(12)))
+    monkeypatch.setattr(isolation, "cpu_ticks", lambda cpus: ticks)
+    monkeypatch.setattr(isolation.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(isolation, "Path", TopologyPath)
+    pools = isolation.select_cpu_pools(2, 3, reserve=2)
+    assert list(map(len, pools)) == [4, 4, 4]
+    assert len(set().union(*map(set, pools))) == 12
+    for cpu in range(0, 12, 2):
+        assert any({cpu, cpu + 1} <= set(pool) for pool in pools)
+
+
+def test_monitor_stop_event_interrupts_wait_without_launching_worker(tmp_path):
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(InterruptedError, match="coordinator requested"):
+        monitor.run_monitored(["worker"], tmp_path, devices(1), stop_event=stop)
+    assert h200.read(tmp_path / "monitor.json")["status"] == "interrupted"
+
+
 def test_interrupt_then_resume_preserves_completed_work_and_restarts_partial(tmp_path):
     plan, calls = small_plan(), []
 
@@ -106,12 +194,12 @@ def test_interrupt_then_resume_preserves_completed_work_and_restarts_partial(tmp
         successful_worker(command, output, gpus, **kwargs)
 
     with pytest.raises(KeyboardInterrupt):
-        h200.run_queue(tmp_path, plan, devices(4), [0, 1], (), run=interrupted)
+        h200.run_queue(tmp_path, plan, devices(4), [[0, 1]], (), run=interrupted)
     first = tmp_path / "E1/gemm_decode/completed.json"
     before = first.read_bytes()
     assert not (tmp_path / "E1/gemm_prefill/completed.json").exists()
     assert h200.read(tmp_path / "progress.json")["status"] == "interrupted"
-    rows = h200.run_queue(tmp_path, plan, devices(4), [0, 1], (), run=successful_worker)
+    rows = h200.run_queue(tmp_path, plan, devices(4), [[0, 1]], (), run=successful_worker)
     assert first.read_bytes() == before
     assert len(rows) == 2 and rows[1]["attempt"].endswith("attempt-0002")
     assert (tmp_path / "E1/gemm_prefill/attempt-0001/summary.json").is_file()
@@ -120,14 +208,14 @@ def test_interrupt_then_resume_preserves_completed_work_and_restarts_partial(tmp
 
 def test_resume_rejects_changed_pool_or_corrupted_completed_artifact(tmp_path):
     plan = small_plan()[:1]
-    h200.run_queue(tmp_path, plan, devices(4), [0, 1], (), run=successful_worker)
+    h200.run_queue(tmp_path, plan, devices(4), [[0, 1]], (), run=successful_worker)
     changed = deepcopy(plan)
     changed[0]["configs"].reverse()
     with pytest.raises(ValueError, match="different request"):
-        h200.run_queue(tmp_path, changed, devices(4), [0, 1], (), run=successful_worker)
+        h200.run_queue(tmp_path, changed, devices(4), [[0, 1]], (), run=successful_worker)
     (tmp_path / "E1/gemm_decode/attempt-0001/outcomes.json").write_text("[]")
     with pytest.raises(ValueError, match="artifact changed"):
-        h200.run_queue(tmp_path, plan, devices(4), [0, 1], (), run=successful_worker)
+        h200.run_queue(tmp_path, plan, devices(4), [[0, 1]], (), run=successful_worker)
 
 
 def test_contention_retries_never_publish_rejected_timings(tmp_path):
@@ -140,7 +228,7 @@ def test_contention_retries_never_publish_rejected_timings(tmp_path):
             write_json(output / "monitor.json", dict(status="host_contended"))
             raise RuntimeError("competing CPU job")
 
-    rows = h200.run_queue(tmp_path, small_plan()[:1], devices(4), [0, 1], (), run=contended)
+    rows = h200.run_queue(tmp_path, small_plan()[:1], devices(4), [[0, 1]], (), run=contended)
     assert len(calls) == 2
     assert rows[0]["attempt"].endswith("attempt-0002")
     assert h200.read(calls[0] / "attempt.json")["status"] == "host_contended"
@@ -152,7 +240,7 @@ def test_no_completion_marker_on_incomplete_outcomes(tmp_path):
         write_json(output / "outcomes.json", [])
 
     with pytest.raises(ValueError, match="incomplete candidate"):
-        h200.run_queue(tmp_path, small_plan()[:1], devices(4), [0, 1], (), run=incomplete)
+        h200.run_queue(tmp_path, small_plan()[:1], devices(4), [[0, 1]], (), run=incomplete)
     assert not (tmp_path / "E1/gemm_decode/completed.json").exists()
 
 

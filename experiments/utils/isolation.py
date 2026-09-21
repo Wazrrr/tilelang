@@ -1,4 +1,4 @@
-"""Linux host/device leases and CPU observations for sequential measurements."""
+"""Linux host/device leases and CPU observations for isolated measurements."""
 
 from contextlib import contextmanager, ExitStack
 import ctypes
@@ -106,11 +106,15 @@ class CpuMonitor:
         )
 
 
-def select_cpu_ids(workers, *, reserve=8):
-    """Choose quiet sibling-complete cores, leaving room for benchmark threads."""
+def select_cpu_pools(workers, count, *, reserve=8):
+    """Choose disjoint quiet sibling-complete CPU pools for concurrent workloads."""
     available = sorted(os.sched_getaffinity(0))
-    if len(available) < workers + reserve:
-        raise RuntimeError(f"need {workers + reserve} visible logical CPUs for {workers} workers plus benchmark/monitor headroom")
+    per_pool = workers + reserve
+    if count < 1 or len(available) < count * per_pool:
+        raise RuntimeError(
+            f"need {count * per_pool} visible logical CPUs for {count} workloads, "
+            f"each with {workers} workers plus {reserve} benchmark/monitor CPUs"
+        )
     before = cpu_ticks(available)
     time.sleep(1)
     after = cpu_ticks(available)
@@ -123,12 +127,20 @@ def select_cpu_ids(workers, *, reserve=8):
     def activity(group):
         return sum(after[c][1] - before[c][1] for c in group) / max(1, sum(after[c][0] - before[c][0] for c in group))
 
-    selected = []
+    pools = [[] for _ in range(count)]
     for group in sorted(groups.values(), key=lambda group: (activity(group), group)):
-        selected.extend(group)
-        if len(selected) >= workers + reserve:
-            return sorted(selected)
-    raise RuntimeError("insufficient CPU topology")
+        candidates = [i for i, pool in enumerate(pools) if len(pool) < per_pool]
+        if not candidates:
+            return [sorted(pool) for pool in pools]
+        pools[min(candidates, key=lambda i: (len(pools[i]), i))].extend(group)
+    if all(len(pool) >= per_pool for pool in pools):
+        return [sorted(pool) for pool in pools]
+    raise RuntimeError("insufficient sibling-complete CPU topology")
+
+
+def select_cpu_ids(workers, *, reserve=8):
+    """Choose one quiet sibling-complete CPU pool."""
+    return select_cpu_pools(workers, 1, reserve=reserve)[0]
 
 
 def prepare_worker(cpu_ids, parent_pid):

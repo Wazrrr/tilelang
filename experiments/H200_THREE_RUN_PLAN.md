@@ -6,7 +6,7 @@ automatically. Full-sweep results and oracle retention are pending.
 
 The grouped-compile recovery below is implemented and covered by focused
 failure-isolation tests and H200 pipeline/alpha tests in
-`testing/python/autotune/test_grouped_compile_fallback.py`. The sequential study
+`testing/python/autotune/test_grouped_compile_fallback.py`. The resource-scheduled study
 runner is `python -m experiments.common.h200`; it wires the exact E1/E2/E3 modes
 and runs monitored preflights before the complete oracle-retention study.
 
@@ -20,11 +20,11 @@ oracle retention for this BF16/original-FP8 suite.
 
 Run all 25 final workloads once per experiment: 75 workload runs altogether.
 
-| Experiment | Selection | Compiler workers | Benchmark GPUs | Timing | Pipeline | Grouped compilation | Post-compile policy |
-| --- | --- | ---: | ---: | --- | --- | --- | --- |
-| E1: exhaustive, one GPU | Complete pool | 64 | 1 | CUPTI | Off | Off | No pruning; defines the one-GPU oracle |
-| E2: exhaustive, four GPUs | Complete pool | 64 | 4 | CUPTI | Off | Off | No pruning; defines the four-GPU oracle |
-| E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 64 | 4 | CUPTI | On | On, size 8 | Enforced after compilation |
+| Experiment | Selection | Compiler workers/workload | Benchmark GPUs/workload | Concurrent workloads | Timing | Pipeline | Grouped compilation | Post-compile policy |
+| --- | --- | ---: | ---: | ---: | --- | --- | --- | --- |
+| E1: exhaustive, one GPU | Complete pool | 64 | 1 | Resource-derived; 3 on this 256-CPU node | CUPTI | Off | Off | No pruning; defines the one-GPU oracle |
+| E2: exhaustive, four GPUs | Complete pool | 64 | 4 | 1 | CUPTI | Off | Off | No pruning; defines the four-GPU oracle |
+| E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 64 | 4 | 1 | CUPTI | On | On, size 8 | Enforced after compilation |
 
 Multi-GPU means distributing candidate benchmarks within each workload through
 `AutoTuner.run(benchmark_multi_gpu=True, benchmark_devices=[0,1,2,3])`.
@@ -199,16 +199,18 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
 
 ## Shared measurement settings
 
-- Use four idle H200 GPUs of the same model for E2/E3 and the first of those
-  devices for E1. Bind explicit physical GPU UUIDs and record the logical mapping.
-  Process workloads sequentially and experiments in E1, E2, E3 order.
-  Use GPUs 0–3 for this study, leaving GPUs 4–7 unused by the study. Never launch
-  a second workload, independent experiment, training job, or preflight alongside
-  the current one. A host lease and leases on all four GPUs reject a second
-  cooperating launcher, even one requesting a disjoint device set. Monitor only
-  the active benchmark subset: one GPU during E1 and all four during E2/E3.
-  Wait before launch and discard the current attempt if a foreign process or GPU
-  activity appears on any GPU active for that workload.
+- Use four idle H200 GPUs of the same model. Each E1 workload receives one of
+  those devices; every E2/E3 workload receives all four. Bind explicit physical
+  GPU UUIDs and record the logical mapping.
+  Run experiment phases in E1, E2, E3 order. Within a phase, derive concurrency
+  from disjoint CPU/GPU slots rather than an arbitrary workload cap. Each E1
+  workload needs one GPU and one 72-CPU pool, so this 256-CPU/four-GPU node runs
+  three E1 workloads concurrently. E2/E3 workloads each need all four GPUs, so
+  their resource-derived concurrency is one. Use GPUs 0–3 for this study, leaving
+  GPUs 4–7 unused. A host lease and leases on all four GPUs reject a second
+  cooperating experiment launcher. Monitor each workload's active GPU subset.
+  Wait before launch and discard that attempt if a foreign process or GPU activity
+  appears on any GPU assigned to it.
 - Set `TILELANG_AUTO_TUNING_CPU_COUNTS=64` and
   `TILELANG_AUTO_TUNING_MAX_CPU_COUNT=64`. Check that the tuner's resolved worker
   count is exactly 64; CPU affinity or allocation can otherwise silently clamp
@@ -232,9 +234,10 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
 - Monitor GPU/process activity through `experiments.utils.monitor.run_monitored`.
   Discard and retry contaminated workload runs, preserving their logs. Record
   device UUIDs, clocks, driver/toolchain versions, source hashes and pool hashes.
-  Pin workers to one frozen set of sibling-complete CPU cores with at least 72
-  logical CPUs: 64 compiler workers plus eight CPUs of benchmark/runtime
-  headroom. Place the coordinator outside that set and set OpenMP, MKL,
+  Pin each concurrent workload to its own frozen sibling-complete set of at least
+  72 logical CPUs: 64 compiler workers plus eight CPUs of benchmark/runtime
+  headroom. On this node, freeze three disjoint pools (216 CPUs total) and place
+  the coordinator on the remaining CPUs. Set OpenMP, MKL,
   OpenBLAS, NumExpr, TVM and Torch thread counts to one to prevent nested thread
   pools. CPU affinity is not an exclusive OS reservation: sample CPU busy time
   and subtract the worker process group's own CPU usage. Require five quiet
@@ -245,13 +248,13 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
   Never kill or reconfigure unrelated jobs. Contended attempts are retried at
   most three times per invocation, waiting for quiet resources before each retry.
 
-## Sequential execution and interruption recovery
+## Resource-scheduled execution and interruption recovery
 
 ```bash
 # Planning imports no CUDA/compiler packages and creates no results.
 python -m experiments.common.h200 --plan
 
-# Runs 15 small preflights, then the 75 full workload runs, one at a time.
+# Runs 15 small preflights, then all 75 full workload runs with resource-derived concurrency.
 python -m experiments.common.h200 --gpus 0 1 2 3 \
   --output experiments/results/h200-three-run-20260921
 
@@ -262,7 +265,8 @@ python -m experiments.common.h200 --gpus 0 1 2 3 \
 
 Use the `tl` environment. The runner selects/binds the GPUs; a wrapper must not
 reduce CUDA visibility to one GPU. It runs preflight and full-sweep phases
-sequentially, with no background compilation from another workload. Preflight
+without overlap. Within E1 it uses disjoint CPU/GPU slots concurrently; E2 and
+E3 remain one workload at a time because each occupies all four GPUs. Preflight
 tries at most eight candidates per family/mode. E3 still analyzes/selects from
 the complete pool, then marks selected candidates beyond those eight as
 `preflight_omitted`; preflight results never establish an exhaustive oracle.
@@ -276,14 +280,14 @@ ordered pools, interpreter, CPU affinity and GPU UUIDs. Resume rejects changed
 identities. Each workload has immutable numbered attempt directories and an
 atomic completion marker containing result hashes. Only a complete terminal
 outcome set with an uncontended monitor completion can be reused. SIGINT,
-SIGTERM and SIGHUP stop the current owned worker process group and preserve
-all earlier completed workloads. Worker parent-death cleanup and inherited
-lease descriptors prevent an orphaned worker from overlapping a new launcher.
+SIGTERM and SIGHUP signal every active resource slot and preserve all earlier
+completed workloads. Worker parent-death cleanup and inherited lease descriptors
+prevent an orphaned worker from overlapping a new launcher.
 
-An interrupted or contaminated workload restarts from the beginning with cold
+Each interrupted or contaminated workload restarts from the beginning with cold
 caches. Partial compilation/benchmark logs remain available for diagnosis but
 are not spliced into a measured end-to-end run. This preserves valid timing
-comparisons. Atomic progress files report the phase, active workload/attempt and
+comparisons. Atomic progress files report the phase, all active workloads and
 completed count. Stale partial attempts are ignored on resume; completed files
 are checked for identity, content hashes, counts, outcomes and selection budget.
 Queue/idle waits and discarded attempts remain separate from accepted tuning

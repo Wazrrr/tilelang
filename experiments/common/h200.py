@@ -1,4 +1,4 @@
-"""Sequential, resumable H200 E1/E2/E3 study on one fixed set of four GPUs.
+"""Resource-scheduled, resumable H200 E1/E2/E3 study on four GPUs.
 
 python -m experiments.common.h200 --plan
 python -m experiments.common.h200 --gpus 0 1 2 3 --output experiments/results/h200-study
@@ -108,7 +108,10 @@ def validate_attempt(output, request):
     monitor = read(output / "monitor.json")
     if monitor["status"] != "uncontended":
         raise ValueError("attempt has no uncontended monitor completion")
-    if len(monitor.get("gpus", [])) != request["gpu_count"]:
+    if (
+        len(monitor.get("gpus", [])) != request["gpu_count"]
+        or [gpu.get("uuid") for gpu in monitor.get("gpus", [])] != request.get("gpu_uuids")
+    ):
         raise ValueError("attempt did not monitor exactly its active GPU subset")
     saved_request = read(output / "request.json")
     if any(saved_request.get(k) != v for k, v in request.items()):
@@ -179,112 +182,243 @@ def completed_attempt(case_dir, request):
     return output
 
 
-def run_queue(root, plan, gpus, cpu_ids, lease_fds, *, run=None, max_contention_retries=3, code_identity=None):
-    from experiments.utils.monitor import run_monitored
-
-    run = run or run_monitored
-    rows = []
-    for item in plan:
-        request = dict(item, cpu_ids=cpu_ids, source_identity=code_identity)
-        case_dir = root / item["experiment"] / item["workload"]["name"]
-        case_dir.mkdir(parents=True, exist_ok=True)
-        output = completed_attempt(case_dir, request)
-        retries = 0
-        while output is None:
-            number = max([int(p.name.split("-")[1]) for p in case_dir.glob("attempt-*") if p.is_dir()] or [0]) + 1
-            output = case_dir / f"attempt-{number:04d}"
-            output.mkdir()
-            active = gpus[: item["gpu_count"]]
-            write_json(output / "request.json", dict(request, parent_pid=os.getpid()))
-            write_json(
-                root / "progress.json",
-                dict(
-                    status="running",
-                    completed=len(rows),
-                    total=len(plan),
-                    active=dict(experiment=item["experiment"], workload=item["workload"]["name"], attempt=str(output)),
-                ),
-            )
-            write_json(output / "attempt.json", dict(status="running", request_id=digest(request)))
-            temporary = output / "tmp"
-            temporary.mkdir()
-            env = dict(
-                os.environ,
-                CUDA_VISIBLE_DEVICES=",".join(g["uuid"] for g in active),
-                TILELANG_DISABLE_CACHE="1",
-                TILELANG_AUTO_TUNING_DISABLE_CACHE="1",
-                TILELANG_AUTO_TUNING_CPU_COUNTS=str(request["settings"]["workers"]),
-                TILELANG_AUTO_TUNING_MAX_CPU_COUNT=str(request["settings"]["workers"]),
-                TILELANG_AUTOTUNE_TIMING_LOG=str(output / "timings.tsv"),
-                TMPDIR=str(temporary),
-                OMP_NUM_THREADS="1",
-                MKL_NUM_THREADS="1",
-                OPENBLAS_NUM_THREADS="1",
-                NUMEXPR_NUM_THREADS="1",
-                TVM_NUM_THREADS="1",
-            )
-            print(f"{item['experiment']} {item['workload']['name']}: attempt {number}, {len(active)} GPU(s)", flush=True)
-            try:
-                run(
-                    [sys.executable, "-m", "experiments.common.system", "--worker", str(output / "request.json"), str(output)],
-                    output,
-                    active,
-                    env=env,
-                    cwd=Path(__file__).resolve().parents[2],
-                    cpu_ids=cpu_ids,
-                    pass_fds=lease_fds,
-                )
-                summary = validate_attempt(output, request)
-            except BaseException as error:
-                status = read(output / "monitor.json").get("status") if (output / "monitor.json").exists() else "failed"
-                status = "interrupted" if isinstance(error, KeyboardInterrupt) else status
-                if status not in RETRYABLE | {"interrupted", "timeout", "worker_failed"}:
-                    status = "failed"
-                write_json(output / "attempt.json", dict(status=status, error=str(error), request_id=digest(request)))
-                write_json(
-                    root / "progress.json",
-                    dict(status=status, completed=len(rows), total=len(plan), active=None, last_attempt=str(output), error=str(error)),
-                )
-                if status in RETRYABLE and retries < max_contention_retries:
-                    retries += 1
-                    print(f"Discarding contended attempt; waiting for quiet resources before retry {retries}.", flush=True)
-                    output = None
-                    continue
-                raise
-            files = [
-                "request.json",
-                "summary.json",
-                "monitor.json",
-                "outcomes.json",
-                "experiment.json",
-                "compilation.json",
-                "benchmarks.tsv",
-            ]
-            if item["experiment"] == "E3":
-                files += ["tiletune.json", "selection.json"]
-            write_json(output / "attempt.json", dict(status="completed", request_id=digest(request)))
-            write_json(
-                case_dir / "completed.json",
-                dict(request_id=digest(request), attempt=output.name, files={name: file_hash(output / name) for name in files}),
-            )
-        summary = read(output / "summary.json")
-        row = dict(
-            summary,
-            experiment=item["experiment"],
-            attempt=str(output.relative_to(root)),
-            worker_wall_seconds=read(output / "monitor.json").get("wall_seconds"),
+def _run_item(
+    root,
+    item,
+    active_gpus,
+    cpu_ids,
+    lease_fds,
+    *,
+    run,
+    stop_event,
+    max_contention_retries,
+    code_identity,
+):
+    """Run or recover one workload using one exclusive CPU/GPU resource slot."""
+    request = dict(item, cpu_ids=cpu_ids, gpu_uuids=[gpu["uuid"] for gpu in active_gpus], source_identity=code_identity)
+    case_dir = root / item["experiment"] / item["workload"]["name"]
+    case_dir.mkdir(parents=True, exist_ok=True)
+    output = completed_attempt(case_dir, request)
+    retries = 0
+    while output is None:
+        number = max([int(p.name.split("-")[1]) for p in case_dir.glob("attempt-*") if p.is_dir()] or [0]) + 1
+        output = case_dir / f"attempt-{number:04d}"
+        output.mkdir()
+        write_json(output / "request.json", dict(request, parent_pid=os.getpid()))
+        write_json(output / "attempt.json", dict(status="running", request_id=digest(request)))
+        temporary = output / "tmp"
+        temporary.mkdir()
+        env = dict(
+            os.environ,
+            CUDA_VISIBLE_DEVICES=",".join(g["uuid"] for g in active_gpus),
+            TILELANG_DISABLE_CACHE="1",
+            TILELANG_AUTO_TUNING_DISABLE_CACHE="1",
+            TILELANG_AUTO_TUNING_CPU_COUNTS=str(request["settings"]["workers"]),
+            TILELANG_AUTO_TUNING_MAX_CPU_COUNT=str(request["settings"]["workers"]),
+            TILELANG_AUTOTUNE_TIMING_LOG=str(output / "timings.tsv"),
+            TMPDIR=str(temporary),
+            OMP_NUM_THREADS="1",
+            MKL_NUM_THREADS="1",
+            OPENBLAS_NUM_THREADS="1",
+            NUMEXPR_NUM_THREADS="1",
+            TVM_NUM_THREADS="1",
         )
-        rows.append(row)
-        baseline = next((r for r in rows if r["workload"] == row["workload"] and r["experiment"] == "E1"), None)
+        gpu_indices = ",".join(str(g["index"]) for g in active_gpus)
+        print(
+            f"{item['experiment']} {item['workload']['name']}: attempt {number}, "
+            f"GPU(s) {gpu_indices}, {len(cpu_ids)} CPU(s)",
+            flush=True,
+        )
+        try:
+            run(
+                [sys.executable, "-m", "experiments.common.system", "--worker", str(output / "request.json"), str(output)],
+                output,
+                active_gpus,
+                env=env,
+                cwd=Path(__file__).resolve().parents[2],
+                cpu_ids=cpu_ids,
+                pass_fds=lease_fds,
+                stop_event=stop_event,
+            )
+            summary = validate_attempt(output, request)
+        except BaseException as error:
+            status = read(output / "monitor.json").get("status") if (output / "monitor.json").exists() else "failed"
+            status = "interrupted" if isinstance(error, KeyboardInterrupt | InterruptedError) else status
+            if status not in RETRYABLE | {"interrupted", "timeout", "worker_failed"}:
+                status = "failed"
+            write_json(output / "attempt.json", dict(status=status, error=str(error), request_id=digest(request)))
+            if status in RETRYABLE and retries < max_contention_retries and not stop_event.is_set():
+                retries += 1
+                print(
+                    f"Discarding contended {item['experiment']} {item['workload']['name']} attempt; "
+                    f"waiting before retry {retries}.",
+                    flush=True,
+                )
+                output = None
+                continue
+            raise
+        files = [
+            "request.json",
+            "summary.json",
+            "monitor.json",
+            "outcomes.json",
+            "experiment.json",
+            "compilation.json",
+            "benchmarks.tsv",
+        ]
+        if item["experiment"] == "E3":
+            files += ["tiletune.json", "selection.json"]
+        write_json(output / "attempt.json", dict(status="completed", request_id=digest(request)))
+        write_json(
+            case_dir / "completed.json",
+            dict(request_id=digest(request), attempt=output.name, files={name: file_hash(output / name) for name in files}),
+        )
+    summary = read(output / "summary.json")
+    return dict(
+        summary,
+        experiment=item["experiment"],
+        attempt=str(output.relative_to(root)),
+        worker_wall_seconds=read(output / "monitor.json").get("wall_seconds"),
+    )
+
+
+def _ordered_rows(rows, plan):
+    order = {(item["experiment"], item["workload"]["name"]): i for i, item in enumerate(plan)}
+    result = sorted(rows, key=lambda row: order[(row["experiment"], row["workload"])])
+    for row in result:
+        baseline = next(
+            (r for r in result if r["workload"] == row["workload"] and r["experiment"] == "E1"),
+            None,
+        )
         if baseline is not None:
             row["tuning_speedup_vs_E1"] = baseline["tuning_seconds"] / row["tuning_seconds"]
             row["end_to_end_speedup_vs_E1"] = baseline["worker_wall_seconds"] / row["worker_wall_seconds"]
-        write_json(root / "comparison.json", rows)
+    return result
+
+
+def run_queue(root, plan, gpus, cpu_pools, lease_fds, *, run=None, max_contention_retries=3, code_identity=None):
+    from experiments.utils.monitor import run_monitored
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from threading import Event
+
+    run = run or run_monitored
+    if not cpu_pools or any(set(a) & set(b) for i, a in enumerate(cpu_pools) for b in cpu_pools[i + 1 :]):
+        raise ValueError("workload CPU pools must be nonempty and disjoint")
+    rows = []
+    stop_event = Event()
+    phases = []
+    for item in plan:
+        if not phases or phases[-1][0] != item["experiment"]:
+            phases.append((item["experiment"], []))
+        phases[-1][1].append(item)
+    try:
+        for experiment, items in phases:
+            gpu_count = items[0]["gpu_count"]
+            if any(item["gpu_count"] != gpu_count for item in items):
+                raise ValueError("one experiment phase cannot mix per-workload GPU requirements")
+            capacity = min(len(cpu_pools), len(gpus) // gpu_count)
+            if capacity < 1:
+                raise ValueError(f"insufficient CPU/GPU slots for {experiment}")
+            queues = [iter(items[slot::capacity]) for slot in range(capacity)]
+            open_slots = set(range(capacity))
+            free_slots = list(range(capacity))
+            active = {}
+            executor = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix=f"h200-{experiment}")
+            try:
+                while active or open_slots:
+                    for slot in list(free_slots):
+                        if slot not in open_slots:
+                            free_slots.remove(slot)
+                            continue
+                        try:
+                            item = next(queues[slot])
+                        except StopIteration:
+                            open_slots.remove(slot)
+                            free_slots.remove(slot)
+                            continue
+                        free_slots.remove(slot)
+                        active_gpus = gpus[slot * gpu_count : (slot + 1) * gpu_count]
+                        future = executor.submit(
+                            _run_item,
+                            root,
+                            item,
+                            active_gpus,
+                            cpu_pools[slot],
+                            lease_fds,
+                            run=run,
+                            stop_event=stop_event,
+                            max_contention_retries=max_contention_retries,
+                            code_identity=code_identity,
+                        )
+                        active[future] = dict(slot=slot, item=item, gpus=active_gpus)
+                    write_json(
+                        root / "progress.json",
+                        dict(
+                            status="running",
+                            completed=len(rows),
+                            total=len(plan),
+                            active=[
+                                dict(
+                                    experiment=value["item"]["experiment"],
+                                    workload=value["item"]["workload"]["name"],
+                                    gpu_indices=[gpu["index"] for gpu in value["gpus"]],
+                                    cpu_pool=value["slot"],
+                                )
+                                for value in active.values()
+                            ],
+                        ),
+                    )
+                    if not active:
+                        continue
+                    done, _ = wait(active, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        assignment = active.pop(future)
+                        free_slots.append(assignment["slot"])
+                        free_slots.sort()
+                        rows.append(future.result())
+                        ordered = _ordered_rows(rows, plan)
+                        write_json(root / "comparison.json", ordered)
+                        write_json(
+                            root / "progress.json",
+                            dict(
+                                status="running" if len(rows) < len(plan) else "completed",
+                                completed=len(rows),
+                                total=len(plan),
+                                active=[
+                                    dict(
+                                        experiment=value["item"]["experiment"],
+                                        workload=value["item"]["workload"]["name"],
+                                        gpu_indices=[gpu["index"] for gpu in value["gpus"]],
+                                        cpu_pool=value["slot"],
+                                    )
+                                    for value in active.values()
+                                ],
+                            ),
+                        )
+            except BaseException:
+                stop_event.set()
+                for future in active:
+                    future.cancel()
+                raise
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+    except BaseException as error:
+        stop_event.set()
         write_json(
             root / "progress.json",
-            dict(status="running" if len(rows) < len(plan) else "completed", completed=len(rows), total=len(plan), active=None),
+            dict(
+                status="interrupted" if isinstance(error, KeyboardInterrupt | InterruptedError) else "failed",
+                completed=len(rows),
+                total=len(plan),
+                active=[],
+                error=str(error),
+            ),
         )
-    return rows
+        raise
+    ordered = _ordered_rows(rows, plan)
+    write_json(root / "comparison.json", ordered)
+    write_json(root / "progress.json", dict(status="completed", completed=len(rows), total=len(plan), active=[]))
+    return ordered
 
 
 def oracle_audit(root, plan):
@@ -368,11 +502,22 @@ def main(argv=None):
     args = parser.parse_args(argv)
     plan = study_plan(workloads=args.workloads, experiments=args.experiments, preflight=args.preflight)
     if args.plan:
-        print(json.dumps(dict(plan=plan, max_gpus=4, concurrent_workloads=1), indent=2))
+        print(
+            json.dumps(
+                dict(
+                    plan=plan,
+                    max_gpus=4,
+                    scheduling="resource_driven",
+                    cpu_ids_per_workload=SETTINGS["workers"] + 8,
+                    concurrency=dict(E1="min(4 GPUs, available CPU pools)", E2=1, E3=1),
+                ),
+                indent=2,
+            )
+        )
         return 0
     if args.output is None:
         parser.error("--output is required")
-    from experiments.utils.isolation import measurement_lease, interruptible, select_cpu_ids
+    from experiments.utils.isolation import measurement_lease, interruptible, select_cpu_pools
     from experiments.utils.monitor import snapshot
 
     root = args.output.resolve()
@@ -385,7 +530,7 @@ def main(argv=None):
     requested = args.gpus if args.gpus is not None else [int(g["index"]) for g in frozen["gpus"]] if frozen else None
     gpus = select_gpus(observed, requested)
     identity = dict(
-        version=1,
+        version=2,
         plan=plan,
         gpus=gpus,
         source_identity=source_identity(),
@@ -395,15 +540,23 @@ def main(argv=None):
     if frozen and any(frozen.get(key) != value for key, value in identity.items()):
         raise ValueError("resume identity changed: workload, pool, code, settings, interpreter or GPUs differ")
     with measurement_lease(gpus) as leases, interruptible():
-        cpu_ids = frozen["cpu_ids"] if frozen else select_cpu_ids(SETTINGS["workers"])
-        if not set(cpu_ids) <= os.sched_getaffinity(0):
+        affinity = set(os.sched_getaffinity(0))
+        cpu_ids_per_workload = SETTINGS["workers"] + 8
+        pool_count = min(len(gpus), len(affinity) // cpu_ids_per_workload)
+        cpu_pools = frozen["cpu_pools"] if frozen else select_cpu_pools(SETTINGS["workers"], pool_count)
+        assigned = set().union(*(set(pool) for pool in cpu_pools))
+        if (
+            not cpu_pools
+            or any(len(pool) < cpu_ids_per_workload for pool in cpu_pools)
+            or sum(map(len, cpu_pools)) != len(assigned)
+            or not assigned <= affinity
+        ):
             raise RuntimeError("frozen CPU affinity is no longer available")
         root.mkdir(parents=True, exist_ok=args.resume)
         if not frozen:
-            write_json(root / "manifest.json", dict(identity, cpu_ids=cpu_ids))
+            write_json(root / "manifest.json", dict(identity, cpu_pools=cpu_pools))
         # The coordinator and its monitor do not compete with compilation threads.
-        affinity = os.sched_getaffinity(0)
-        spare = affinity - set(cpu_ids)
+        spare = affinity - assigned
         if not spare:
             raise RuntimeError("no CPU left for the measurement coordinator")
         os.sched_setaffinity(0, spare)
@@ -413,8 +566,8 @@ def main(argv=None):
                 preflight_root.mkdir(exist_ok=True)
                 preflight = study_plan(experiments=args.experiments, preflight=True)
                 write_json(root / "progress.json", dict(status="preflight", total=len(plan), completed=0))
-                run_queue(preflight_root, preflight, gpus, cpu_ids, leases, code_identity=identity["source_identity"])
-            run_queue(root, plan, gpus, cpu_ids, leases, code_identity=identity["source_identity"])
+                run_queue(preflight_root, preflight, gpus, cpu_pools, leases, code_identity=identity["source_identity"])
+            run_queue(root, plan, gpus, cpu_pools, leases, code_identity=identity["source_identity"])
             audit = oracle_audit(root, plan)
             if audit is not None:
                 print(json.dumps({k: v for k, v in audit.items() if k != "oracles"}), flush=True)

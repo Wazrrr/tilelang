@@ -133,7 +133,19 @@ def cuda_device(device):
             os.environ["CUDA_VISIBLE_DEVICES"] = visible
 
 
-def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wait_idle=True, cpu_ids=None, pass_fds=()):
+def run_monitored(
+    command,
+    output,
+    gpus,
+    *,
+    cwd=None,
+    env=None,
+    timeout=None,
+    wait_idle=True,
+    cpu_ids=None,
+    pass_fds=(),
+    stop_event=None,
+):
     """Reject the whole invocation if a foreign process is observed on any GPU.
 
     Logs and partial artifacts remain inspectable; callers must not publish them
@@ -164,6 +176,9 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
     try:
         with (output / "gpu_observations.jsonl").open("a") as observations, (output / "worker.log").open("w") as log:
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    audit["status"] = "interrupted"
+                    raise InterruptedError("coordinator requested workload shutdown")
                 poll_started = time.monotonic()
                 observed = snapshot()
                 cpu = cpu_monitor.sample(process.pid if process else None) if cpu_monitor else None
