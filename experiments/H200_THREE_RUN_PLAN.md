@@ -1,6 +1,8 @@
 # H200: exhaustive, multi-GPU, and pipelined TileTune experiments
 
-Status: runner implemented; full-sweep results and oracle retention are pending.
+Status: runner implemented; execution paused at the user's request because no
+GPUs are available. No experiment is queued to start automatically. Full-sweep
+results and oracle retention are pending.
 
 The grouped-compile recovery below is implemented and covered by focused
 failure-isolation tests and H200 pipeline/alpha tests in
@@ -155,6 +157,8 @@ sequentially, with no background compilation from another workload. Preflight
 tries at most eight candidates per family/mode. E3 still analyzes/selects from
 the complete pool, then marks selected candidates beyond those eight as
 `preflight_omitted`; preflight results never establish an exhaustive oracle.
+Workers explicitly import TileLang from this checkout, overriding any editable
+installation pointing to another branch only within that worker process.
 
 The frozen manifest includes source/native-build identity, settings, complete
 ordered pools, interpreter, CPU affinity and GPU UUIDs. Resume rejects changed

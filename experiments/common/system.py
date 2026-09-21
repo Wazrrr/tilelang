@@ -49,6 +49,9 @@ def system_plan(family, *, workloads=None, variants=None, indices=None):
 
 
 def worker(request_path, output):
+    from experiments.utils.imports import use_local_tilelang
+
+    use_local_tilelang()
     request = json.loads(Path(request_path).read_text())
     if request.get("cpu_ids"):
         from experiments.utils.isolation import prepare_worker
@@ -169,7 +172,7 @@ def worker(request_path, output):
     write_json(
         output / "experiment.json",
         dict(
-            **request,
+            request,
             configs=configs,
             original_indices=indices,
             target=target,

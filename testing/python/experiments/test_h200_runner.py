@@ -1,6 +1,7 @@
 """Interruption, exclusion, contention and completion contracts without a GPU."""
 
 from copy import deepcopy
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -288,3 +289,112 @@ def test_oracle_audit_checks_union_ties_and_every_retention_stage(tmp_path, fail
     assert len(report["oracles"]) == 3
     assert report["workloads_retained"] == (1 if failure is None else 0)
     assert (tmp_path / "oracle_retention.csv").is_file()
+
+
+@pytest.mark.parametrize("variant,gpu_count", [("baseline", 1), ("multi_gpu", 4), ("tiletune", 4)])
+def test_worker_wires_frozen_request_and_publishes_complete_outcomes(tmp_path, monkeypatch, variant, gpu_count):
+    """Exercise the actual worker/report path with a deterministic fake compiler."""
+    from concurrent.futures import Future
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import torch
+    import tilelang.autotuner as autotuner
+    import tilelang.tiletune as tiletune
+    from experiments.common import system, kernels
+    from experiments.utils import cli
+
+    configs = [dict(block=32), dict(block=64)]
+    request = dict(
+        workload=h200.study_plan()[0]["workload"],
+        variant=variant,
+        gpu_count=gpu_count,
+        settings=dict(h200.SETTINGS, preflight=False),
+        configs=configs,
+        indices=[0, 1],
+    )
+    write_json(tmp_path / "request.json", request)
+    monkeypatch.setattr(system, "family_module", lambda *args: SimpleNamespace(get_configs=lambda: configs))
+    monkeypatch.setattr(torch, "set_num_threads", lambda *args: None)
+    monkeypatch.setattr(torch, "set_num_interop_threads", lambda *args: None)
+    monkeypatch.setattr(torch, "Generator", lambda **kwargs: SimpleNamespace(manual_seed=lambda seed: None))
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: gpu_count)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda *args: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
+    tensor = SimpleNamespace(to=lambda device: None)
+    case = SimpleNamespace(
+        build=lambda **kwargs: None,
+        inputs=lambda *args: [tensor],
+        check_input_values=lambda *args: None,
+        reference=lambda *args: None,
+        check=lambda *args: None,
+        out_idx=[2],
+        pass_configs={},
+        input_values={},
+        rtol=0.02,
+        atol=0.02,
+    )
+    monkeypatch.setattr(kernels, "make_case", lambda w: case)
+    monkeypatch.setattr(autotuner, "set_autotune_inputs", lambda *args: nullcontext())
+    monkeypatch.setattr(tiletune, "current_target", lambda: dict(kind="cuda", arch="sm_90"))
+    monkeypatch.setattr(tiletune, "query_device_limits", lambda target: dict(registers_per_sm=65536))
+    monkeypatch.setattr(cli, "device_info", lambda devices: devices)
+    monkeypatch.setattr(cli, "source_hashes", lambda *args: {})
+    monkeypatch.setattr(system.subprocess, "check_output", lambda *args, **kwargs: "test-version")
+
+    class Tuner:
+        def __init__(self, build, pool):
+            assert pool == configs
+            self.tiletune_session = None
+
+        def set_compile_args(self, **kwargs):
+            assert kwargs["execution_backend"] == "tvm_ffi"
+            return self
+
+        def set_profile_args(self, **kwargs):
+            assert kwargs["manual_check_prog"] is case.check
+            return self
+
+        def set_benchmark_report_path(self, path):
+            self.benchmark_path = Path(path)
+            return self
+
+        def set_tiletune_args(self, config):
+            assert config.alpha == 0.5 and config.ranking_metric == "memory" and not config.memory_diagnostics
+            assert config.post_compile_policy == dict(mode="reject", max_spill_bytes=0, max_local_bytes=0)
+            self.tiletune_report = dict(
+                selection=dict(selected_indices=[0], pool_size=2, alpha=0.5, strict_budget=True),
+                configs=[dict(index=i, config=c, status="benchmarked" if i == 0 else "not_selected") for i, c in enumerate(configs)],
+            )
+            self.tiletune_session = SimpleNamespace(selection=self.tiletune_report["selection"], finish=lambda: None)
+            return self
+
+        def _resolve_num_compile_workers(self):
+            return 128
+
+        def _prepare_compile_execution(self, *, config_indices):
+            future = Future()
+            future.set_result([(i, configs[i], None, None) for i in config_indices])
+            return None, [future], {future: [(i, configs[i]) for i in config_indices]}, "test"
+
+        def run(self, **kwargs):
+            assert self._resolve_num_compile_workers() == 128
+            assert kwargs["benchmark_multi_gpu"] == (gpu_count == 4)
+            assert kwargs["use_pipeline"] == kwargs["enable_grouped_compile"] == (variant == "tiletune")
+            assert kwargs["group_compile_size"] == 8 and not kwargs["early_stop"]
+            selected = [0] if variant == "tiletune" else [0, 1]
+            self._prepare_compile_execution(config_indices=selected)
+            with self.benchmark_path.open("w") as stream:
+                stream.write("index\tstatus\tlatency_ms\tconfig\terror\n")
+                for i in selected:
+                    stream.write(f"{i}\tok\t{i + 1}\t{json.dumps(configs[i])}\t\n")
+            return SimpleNamespace(config=configs[0], latency=1)
+
+    monkeypatch.setattr(autotuner, "AutoTuner", Tuner)
+    system.worker(tmp_path / "request.json", tmp_path)
+    assert h200.read(tmp_path / "experiment.json")["configs"] == configs
+    summary = h200.read(tmp_path / "summary.json")
+    assert summary["config_count"] == 2 and summary["benchmark_gpu_count"] == gpu_count
+    assert summary["compiler_workers"] == 128
+    outcomes = h200.read(tmp_path / "outcomes.json")
+    assert outcomes[0]["status"] == "benchmarked"
+    assert outcomes[1]["status"] == ("not_selected" if variant == "tiletune" else "benchmarked")
