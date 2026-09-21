@@ -15,8 +15,11 @@ if [[ $# -ne 1 ]]; then
 fi
 : "${SLURM_JOB_ID:?submit this launcher with sbatch}"
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "${script_dir}/.." && pwd)"
+repo_root="${SLURM_SUBMIT_DIR:?Slurm did not record the submission directory}"
+if [[ ! -f "${repo_root}/experiments/common/h200.py" ]]; then
+  echo "submit the E1 job from the dev-h200-new repository root: ${repo_root}" >&2
+  exit 2
+fi
 result_dir="$1"
 if [[ "${result_dir}" != /* ]]; then
   result_dir="${repo_root}/${result_dir}"
