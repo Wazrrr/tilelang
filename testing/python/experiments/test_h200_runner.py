@@ -224,13 +224,13 @@ def test_contention_retries_never_publish_rejected_timings(tmp_path):
     def contended(command, output, gpus, **kwargs):
         calls.append(output)
         successful_worker(command, output, gpus, **kwargs)
-        if len(calls) == 1:
+        if len(calls) <= 5:
             write_json(output / "monitor.json", dict(status="host_contended"))
             raise RuntimeError("competing CPU job")
 
     rows = h200.run_queue(tmp_path, small_plan()[:1], devices(4), [[0, 1]], (), run=contended)
-    assert len(calls) == 2
-    assert rows[0]["attempt"].endswith("attempt-0002")
+    assert len(calls) == 6
+    assert rows[0]["attempt"].endswith("attempt-0006")
     assert h200.read(calls[0] / "attempt.json")["status"] == "host_contended"
 
 
@@ -282,6 +282,23 @@ def test_cpu_monitor_excludes_own_compilation_and_counts_external_work(monkeypat
     assert not sampler.sample()["ready"]
     assert sampler.sample(123)["external_busy_cores"] == 0
     assert sampler.sample(123)["external_busy_cores"] == pytest.approx(0.6)
+
+
+def test_owned_cpu_ticks_walks_only_the_worker_process_tree(tmp_path):
+    def process(pid, process_group, ticks, children=()):
+        path = tmp_path / str(pid)
+        task = path / "task" / str(pid)
+        task.mkdir(parents=True)
+        fields = ["S", "0", str(process_group), *("0" for _ in range(8)), *(str(value) for value in ticks)]
+        (path / "stat").write_text(f"{pid} (worker process) {' '.join(fields)}")
+        (task / "children").write_text(" ".join(map(str, children)))
+
+    process(100, 100, (1, 2, 3, 4), children=(101, 200))
+    process(101, 100, (5, 6, 7, 8), children=(102,))
+    process(102, 100, (9, 10, 11, 12))
+    process(200, 200, (100, 100, 100, 100))
+    process(999, 999, (1000, 1000, 1000, 1000))
+    assert isolation.owned_cpu_ticks(100, tmp_path) == sum(range(1, 13))
 
 
 def test_cpu_contention_kills_only_owned_worker(tmp_path, monkeypatch):

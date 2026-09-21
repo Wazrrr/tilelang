@@ -247,7 +247,8 @@ def _run_item(
             if status not in RETRYABLE | {"interrupted", "timeout", "worker_failed"}:
                 status = "failed"
             write_json(output / "attempt.json", dict(status=status, error=str(error), request_id=digest(request)))
-            if status in RETRYABLE and retries < max_contention_retries and not stop_event.is_set():
+            can_retry = max_contention_retries is None or retries < max_contention_retries
+            if status in RETRYABLE and can_retry and not stop_event.is_set():
                 retries += 1
                 print(
                     f"Discarding contended {item['experiment']} {item['workload']['name']} attempt; "
@@ -296,7 +297,7 @@ def _ordered_rows(rows, plan):
     return result
 
 
-def run_queue(root, plan, gpus, cpu_pools, lease_fds, *, run=None, max_contention_retries=3, code_identity=None):
+def run_queue(root, plan, gpus, cpu_pools, lease_fds, *, run=None, max_contention_retries=None, code_identity=None):
     from experiments.utils.monitor import run_monitored
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
     from threading import Event

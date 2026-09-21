@@ -245,8 +245,10 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
   two external busy CPU cores, one I/O-wait core, or 0.1 stolen CPU cores. These
   small allowances cover scheduler/monitor noise and are recorded in the audit.
   Foreign GPU activity and monitor gaps invalidate the attempt immediately.
-  Never kill or reconfigure unrelated jobs. Contended attempts are retried at
-  most three times per invocation, waiting for quiet resources before each retry.
+  Never kill or reconfigure unrelated jobs. Contended attempts are preserved and
+  retried until a clean attempt completes or the coordinator is interrupted.
+  Owned CPU accounting traverses only each worker's process tree, so its polling
+  cost does not grow with unrelated process entries on a shared host.
 
 ## Resource-scheduled execution and interruption recovery
 

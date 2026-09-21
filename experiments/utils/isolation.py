@@ -50,21 +50,43 @@ def cpu_ticks(cpu_ids):
     return result
 
 
-def owned_cpu_ticks(process_group):
-    """Include live descendants and reaped compiler children in CPU accounting."""
+def owned_cpu_ticks(process_group, proc_root=Path("/proc")):
+    """Count one worker tree without scanning every process on the host.
+
+    A process stat includes CPU from children it has already reaped. Walking
+    live descendants and summing those four counters therefore retains the old
+    accounting contract while making the monitor cost depend on one workload,
+    not the number of unrelated host processes.
+    """
     if process_group is None:
         return 0
+    process_group = int(process_group)
+    pending = [process_group]
+    visited = set()
     ticks = 0
-    for path in Path("/proc").iterdir():
-        if not path.name.isdecimal():
+    while pending:
+        pid = pending.pop()
+        if pid in visited:
             continue
+        visited.add(pid)
+        path = proc_root / str(pid)
         try:
             fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
         except (FileNotFoundError, ProcessLookupError):
             continue
-        if int(fields[2]) == process_group:
-            # fields begin with state (field 3); utime/stime/cutime/cstime are 14..17.
-            ticks += sum(int(value) for value in fields[11:15])
+        if int(fields[2]) != process_group:
+            continue
+        # Fields begin with state (field 3); utime/stime/cutime/cstime are 14..17.
+        ticks += sum(int(value) for value in fields[11:15])
+        try:
+            child_files = list((path / "task").glob("*/children"))
+        except (FileNotFoundError, ProcessLookupError):
+            child_files = []
+        for child_file in child_files:
+            try:
+                pending.extend(int(value) for value in child_file.read_text().split())
+            except (FileNotFoundError, ProcessLookupError):
+                continue
     return ticks
 
 
