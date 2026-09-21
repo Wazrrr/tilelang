@@ -133,19 +133,38 @@ def cuda_device(device):
             os.environ["CUDA_VISIBLE_DEVICES"] = visible
 
 
-def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wait_idle=True, cpu_ids=None, pass_fds=()):
-    """Reject the whole invocation if a foreign process is observed on any GPU.
+def run_monitored(
+    command,
+    output,
+    gpus,
+    *,
+    cwd=None,
+    env=None,
+    timeout=None,
+    wait_idle=True,
+    cpu_ids=None,
+    pass_fds=(),
+    monitor_gpus=None,
+):
+    """Reject the whole invocation if a foreign process is observed on any monitored GPU.
 
     Logs and partial artifacts remain inspectable; callers must not publish them
     as completed measurements. Process polling cannot detect subsecond overlap.
     """
+    monitor_gpus = gpus if monitor_gpus is None else monitor_gpus
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     process = None
     started = time.monotonic()
     waiting_started = started
     previous_poll = None
-    audit = dict(gpus=gpus, poll_interval_seconds=1, max_poll_gap_seconds=MAX_POLL_GAP_SECONDS, status="waiting")
+    audit = dict(
+        gpus=gpus,
+        monitored_gpus=monitor_gpus,
+        poll_interval_seconds=1,
+        max_poll_gap_seconds=MAX_POLL_GAP_SECONDS,
+        status="waiting",
+    )
     cpu_monitor = None
     quiet_samples = cpu_contention_samples = 0
     if cpu_ids is not None:
@@ -181,14 +200,17 @@ def run_monitored(command, output, gpus, *, cwd=None, env=None, timeout=None, wa
                 observed["poll_gap_seconds"] = gap
                 foreign = [
                     p
-                    for gpu in gpus
+                    for gpu in monitor_gpus
                     for p in foreign_processes(observed, gpu["uuid"], process.pid if process else None)
                     if int(p["pid"]) != os.getpid()
                 ]
                 observations.write(json.dumps(observed) + "\n")
                 observations.flush()
                 if process is None:
-                    busy = any(float(next(g for g in observed["gpus"] if g["uuid"] == gpu["uuid"])["utilization.gpu"]) > 5 for gpu in gpus)
+                    busy = any(
+                        float(next(g for g in observed["gpus"] if g["uuid"] == gpu["uuid"])["utilization.gpu"]) > 5
+                        for gpu in monitor_gpus
+                    )
                     if foreign or busy or delayed or overloaded or cpu_busy:
                         quiet_samples = 0
                         if not wait_idle:
