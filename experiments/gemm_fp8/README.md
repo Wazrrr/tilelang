@@ -11,9 +11,12 @@ giving 576 candidates before compilation qualification. The original default
 128x128x64, stages=3, threads=128, rasterization=False is included.
 
 The adapter reference computes A@B.T in FP32 and casts to the example's output
-dtype. Source fingerprints and measurement contract version 4 prevent reuse of
-incompatible measurements. FP8 Carver support is deferred; the previous adapter
-is not used for this operation.
+dtype. Validation uses the original example's normalized similarity metric,
+`calc_diff < 1e-3`; elementwise BF16 tolerances are not meaningful for E4M3
+quantization bins. Source fingerprints and measurement contract version 4
+prevent reuse of incompatible measurements. FP8 Carver support is deferred; the
+previous adapter is not used for this operation.
 
 CPU-only compilation qualification does not establish numerical correctness,
-performance, or oracle retention. GPU experiments remain paused.
+performance, or oracle retention. The H200 preflight checks numerical correctness
+on the selected GPU before the exhaustive experiment begins.

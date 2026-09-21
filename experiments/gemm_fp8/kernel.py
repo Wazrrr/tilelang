@@ -9,6 +9,24 @@ from .spaces import support_reason
 _BUILD_LOCK = Lock()
 
 
+class FP8KernelCase(KernelCase):
+    """Use the original example's normalized similarity check for FP8 output."""
+
+    def check(self, actuals, references):
+        if len(actuals) != len(references):
+            raise AssertionError("wrong number of kernel outputs")
+        for actual, reference_value in zip(actuals, references):
+            if actual.dtype != reference_value.dtype:
+                raise AssertionError(f"output dtype {actual.dtype} differs from reference {reference_value.dtype}")
+            if actual.shape != reference_value.shape or actual.device != reference_value.device:
+                raise AssertionError("output shape or device differs from reference")
+            x, y = actual.double(), reference_value.double()
+            denominator = (x * x + y * y).sum()
+            difference = 1 - 2 * (x * y).sum() / denominator
+            if not difference.isfinite() or difference >= 1e-3:
+                raise AssertionError(f"FP8 example correctness failed: calc_diff={difference.item()}")
+
+
 def make_case(workload):
     reason = support_reason(workload)
     if reason:
@@ -36,4 +54,4 @@ def make_case(workload):
     def inputs(device, generator):
         return [_random(shape, dtype, device, generator) for shape in ((m, k), (n, k))]
 
-    return KernelCase(build, inputs, reference, None, rtol=0.03, atol=0.03)
+    return FP8KernelCase(build, inputs, reference, None, rtol=1e-3, atol=0)
