@@ -22,7 +22,7 @@ from experiments.utils.io import write_json
 
 
 MODES = {"E1": "baseline", "E2": "multi_gpu", "E3": "tiletune"}
-SETTINGS = dict(workers=128, warmup=10, rep=50, timeout=60, group_size=8, seed=123)
+SETTINGS = dict(workers=128, warmup=10, rep=50, timeout=60, group_size=8, seed=123, benchmark_backend="cupti")
 RETRYABLE = {"contended", "host_contended", "monitor_gap"}
 
 
@@ -115,8 +115,11 @@ def validate_attempt(output, request):
         raise ValueError("incomplete worker summary")
     if summary.get("compiler_workers") != 128 or summary.get("benchmark_gpu_count") != request["gpu_count"]:
         raise ValueError("worker did not use the frozen CPU/GPU counts")
-    if request.get("source_identity") and read(output / "experiment.json").get("source_identity") != request["source_identity"]:
+    experiment = read(output / "experiment.json")
+    if request.get("source_identity") and experiment.get("source_identity") != request["source_identity"]:
         raise ValueError("worker source identity changed")
+    if experiment.get("measurement", {}).get("backend") != request["settings"].get("benchmark_backend"):
+        raise ValueError("worker did not use the frozen benchmark backend")
     records = read(output / "outcomes.json")
     from experiments.utils.results import TERMINAL
 

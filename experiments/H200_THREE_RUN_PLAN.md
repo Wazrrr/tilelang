@@ -1,8 +1,8 @@
 # H200: exhaustive, multi-GPU, and pipelined TileTune experiments
 
-Status: runner implemented; execution paused at the user's request because no
-GPUs are available. No experiment is queued to start automatically. Full-sweep
-results and oracle retention are pending.
+Status: runner implemented for CUPTI timing; execution remains a manual action
+after the four-GPU preflight passes. No experiment is queued to start
+automatically. Full-sweep results and oracle retention are pending.
 
 The grouped-compile recovery below is implemented and covered by focused
 failure-isolation tests and H200 pipeline/alpha tests in
@@ -20,11 +20,11 @@ oracle retention for this BF16/original-FP8 suite.
 
 Run all 25 final workloads once per experiment: 75 workload runs altogether.
 
-| Experiment | Selection | Compiler workers | Benchmark GPUs | Pipeline | Grouped compilation | Post-compile TileTune policy |
-| --- | --- | ---: | ---: | --- | --- | --- |
-| E1: exhaustive, one GPU | Complete pool | 128 | 1 | Off | Off | Off |
-| E2: exhaustive, four GPUs | Complete pool | 128 | 4 | Off | Off | Off |
-| E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 128 | 4 | On | On, size 8 | On |
+| Experiment | Selection | Compiler workers | Benchmark GPUs | Timing | Pipeline | Grouped compilation | Post-compile policy |
+| --- | --- | ---: | ---: | --- | --- | --- | --- |
+| E1: exhaustive, one GPU | Complete pool | 128 | 1 | CUPTI | Off | Off | No pruning; defines the one-GPU oracle |
+| E2: exhaustive, four GPUs | Complete pool | 128 | 4 | CUPTI | Off | Off | No pruning; defines the four-GPU oracle |
+| E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 128 | 4 | CUPTI | On | On, size 8 | Enforced after compilation |
 
 Multi-GPU means distributing candidate benchmarks within each workload through
 `AutoTuner.run(benchmark_multi_gpu=True, benchmark_devices=[0,1,2,3])`.
@@ -38,16 +38,24 @@ Keep `enable_grouped_compile=False` in E1/E2. In E3, set
 `enable_grouped_compile=True, group_compile_size=8`; groups contain at most eight
 selected configs with compatible effective compiler settings. Keep
 `early_stop=False` in all three runs.
-E1 and E2 do not apply spill-based pruning, so their oracle tables include all
-successfully compiled and numerically correct candidates, including spillers.
-E3 retains the existing post-compile checks: spill/local byte allowances of 0
-for GEMM, grouped GEMM and KDA, 64 for attention, and 128 for FP8 GEMM. Hardware
-limits also apply. Use `common/resource_policy.py`; do not enable legacy filters.
+E1 and E2 do not apply spill-based pruning, so their oracle tables remain
+independent of the policy being audited and include every successfully compiled,
+numerically correct candidate. E3 turns the post-compile resource check on:
+spill/local byte allowances are 0 for GEMM, grouped GEMM and KDA, 64 for
+attention, and 128 for FP8 GEMM. Hardware register and launch limits also apply.
+The E3 report must contain PTXAS counters and a post-compile decision for every
+candidate that reaches that stage. Use `common/resource_policy.py`; do not enable
+the legacy kernel-family filters. If an E1/E2 oracle fails this E3 policy, the
+retention result fails rather than redefining the oracle.
 
 ## Workload and budget inventory
 
 Use `common.spec.default_workloads(smoke=False)` and each family's complete
 `spaces.get_configs()` pool. Preserve config ordering and SHA-256 config IDs.
+The tables below come from each family's `cases.py`. Every active pool is the
+recorded SM90a compilation intersection for all five final workloads in
+[experiments/compilation](compilation); this establishes compilation validity,
+while the three runs still perform independent correctness and timing checks.
 
 | Family | Five final workload names | Pool per workload | E3 maximum selected per workload |
 | --- | --- | ---: | ---: |
@@ -69,24 +77,117 @@ the three full experiments, excluding preflight and winner verification.
 Failed shared builds add retry attempts, which must be counted and timed.
 Actual benchmark counts will be smaller when candidates fail or are filtered.
 
-KDA inputs are BF16 Q/K of shape (B,S,H,128), FP32 gates of the same shape,
-and BF16 beta of shape (B,S,H). Outputs are BF16 Aqk (B,S,H,64) and
-Akk (B,S,H,16). Head dimension=128, chunk=64, sub-chunk=16.
+### 1. BF16 GEMM
 
-| KDA workload | B | S | H |
-| --- | ---: | ---: | ---: |
-| kda_intra_short | 1 | 2048 | 32 |
-| kda_intra_medium | 1 | 4096 | 64 |
-| kda_intra_regular | 1 | 8192 | 32 |
-| kda_intra_batched | 2 | 4096 | 32 |
-| kda_intra_long | 1 | 16384 | 64 |
+The experiment adapter is [gemm/kernel.py](gemm/kernel.py), and the TileLang
+kernel is `make_autotune_kernel_builder` in
+[examples/gemm/example_gemm_advanced_autotune.py](../examples/gemm/example_gemm_advanced_autotune.py).
+It computes `C=A@B.T`, where A is BF16 `[M,K]`, B is BF16 `[N,K]`, C is BF16
+`[M,N]`, and accumulation is FP32. B is already transposed in storage; input
+construction and reference computation are outside the benchmark interval.
 
-Use the 645 compiler-qualified configs from block_H=1–16, stages=0–15,
-threads={32,64,128,256} per
-workload. This includes all 32 original example configs (block_H={1,2,4,8},
-stages=0–3, threads={128,256}). See [the KDA contract](kda/README.md).
-Previous oracle and spill validations do not establish retention
-for this intra-chunk operation.
+| Workload | M | N | K | A | B | C |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| gemm_decode | 256 | 4096 | 4096 | `[256,4096]` | `[4096,4096]` | `[256,4096]` |
+| gemm_prefill | 1024 | 4096 | 4096 | `[1024,4096]` | `[4096,4096]` | `[1024,4096]` |
+| gemm_ffn_down | 1024 | 4096 | 14336 | `[1024,14336]` | `[4096,14336]` | `[1024,4096]` |
+| gemm_square | 4096 | 4096 | 4096 | `[4096,4096]` | `[4096,4096]` | `[4096,4096]` |
+| gemm_square_large | 4096 | 14336 | 4096 | `[4096,4096]` | `[14336,4096]` | `[4096,14336]` |
+
+The 1,920-config pool comes from [gemm/spaces.py](gemm/spaces.py). For
+`block_M={32,64,128}`, use `block_N={32,64,96,128,192,256}`,
+`block_K={16,32,48,64}`, `num_stages=0..5`, `thread_num={128,256}`, and
+rasterization on/off (1,728 configs). For `block_M=256`, use the same N tiles,
+`block_K={32,64}`, `num_stages=0..3`, both thread counts, and rasterization
+on/off (192 configs). This compiler-qualified H200 pool contains the complete
+original 288-config example pool.
+
+### 2. FP8 GEMM
+
+The adapter is [gemm_fp8/kernel.py](gemm_fp8/kernel.py), and the kernel is
+`matmul` in
+[examples/gemm_fp8/example_tilelang_gemm_fp8.py](../examples/gemm_fp8/example_tilelang_gemm_fp8.py).
+It computes `C=A@B.T` with E4M3FN A `[M,K]`, E4M3FN B `[N,K]`, E4M3FN C
+`[M,N]`, and FP32 accumulation. There are no scale tensors. The five workloads
+use the same `(M,N,K)` values and tensor shapes as BF16 GEMM above.
+
+The 576-config pool in [gemm_fp8/spaces.py](gemm_fp8/spaces.py) is the product
+of `block_M={64,128,256}`, `block_N={64,128,256}`, `block_K={32,64}`,
+`num_stages=0..7`, `threads={128,256}`, and rasterization on/off. It contains
+the complete original pool from
+[examples/gemm_fp8/example_gemm_fp8_tiletune.py](../examples/gemm_fp8/example_gemm_fp8_tiletune.py).
+
+### 3. Grouped BF16 GEMM
+
+The adapter is [grouped_gemm/kernel.py](grouped_gemm/kernel.py), and the kernel
+is `grouped_gemm` in
+[examples/grouped_gemm/example_grouped_gemm_fwd.py](../examples/grouped_gemm/example_grouped_gemm_fwd.py).
+For group sizes `Mi`, A is concatenated BF16 `[sum(Mi),K]`. With
+`transpose_b=false`, B is BF16 `[G,K,N]`; with `transpose_b=true`, it is
+`[G,N,K]`. The result is BF16 `[sum(Mi),N]` with FP32 accumulation. Batch
+sizes, offsets, and padded offsets are prepared outside the timed kernel.
+
+| Workload | Group sizes `Mi` | G | sum(Mi) | N | K | transpose B | A shape | B shape | C shape |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |
+| grouped_gemm_decode | `[1,2,4,8]` | 4 | 15 | 2048 | 7168 | false | `[15,7168]` | `[4,7168,2048]` | `[15,2048]` |
+| grouped_gemm_prefill | `[32,32,32,32,32,32,32,32]` | 8 | 256 | 2048 | 7168 | false | `[256,7168]` | `[8,7168,2048]` | `[256,2048]` |
+| grouped_gemm_aligned | `[128,128,128,128]` | 4 | 512 | 2048 | 7168 | false | `[512,7168]` | `[4,7168,2048]` | `[512,2048]` |
+| grouped_gemm_down_aligned | `[256,256,256]` | 3 | 768 | 7168 | 2048 | true | `[768,2048]` | `[3,7168,2048]` | `[768,7168]` |
+| grouped_gemm_ragged | `[63,77,111,280]` | 4 | 531 | 7168 | 2048 | true | `[531,2048]` | `[4,7168,2048]` | `[531,7168]` |
+
+The 576-config pool in [grouped_gemm/spaces.py](grouped_gemm/spaces.py) uses
+fixed `block_M=64`, `block_N={32,64,96,128,192,256}`,
+`block_K={16,32,48,64,96,128}`, `num_stages=0..7`, and
+`threads={128,256}`.
+
+### 4. BF16 FlashAttention
+
+The adapter is [flash_attention/kernel.py](flash_attention/kernel.py), and the
+kernel is `flashattn` in
+[examples/flash_attention/example_mha_fwd_bshd.py](../examples/flash_attention/example_mha_fwd_bshd.py).
+Q, K, V, and O are BF16 BSHD tensors `[B,S,H,D]`. The kernel uses FP32 online
+softmax/accumulation and the workload's causal flag.
+
+| Workload | B | S | H | D | Causal | Q/K/V/O shape |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| attention_short_causal | 1 | 512 | 32 | 64 | true | `[1,512,32,64]` |
+| attention_batched_causal | 2 | 2048 | 16 | 64 | true | `[2,2048,16,64]` |
+| attention_noncausal | 1 | 4096 | 32 | 128 | false | `[1,4096,32,128]` |
+| attention_causal | 1 | 4096 | 32 | 128 | true | `[1,4096,32,128]` |
+| attention_long_causal | 1 | 8192 | 16 | 128 | true | `[1,8192,16,128]` |
+
+The candidate grid in [flash_attention/spaces.py](flash_attention/spaces.py)
+has 1,024 entries: `block_M={32,64,128,256}`, `block_N=16..256` in steps of
+16, `num_stages=0..7`, and `threads={128,256}`. The common H200 compilation
+intersection is the active 512-config pool: `block_M=64,threads=128`;
+`block_M=128,threads={128,256}`; and `block_M=256,threads=128`, with every N
+tile and stage for each retained pair.
+
+### 5. BF16 KDA intra-chunk
+
+The adapter is [kda/kernel.py](kda/kernel.py), and the kernel is
+`tilelang_chunk_kda_fwd_intra_token_parallel` in
+[examples/kda/chunk_intra_token_parallel.py](../examples/kda/chunk_intra_token_parallel.py).
+Inputs are BF16 Q/K `[B,S,H,128]`, FP32 cumulative gates of the same shape, and
+BF16 beta `[B,S,H]`. Outputs are BF16 Aqk `[B,S,H,64]` and Akk
+`[B,S,H,16]`; accumulation is FP32. Head dimension is 128, chunk size is 64,
+sub-chunk size is 16, and scale is `128**-0.5`. Gate construction is outside
+the benchmark interval.
+
+| Workload | B | S | H | Q/K/gate shape | beta shape | Aqk shape | Akk shape |
+| --- | ---: | ---: | ---: | --- | --- | --- | --- |
+| kda_intra_short | 1 | 2048 | 32 | `[1,2048,32,128]` | `[1,2048,32]` | `[1,2048,32,64]` | `[1,2048,32,16]` |
+| kda_intra_medium | 1 | 4096 | 64 | `[1,4096,64,128]` | `[1,4096,64]` | `[1,4096,64,64]` | `[1,4096,64,16]` |
+| kda_intra_regular | 1 | 8192 | 32 | `[1,8192,32,128]` | `[1,8192,32]` | `[1,8192,32,64]` | `[1,8192,32,16]` |
+| kda_intra_batched | 2 | 4096 | 32 | `[2,4096,32,128]` | `[2,4096,32]` | `[2,4096,32,64]` | `[2,4096,32,16]` |
+| kda_intra_long | 1 | 16384 | 64 | `[1,16384,64,128]` | `[1,16384,64]` | `[1,16384,64,64]` | `[1,16384,64,16]` |
+
+The raw grid in [kda/spaces.py](kda/spaces.py) has 1,024 entries from
+`block_H=1..16`, `num_stages=0..15`, and `threads={32,64,128,256}`. Use its
+645-config common H200 compilation intersection. It includes all 32 original
+example configs (`block_H={1,2,4,8}`, `num_stages=0..3`,
+`threads={128,256}`). Previous oracle and spill validations do not establish
+retention for this intra-chunk operation.
 
 E3's grouped compiler isolates per-config elaboration/lowering failures and
 post-compile rejections. If a shared device/host build fails, it bisects the
@@ -114,10 +215,14 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
   `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`. Give each run a new output directory.
   Keep compiler options, authoritative example builders, inputs, references,
   tolerances and benchmark backend identical across the three experiments.
-- Fix input seed 123, event timing, `warmup=10` ms, `rep=50` ms,
-  and a 60-second per-candidate benchmark timeout. These are the profiler's time
-  budgets; it determines iteration counts automatically. Preserve the same input and
-  cache-conditioning behavior in all modes. Record those settings explicitly.
+- Fix input seed 123, CUPTI timing, `warmup=10` ms, `rep=50` ms, and a
+  60-second per-candidate benchmark timeout. These are profiler time budgets;
+  it determines iteration counts automatically. The reported latency must come
+  from CUPTI CUDA activity, divided by the repeat count after excluding only the
+  annotated 256 MiB L2-cache flush ranges. The profiler may use a five-iteration
+  CUDA-event estimate solely to choose warmup/repeat counts; that estimate is
+  never the reported candidate latency. Preserve the same input and cache
+  conditioning in all modes, and record `backend="cupti"` in every result.
 - Keep memory diagnostics opt-in/off. E3 receives the same generic integer
   `input_values` metadata used by the existing runner, and queried H200 device
   limits. Supply the full pool and `alpha=0.5`; do not substitute a top-K subset.
@@ -158,6 +263,8 @@ sequentially, with no background compilation from another workload. Preflight
 tries at most eight candidates per family/mode. E3 still analyzes/selects from
 the complete pool, then marks selected candidates beyond those eight as
 `preflight_omitted`; preflight results never establish an exhaustive oracle.
+Before accepting preflight, verify CUPTI activity is available on all four
+devices and every worker artifact records `measurement.backend="cupti"`.
 Workers explicitly import TileLang from this checkout, overriding any editable
 installation pointing to another branch only within that worker process.
 
@@ -188,8 +295,9 @@ times. The final queue step writes the E1/E2 oracle-retention CSV and JSON.
 2. Make the runner save complete per-config outcomes and TileTune reports,
    including selection IDs, scores, equal-score tail ranks, effective resource
    policy, compiler resource counters, rejection reasons, correctness and
-   benchmark status. Record and assert the effective worker count and GPU count.
-   Keep `--plan` standard-library-only, without GPU queries or result creation.
+   benchmark status. Record and assert the effective worker count, GPU count,
+   and CUPTI backend. Keep `--plan` standard-library-only, without GPU queries
+   or result creation.
 3. Validate the runner with focused offline checks for mode settings, full-pool
    identity, strict alpha selection and oracle comparison. Run a monitored GPU
    preflight for each family and mode using known valid representative configs;
@@ -247,15 +355,38 @@ analysis and selection cost in tuning time. Separate overlapping stage timings
 from elapsed wall time; do not sum parallel work as though it were serial.
 Keep verification and preflight costs separate from tuning costs.
 
-For any accompanying XGBoost comparison, include training in the primary
-end-to-end timing: training/validation sample collection (including compilation,
-correctness checks and benchmarking), feature preparation, model fitting with
-validation/early stopping, model loading, prediction/selection, and selected
-candidate compilation/checking/benchmarking. Measure elapsed wall time across
-these stages; do not substitute prediction-only timing or sum overlapping work.
-Report collection, fitting, and online tuning times separately as a breakdown.
-Keep held-out oracle collection and post-run winner verification separate from
-the method's end-to-end time, and never use held-out labels for training.
+For any accompanying XGBoost comparison, freeze two training shapes and one
+validation shape per family from each family's `training_cases()`; these 15
+shapes are disjoint from the 25 final workloads. Use deterministic seeded config
+hash sampling at fraction 0.1 and seed 123. This attempts `ceil(0.1*pool_size)`
+configs per shape, and failed samples consume the budget without replacement:
+
+| Family | Per training/validation shape | Two training shapes | One validation shape |
+| --- | ---: | ---: | ---: |
+| GEMM | 192 | 384 | 192 |
+| Attention | 52 | 104 | 52 |
+| KDA intra-chunk | 65 | 130 | 65 |
+| FP8 GEMM | 58 | 116 | 58 |
+| Grouped GEMM | 58 | 116 | 58 |
+| Total | 425 | 850 | 425 |
+
+Compile, check, and benchmark these samples with the same CUPTI measurement
+contract. Fit the CPU `hist` regressor to log latency with at most 600 rounds,
+maximum depth 10, learning rate 0.05, subsample 0.8, seed 123, 128 threads, and
+early stopping after 20 validation rounds. Run collection and fitting without
+overlapping an experiment workload or another CPU/GPU job.
+
+The primary XGBoost end-to-end wall time is
+`T_train_collection + T_validation_collection + T_feature_preparation +`
+`T_fit_and_early_stop + T_model_save_load + T_final_feature_preparation +`
+`T_predict_and_select + T_selected_compile_check_benchmark`. Start the timer
+before the first training sample is prepared and stop it after the final
+selected candidate is benchmarked. Record elapsed wall time directly around
+each serial phase; do not substitute prediction-only timing or add CPU/GPU stage
+durations that overlapped. Report collection, fitting, and online tuning as the
+breakdown. Keep held-out exhaustive oracle collection and post-run winner
+verification outside this method time, and never use final-workload labels for
+training.
 
 Charge each shared training/validation collection and model-training run once
 in the suite total. Report its reuse scope and the online cost for each workload;

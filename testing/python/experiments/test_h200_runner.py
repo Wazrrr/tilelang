@@ -35,7 +35,10 @@ def successful_worker(command, output, gpus, **kwargs):
     assert kwargs["env"]["OMP_NUM_THREADS"] == "1"
     assert len(kwargs["env"]["CUDA_VISIBLE_DEVICES"].split(",")) <= 4
     write_json(output / "monitor.json", dict(status="uncontended", wall_seconds=2))
-    write_json(output / "experiment.json", request)
+    write_json(
+        output / "experiment.json",
+        dict(request, measurement=dict(backend=request["settings"]["benchmark_backend"])),
+    )
     write_json(output / "compilation.json", {})
     (output / "benchmarks.tsv").write_text("index\tstatus\tlatency_ms\tconfig\terror\n")
     write_json(
@@ -68,6 +71,7 @@ def test_plan_is_75_serial_workloads_with_identical_pools():
         assert e1["configs"] == e2["configs"] == e3["configs"]
         assert [e["gpu_count"] for e in (e1, e2, e3)] == [1, 4, 4]
         assert e3["settings"]["group_size"] == 8
+        assert all(e["settings"]["benchmark_backend"] == "cupti" for e in (e1, e2, e3))
     assert sum(len(p["configs"]) for p in plan[:25]) == 21145
     preflight = h200.study_plan(preflight=True)
     assert len(preflight) == 15
@@ -352,6 +356,7 @@ def test_worker_wires_frozen_request_and_publishes_complete_outcomes(tmp_path, m
 
         def set_profile_args(self, **kwargs):
             assert kwargs["manual_check_prog"] is case.check
+            assert kwargs["backend"] == "cupti"
             return self
 
         def set_benchmark_report_path(self, path):
@@ -391,7 +396,9 @@ def test_worker_wires_frozen_request_and_publishes_complete_outcomes(tmp_path, m
 
     monkeypatch.setattr(autotuner, "AutoTuner", Tuner)
     system.worker(tmp_path / "request.json", tmp_path)
-    assert h200.read(tmp_path / "experiment.json")["configs"] == configs
+    experiment = h200.read(tmp_path / "experiment.json")
+    assert experiment["configs"] == configs
+    assert experiment["measurement"]["backend"] == "cupti"
     summary = h200.read(tmp_path / "summary.json")
     assert summary["config_count"] == 2 and summary["benchmark_gpu_count"] == gpu_count
     assert summary["compiler_workers"] == 128

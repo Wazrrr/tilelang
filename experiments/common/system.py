@@ -70,6 +70,9 @@ def worker(request_path, output):
 
     w, settings = Workload(**request["workload"]), request["settings"]
     pipeline, grouped, multi_gpu = variant_options(request["variant"])
+    benchmark_backend = settings.get("benchmark_backend", "event")
+    if benchmark_backend not in ("event", "cupti", "cudagraph"):
+        raise ValueError("unknown benchmark backend")
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     devices = list(range(torch.cuda.device_count())) if multi_gpu else [0]
@@ -142,7 +145,7 @@ def worker(request_path, output):
             .set_profile_args(
                 ref_prog=lambda *values: references[values[0].device.index],
                 manual_check_prog=case.check,
-                backend="event",
+                backend=benchmark_backend,
                 cache_input_tensors=False,
                 rtol=case.rtol,
                 atol=case.atol,
@@ -179,7 +182,12 @@ def worker(request_path, output):
             source_sha256=source_hashes("experiments/common/system.py"),
             devices=device_info(devices),
             environment=environment,
-            measurement=dict(backend="event", warmup_ms=settings["warmup"], rep_ms=settings["rep"], cache_flush_bytes=256 * 1024 * 1024),
+            measurement=dict(
+                backend=benchmark_backend,
+                warmup_ms=settings["warmup"],
+                rep_ms=settings["rep"],
+                cache_flush_bytes=256 * 1024 * 1024,
+            ),
             cold_kernel_cache=True,
             cold_autotune_cache=True,
         ),
