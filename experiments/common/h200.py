@@ -22,7 +22,7 @@ from experiments.utils.io import write_json
 
 
 MODES = {"E1": "baseline", "E2": "multi_gpu", "E3": "tiletune"}
-SETTINGS = dict(workers=128, warmup=10, rep=50, timeout=60, group_size=8, seed=123, benchmark_backend="cupti")
+SETTINGS = dict(workers=64, warmup=10, rep=50, timeout=60, group_size=8, seed=123, benchmark_backend="cupti")
 RETRYABLE = {"contended", "host_contended", "monitor_gap"}
 
 
@@ -116,7 +116,7 @@ def validate_attempt(output, request):
     summary = read(output / "summary.json")
     if summary.get("status") != "completed" or summary.get("config_count") != len(request["configs"]):
         raise ValueError("incomplete worker summary")
-    if summary.get("compiler_workers") != 128 or summary.get("benchmark_gpu_count") != request["gpu_count"]:
+    if summary.get("compiler_workers") != request["settings"]["workers"] or summary.get("benchmark_gpu_count") != request["gpu_count"]:
         raise ValueError("worker did not use the frozen CPU/GPU counts")
     experiment = read(output / "experiment.json")
     if request.get("source_identity") and experiment.get("source_identity") != request["source_identity"]:
@@ -213,8 +213,8 @@ def run_queue(root, plan, gpus, cpu_ids, lease_fds, *, run=None, max_contention_
                 CUDA_VISIBLE_DEVICES=",".join(g["uuid"] for g in active),
                 TILELANG_DISABLE_CACHE="1",
                 TILELANG_AUTO_TUNING_DISABLE_CACHE="1",
-                TILELANG_AUTO_TUNING_CPU_COUNTS="128",
-                TILELANG_AUTO_TUNING_MAX_CPU_COUNT="128",
+                TILELANG_AUTO_TUNING_CPU_COUNTS=str(request["settings"]["workers"]),
+                TILELANG_AUTO_TUNING_MAX_CPU_COUNT=str(request["settings"]["workers"]),
                 TILELANG_AUTOTUNE_TIMING_LOG=str(output / "timings.tsv"),
                 TMPDIR=str(temporary),
                 OMP_NUM_THREADS="1",
@@ -395,7 +395,7 @@ def main(argv=None):
     if frozen and any(frozen.get(key) != value for key, value in identity.items()):
         raise ValueError("resume identity changed: workload, pool, code, settings, interpreter or GPUs differ")
     with measurement_lease(gpus) as leases, interruptible():
-        cpu_ids = frozen["cpu_ids"] if frozen else select_cpu_ids(128)
+        cpu_ids = frozen["cpu_ids"] if frozen else select_cpu_ids(SETTINGS["workers"])
         if not set(cpu_ids) <= os.sched_getaffinity(0):
             raise RuntimeError("frozen CPU affinity is no longer available")
         root.mkdir(parents=True, exist_ok=args.resume)

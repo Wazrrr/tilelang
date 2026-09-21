@@ -30,8 +30,8 @@ def small_plan():
 def successful_worker(command, output, gpus, **kwargs):
     request = h200.read(output / "request.json")
     assert len(gpus) == request["gpu_count"]
-    assert kwargs["env"]["TILELANG_AUTO_TUNING_CPU_COUNTS"] == "128"
-    assert kwargs["env"]["TILELANG_AUTO_TUNING_MAX_CPU_COUNT"] == "128"
+    assert kwargs["env"]["TILELANG_AUTO_TUNING_CPU_COUNTS"] == "64"
+    assert kwargs["env"]["TILELANG_AUTO_TUNING_MAX_CPU_COUNT"] == "64"
     assert kwargs["env"]["OMP_NUM_THREADS"] == "1"
     assert len(kwargs["env"]["CUDA_VISIBLE_DEVICES"].split(",")) <= 4
     write_json(
@@ -56,7 +56,7 @@ def successful_worker(command, output, gpus, **kwargs):
         dict(
             status="completed",
             config_count=len(request["configs"]),
-            compiler_workers=128,
+            compiler_workers=64,
             benchmark_gpu_count=request["gpu_count"],
             winner_config=request["configs"][0],
             winner_latency_ms=1,
@@ -377,7 +377,7 @@ def test_worker_wires_frozen_request_and_publishes_complete_outcomes(tmp_path, m
             return self
 
         def _resolve_num_compile_workers(self):
-            return 128
+            return 64
 
         def _prepare_compile_execution(self, *, config_indices):
             future = Future()
@@ -385,7 +385,7 @@ def test_worker_wires_frozen_request_and_publishes_complete_outcomes(tmp_path, m
             return None, [future], {future: [(i, configs[i]) for i in config_indices]}, "test"
 
         def run(self, **kwargs):
-            assert self._resolve_num_compile_workers() == 128
+            assert self._resolve_num_compile_workers() == 64
             assert kwargs["benchmark_multi_gpu"] == (gpu_count == 4)
             assert kwargs["use_pipeline"] == kwargs["enable_grouped_compile"] == (variant == "tiletune")
             assert kwargs["group_compile_size"] == 8 and not kwargs["early_stop"]
@@ -404,7 +404,7 @@ def test_worker_wires_frozen_request_and_publishes_complete_outcomes(tmp_path, m
     assert experiment["measurement"]["backend"] == "cupti"
     summary = h200.read(tmp_path / "summary.json")
     assert summary["config_count"] == 2 and summary["benchmark_gpu_count"] == gpu_count
-    assert summary["compiler_workers"] == 128
+    assert summary["compiler_workers"] == 64
     outcomes = h200.read(tmp_path / "outcomes.json")
     assert outcomes[0]["status"] == "benchmarked"
     assert outcomes[1]["status"] == ("not_selected" if variant == "tiletune" else "benchmarked")

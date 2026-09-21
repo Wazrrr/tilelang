@@ -22,9 +22,9 @@ Run all 25 final workloads once per experiment: 75 workload runs altogether.
 
 | Experiment | Selection | Compiler workers | Benchmark GPUs | Timing | Pipeline | Grouped compilation | Post-compile policy |
 | --- | --- | ---: | ---: | --- | --- | --- | --- |
-| E1: exhaustive, one GPU | Complete pool | 128 | 1 | CUPTI | Off | Off | No pruning; defines the one-GPU oracle |
-| E2: exhaustive, four GPUs | Complete pool | 128 | 4 | CUPTI | Off | Off | No pruning; defines the four-GPU oracle |
-| E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 128 | 4 | CUPTI | On | On, size 8 | Enforced after compilation |
+| E1: exhaustive, one GPU | Complete pool | 64 | 1 | CUPTI | Off | Off | No pruning; defines the one-GPU oracle |
+| E2: exhaustive, four GPUs | Complete pool | 64 | 4 | CUPTI | Off | Off | No pruning; defines the four-GPU oracle |
+| E3: TileTune, four GPUs | Unified memory score, strict alpha=0.5 | 64 | 4 | CUPTI | On | On, size 8 | Enforced after compilation |
 
 Multi-GPU means distributing candidate benchmarks within each workload through
 `AutoTuner.run(benchmark_multi_gpu=True, benchmark_devices=[0,1,2,3])`.
@@ -209,11 +209,11 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
   the active benchmark subset: one GPU during E1 and all four during E2/E3.
   Wait before launch and discard the current attempt if a foreign process or GPU
   activity appears on any GPU active for that workload.
-- Set `TILELANG_AUTO_TUNING_CPU_COUNTS=128` and
-  `TILELANG_AUTO_TUNING_MAX_CPU_COUNT=128`. Check that the tuner's resolved worker
-  count is exactly 128; CPU affinity or allocation can otherwise silently clamp
-  the requested count. This is one shared 128-worker compiler pool per workload,
-  not 128 workers per GPU.
+- Set `TILELANG_AUTO_TUNING_CPU_COUNTS=64` and
+  `TILELANG_AUTO_TUNING_MAX_CPU_COUNT=64`. Check that the tuner's resolved worker
+  count is exactly 64; CPU affinity or allocation can otherwise silently clamp
+  the requested count. This is one shared 64-worker compiler pool per workload,
+  not 64 workers per GPU.
 - Use fresh worker processes with `TILELANG_DISABLE_CACHE=1` and
   `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`. Give each run a new output directory.
   Keep compiler options, authoritative example builders, inputs, references,
@@ -232,8 +232,8 @@ never refill the alpha budget, and include failed-attempt time in compile costs.
 - Monitor GPU/process activity through `experiments.utils.monitor.run_monitored`.
   Discard and retry contaminated workload runs, preserving their logs. Record
   device UUIDs, clocks, driver/toolchain versions, source hashes and pool hashes.
-  Pin workers to one frozen set of sibling-complete CPU cores with at least 136
-  logical CPUs: 128 compiler workers plus eight CPUs of benchmark/runtime
+  Pin workers to one frozen set of sibling-complete CPU cores with at least 72
+  logical CPUs: 64 compiler workers plus eight CPUs of benchmark/runtime
   headroom. Place the coordinator outside that set and set OpenMP, MKL,
   OpenBLAS, NumExpr, TVM and Torch thread counts to one to prevent nested thread
   pools. CPU affinity is not an exclusive OS reservation: sample CPU busy time
@@ -375,7 +375,7 @@ configs per shape, and failed samples consume the budget without replacement:
 
 Compile, check, and benchmark these samples with the same CUPTI measurement
 contract. Fit the CPU `hist` regressor to log latency with at most 600 rounds,
-maximum depth 10, learning rate 0.05, subsample 0.8, seed 123, 128 threads, and
+maximum depth 10, learning rate 0.05, subsample 0.8, seed 123, 64 threads, and
 early stopping after 20 validation rounds. Run collection and fitting without
 overlapping an experiment workload or another CPU/GPU job.
 
