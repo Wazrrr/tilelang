@@ -43,7 +43,7 @@ def make_case(workload):
             block_K=block_K,
             num_stages=num_stages,
             threads=threads,
-        )
+        ).without_attr("tilelang_out_idx")
 
     def inputs(device, generator):
         offsets = list(accumulate(sizes, initial=0))[:-1]
@@ -62,7 +62,7 @@ def make_case(workload):
         build,
         inputs,
         lambda a, b, *metadata: reference(a, b, sizes, transpose_b),
-        None,
+        [5],
         rtol=0.01,
         atol=0.01,
         input_values={"2": list(sizes), "3": offsets, "4": list(accumulate(padded, initial=0))[:-1]},

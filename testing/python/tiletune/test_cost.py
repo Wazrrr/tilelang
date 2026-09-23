@@ -1,6 +1,6 @@
 import pytest
 import tilelang.language as T
-from tilelang.tiletune import analyze_prim_func, rank_records, TileTuneConfig
+from tilelang.tiletune import analyze_prim_func as _analyze_prim_func, rank_records, TileTuneConfig
 from test_analysis import gemm
 
 
@@ -14,6 +14,12 @@ LIMITS = {
     "max_blocks_per_sm": 32,
     "warp_size": 32,
 }
+
+
+def analyze_prim_func(func, config=None, **kwargs):
+    """Keep cost-module coverage on the former detailed default explicitly."""
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
 
 
 @pytest.mark.parametrize("stages", [0, 1, 2, 3])

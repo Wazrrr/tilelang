@@ -1,7 +1,9 @@
 # FlashAttention experiments
 
-The named suite calls [BSHD FlashAttention](../../examples/flash_attention/example_mha_fwd_bshd.py) (`flashattn`) directly.
-Q/K/V/O use BSHD; the example keeps score/probability fragments and its causal loop bound.
+The named suite calls the Blackwell-specific
+[BSHD FlashAttention](../../examples/flash_attention_sm100/mha_fwd_bshd.py)
+(`flashattn`) directly. Q/K/V/O use BSHD; the SM100 example uses TCGen05/TMEM
+while keeping score/probability fragments and its causal loop bound.
 
 `kernel.py` supplies input generation, the numerical reference and output
 indices. The TileLang program is built directly by the example. `spaces.py`

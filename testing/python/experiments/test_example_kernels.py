@@ -92,7 +92,7 @@ def example_program(w, c):
             trans_b=p["transpose_b"],
             dtype=w.dtype,
             **c,
-        )
+        ).without_attr("tilelang_out_idx")
 
     from examples.blockscaled_gemm_sm100.gemm_mxfp8_blockscaled_1d1d import mxfp8_blockscaled_gemm_2cta
 
@@ -109,7 +109,7 @@ def example_program(w, c):
         num_stages=c["num_stages"],
         sf_granularity_k=128,
         transpose_B=True,
-    )
+    ).without_attr("tilelang_out_idx")
 
 
 @pytest.mark.parametrize("w", core_cases("final"), ids=lambda w: w.name)

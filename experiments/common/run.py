@@ -615,7 +615,7 @@ def main():
         "--method", choices=["analyze", "exhaustive", "brute_force", "top_k", "carver", "xgboost", "random"], default="analyze"
     )
     parser.add_argument("--xgb-model", type=Path, help="Frozen model from python -m experiments.xgboost train")
-    parser.add_argument("--metric", choices=["memory", "traffic_waves", "pipeline_time"], default="pipeline_time")
+    parser.add_argument("--metric", choices=["memory", "traffic_waves", "pipeline_time"], default="memory")
     parser.add_argument("--exploration-fraction", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--alpha", type=float, help="Strict original-pool fraction; overrides --top-k for TileTune")

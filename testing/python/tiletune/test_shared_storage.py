@@ -95,8 +95,15 @@ def test_shared_reuse_honors_function_and_call_pass_settings():
     from test_modules import TARGET
 
     func = make_attention(dim=256)(128, 128, 1, 256).with_attr("tilelang_pass_configs", {"tl.disable_shared_memory_reuse": True})
-    blocked = analyze_prim_func(func, target=TARGET, device_limits=LIMITS)
-    allowed = analyze_prim_func(func, target=TARGET, device_limits=LIMITS, pass_configs={"tl.disable_shared_memory_reuse": False})
+    settings = {"ranking_metric": "pipeline_time"}
+    blocked = analyze_prim_func(func, settings, target=TARGET, device_limits=LIMITS)
+    allowed = analyze_prim_func(
+        func,
+        settings,
+        target=TARGET,
+        device_limits=LIMITS,
+        pass_configs={"tl.disable_shared_memory_reuse": False},
+    )
     assert blocked["modules"]["memory_traffic"]["shared_memory_bytes_estimate"] == 262144
     assert allowed["modules"]["memory_traffic"]["shared_memory_bytes_estimate"] == 196608
     assert allowed["modules"]["waves"]["resident_blocks_per_sm_estimate"] == 1

@@ -3,9 +3,14 @@
 import tilelang.language as T
 from tvm import tirx as tir
 from tvm.arith import Analyzer
-from tilelang.tiletune import analyze_prim_func
+from tilelang.tiletune import analyze_prim_func as _analyze_prim_func
 from tilelang.tiletune.src.collector import _Collector
 from tilelang.tiletune.src.propagation import _kernel_outputs, _propagate_tiles
+
+
+def analyze_prim_func(func, config=None, **kwargs):
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
 
 
 def tiled_gemm(repeated=False):

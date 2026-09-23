@@ -2,7 +2,15 @@ import pytest
 import tilelang.language as T
 from tvm import tirx as tir
 from tvm.ir import Range
-from tilelang.tiletune import analyze_prim_func, propagate_inputs
+from tilelang.tiletune import analyze_prim_func as _analyze_prim_func, propagate_inputs
+
+
+def analyze_prim_func(func, config=None, **kwargs):
+    """Exercise the detailed timing-analysis path explicitly in this module."""
+    if config is True:
+        config = {"enabled": True}
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
 
 
 def gemm(trans_a=False, trans_b=False, explicit=False, stages=0, extent=4, input_dtype="float16", acc_dtype="float32", threads=128):
@@ -170,7 +178,7 @@ def test_tcgen05_pipeline_is_recognized_and_scored_with_native_profile():
     )
     result = analyze_prim_func(
         main,
-        {"performance_model": profile},
+        {"ranking_metric": "pipeline_time", "performance_model": profile},
         target={"kind": "cuda", "arch": "sm_100a"},
         device_limits=LIMITS,
     )

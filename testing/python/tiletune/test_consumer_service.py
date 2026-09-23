@@ -92,7 +92,7 @@ def test_producers_do_not_count_as_scalar_consumers():
     assert result["pressure"]["warp_specialization"]["launch_threads"] == 256
     assert {p["consumer_threads"] for p in pipe["phases"]} == {128}
     assert result["tile_cost"]["score"] is not None
-    legacy = analyze_prim_func(func, target=TARGET, device_limits=LIMITS)
+    legacy = analyze_prim_func(func, {"ranking_metric": "pipeline_time"}, target=TARGET, device_limits=LIMITS)
     assert result["pressure"] == legacy["pressure"]
     assert func.script() == before
 

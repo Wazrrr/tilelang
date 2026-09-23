@@ -34,11 +34,11 @@ rank, then benchmark”:
    `top_k` adds a full-grid analysis pass before compilation, freezes the first K
    finite eligible scores, and reuses selected PrimFuncs. Unselected candidates
    remain in the report; compilation and benchmark failures never refill K.
-3. **`pipeline_time` is the default ranking metric.** Select `traffic_waves`
-   explicitly for traffic-based ranking without a timing profile.
-   Pipeline timing requires an explicitly supplied performance profile and a
-   supported schedule. Missing timing information does not silently fall back
-   to a traffic score.
+3. **`memory` is the default ranking metric.** It is profile-free and
+   kernel-family independent. Select `pipeline_time` explicitly when a matching
+   performance profile and supported schedule are available, or select
+   `traffic_waves` for the legacy occupancy-aware traffic ordering. Missing
+   timing information does not silently fall back to another score.
 
 The current autotuner integration requires CUDA with the `tvm_ffi` backend,
 the standard analyzable JIT path, and `early_stop=False`. It cannot be enabled

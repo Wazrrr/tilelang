@@ -2,7 +2,7 @@
 
 import pytest
 
-from tilelang.tiletune import TileTuneConfig, analyze_prim_func, check_compiler_resources
+from tilelang.tiletune import TileTuneConfig, analyze_prim_func as _analyze_prim_func, check_compiler_resources
 from tilelang.tiletune.register_pressure import analyze_register_policy
 from tilelang.tiletune.families import AttentionSpecialization, GemmSpecialization
 from tilelang.autotuner.filters.launch import LaunchResourceInfo
@@ -24,8 +24,14 @@ POLICY = dict(
 )
 
 
+def analyze_prim_func(func, config=None, **kwargs):
+    """Spill-allowance tests require explicit family timing analysis."""
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
+
+
 def policy_result(budget=32, *, policy=None, tile=65920, lower=128, limits=None, family="attention", matched=True):
-    config = TileTuneConfig(attention_spill_budget_registers_per_thread=budget)
+    config = TileTuneConfig(ranking_metric="pipeline_time", attention_spill_budget_registers_per_thread=budget)
     specialization = (AttentionSpecialization if family == "attention" else GemmSpecialization)(name=family, matched=matched)
     return analyze_register_policy(
         dict(
@@ -164,7 +170,10 @@ def test_gemm_margin_is_zero_and_attention_setting_has_cache_identity():
     assert result == base
     assert not policy_result(1000, family="gemm", lower=256)["decision"]["keep"]
     assert policy_result(1000, family="gemm")["register_demand"]["allowance_registers_per_thread"] == 0
-    assert TileTuneConfig(attention_spill_budget_registers_per_thread=32).to_cache_key_dict() != TileTuneConfig().to_cache_key_dict()
+    assert (
+        TileTuneConfig(ranking_metric="pipeline_time", attention_spill_budget_registers_per_thread=32).to_cache_key_dict()
+        != TileTuneConfig().to_cache_key_dict()
+    )
 
 
 def test_unmatched_attention_cannot_use_the_family_spill_allowance():
@@ -183,7 +192,12 @@ ptxas info : Function properties for kernel
     48 bytes stack frame, 48 bytes spill stores, 48 bytes spill loads
 ptxas info : Used {registers} registers
 """)
-    settings = dict(attention_spill_budget_registers_per_thread=1000, max_spill_bytes=None, max_local_bytes=None)
+    settings = dict(
+        ranking_metric="pipeline_time",
+        attention_spill_budget_registers_per_thread=1000,
+        max_spill_bytes=None,
+        max_local_bytes=None,
+    )
     launches = [LaunchResourceInfo(function_name="kernel", block_dims=(384, 1, 1))]
     result = check_compiler_resources(resources, ["kernel"], settings, target=TARGET, launch_infos=launches, device_limits=LIMITS)
     assert result["would_reject"] == reject

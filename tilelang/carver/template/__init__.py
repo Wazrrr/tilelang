@@ -9,4 +9,5 @@ from .general_reduce import GeneralReductionTemplate  # noqa: F401
 from .flashattention import FlashAttentionTemplate  # noqa: F401
 from .grouped_matmul import GroupedMXFP8MatmulTemplate, GroupedMatmulTemplate  # noqa: F401
 from .kda_chunk import KDAChunkTemplate  # noqa: F401
+from .kda_intra import KDAIntraTemplate  # noqa: F401
 from .conv import ConvTemplate  # noqa: F401

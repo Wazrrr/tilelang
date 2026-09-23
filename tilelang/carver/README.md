@@ -199,6 +199,7 @@ Carver abstracts common loop patterns through templates:
 - **`GroupedMatmulTemplate`**: For grouped matrix multiplication over its padded CTA domain.
 - **`GroupedMXFP8MatmulTemplate`**: For padded grouped E4M3 inputs with MXFP8 block scales, BF16 output, and two-CTA dispatch.
 - **`KDAChunkTemplate`**: For gated chunked-delta output, including both tensor-core products.
+- **`KDAIntraTemplate`**: For token-parallel causal query/key and beta-weighted key/key coefficients.
 - **`GEMVTemplate`**: For `y = Ax` or `y = xA` style operations.
 - **`ElementwiseTemplate`**: For elementwise transformations or pointwise ops.
 

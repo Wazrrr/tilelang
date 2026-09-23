@@ -85,6 +85,25 @@ ptxas info : Used 168 registers
     assert not check_compiler_resources(resources, ["kernel"], dict(config, register_cap=128))["keep"]
 
 
+def test_post_compile_policy_does_not_change_analysis_settings():
+    resources = parse_ptxas_output("""ptxas info : Compiling entry function 'kernel' for 'sm_100'
+ptxas info : Function properties for kernel
+    8 bytes stack frame, 17 bytes spill stores, 8 bytes spill loads
+ptxas info : Used 255 registers
+""")
+    config = TileTuneConfig(
+        mode="report_only",
+        max_spill_bytes=None,
+        max_local_bytes=None,
+        post_compile_policy=dict(mode="reject", max_spill_bytes=16, max_local_bytes=16),
+    )
+    assert config.mode == "report_only"
+    assert config.max_spill_bytes is config.max_local_bytes is None
+    decision = check_compiler_resources(resources, ["kernel"], config, target=dict(kind="cuda", arch="sm_100a"))
+    assert not decision["keep"]
+    assert decision["policy"] == dict(mode="reject", register_cap=None, max_spill_bytes=16, max_local_bytes=16)
+
+
 @pytest.mark.parametrize(
     "n_regs,user_cap,mode,would_reject",
     [
@@ -142,7 +161,16 @@ def test_settings_cache_identity():
     assert key() != hopper
 
 
-@pytest.mark.parametrize("kwargs", [{"register_cap": 0}, {"max_spill_bytes": -1}, {"mode": "rank"}])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"register_cap": 0},
+        {"max_spill_bytes": -1},
+        {"mode": "rank"},
+        {"post_compile_policy": {"unknown": 0}},
+        {"post_compile_policy": {"max_spill_bytes": -1}},
+    ],
+)
 def test_invalid_config(kwargs):
     with pytest.raises(ValueError):
         TileTuneConfig(**kwargs)

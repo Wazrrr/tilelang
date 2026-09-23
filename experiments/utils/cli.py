@@ -64,6 +64,10 @@ def source_hashes(kernel_source, *extra_sources):
 
 def observe_compilation(execution, outcomes):
     """Retain each candidate's compile result before benchmark rows are available."""
+    from dataclasses import asdict
+
+    from tilelang.autotuner.filters import AutotuneFilterReject
+
     for future, items in execution[2].items():
 
         def record(done, items=items):
@@ -73,8 +77,16 @@ def observe_compilation(execution, outcomes):
                 for index, _ in items:
                     outcomes[index] = dict(status="compilation_failed", error=str(error))
             else:
-                for index, _, _, error in results:
-                    outcomes[index] = dict(status="compilation_failed" if error else "compiled", error=str(error) if error else None)
+                for index, _, kernel, error in results:
+                    decisions = list(getattr(error, "filter_decisions", None) or getattr(kernel, "_filter_decisions", None) or [])
+                    status = "compiled" if error is None else "compilation_failed"
+                    if isinstance(error, AutotuneFilterReject) and error.decision.stage == "post_compile":
+                        status = "post_compile_rejected"
+                    outcomes[index] = dict(
+                        status=status,
+                        error=str(error) if error else None,
+                        filter_decisions=[asdict(decision) for decision in decisions],
+                    )
 
         future.add_done_callback(record)
     return execution

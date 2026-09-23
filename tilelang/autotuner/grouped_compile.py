@@ -7,11 +7,12 @@ so tuner.py can stay focused on orchestration.
 from __future__ import annotations
 
 import contextlib
-import time
-from dataclasses import replace
 import json
-from typing import Any
+import logging
+import time
 from collections.abc import Callable
+from dataclasses import replace
+from typing import Any
 
 from tilelang import tvm
 from tvm.tirx import PrimFunc
@@ -38,6 +39,7 @@ from tilelang.utils.autotune_timing import timed_autotune_stage
 from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
 
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
+logger = logging.getLogger(__name__)
 
 
 def compile_grouped_unit_tvm_ffi(
@@ -56,6 +58,8 @@ def compile_grouped_unit_tvm_ffi(
     3. Merge all device IR into one IRModule and compile device code once.
     4. Merge kept host IR, build one host runtime module, and import the shared device module.
     5. Construct per-config JITKernel objects that dispatch to named entries in the shared executable.
+    Shared build failures bisect unfinished configs down to singleton builds.
+    Per-config failures and policy rejections remain final and are never retried.
     """
 
     if _prepared_programs is None:
@@ -299,7 +303,8 @@ def compile_grouped_unit_tvm_ffi(
             if tiletune_session is not None:
                 duration = (time.perf_counter() - device_start) * 1000 / len(lowered_items)
                 for item in lowered_items:
-                    tiletune_session.records[item["idx"]]["timings_ms"]["device_compile"] = duration
+                    timings = tiletune_session.records[item["idx"]]["timings_ms"]
+                    timings["device_compile"] = timings.get("device_compile", 0) + duration
 
         with timed_autotune_stage(
             "grouped.inspect_source",
@@ -376,30 +381,32 @@ def compile_grouped_unit_tvm_ffi(
             merged_host_mod = tvm.IRModule(merged_host_funcs, attrs=merged_host_attrs)
 
         host_start = time.perf_counter()
-        host_instruments, host_timing_inst = create_pass_instruments()
-        with (
-            timed_autotune_stage(
-                "grouped.host_codegen",
-                group_size=runtime_group_size,
-                configs=runtime_grouped_config_indices,
-            ),
-            report_pass_timing_on_exit(
-                host_timing_inst,
-                context=f"stage=grouped-host, configs=[{runtime_grouped_config_indices}]",
-            ),
-            tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
-            runtime_items[0]["target"],
-        ):
-            grouped_host_rt_mod = host_codegen(
-                merged_host_mod,
-                runtime_items[0]["target_host"],
-                target=runtime_items[0]["target"],
-            )
-
-        if tiletune_session is not None:
-            duration = (time.perf_counter() - host_start) * 1000 / len(runtime_items)
-            for item in runtime_items:
-                tiletune_session.records[item["idx"]]["timings_ms"]["host_compile"] = duration
+        try:
+            host_instruments, host_timing_inst = create_pass_instruments()
+            with (
+                timed_autotune_stage(
+                    "grouped.host_codegen",
+                    group_size=runtime_group_size,
+                    configs=runtime_grouped_config_indices,
+                ),
+                report_pass_timing_on_exit(
+                    host_timing_inst,
+                    context=f"stage=grouped-host, configs=[{runtime_grouped_config_indices}]",
+                ),
+                tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
+                runtime_items[0]["target"],
+            ):
+                grouped_host_rt_mod = host_codegen(
+                    merged_host_mod,
+                    runtime_items[0]["target_host"],
+                    target=runtime_items[0]["target"],
+                )
+        finally:
+            if tiletune_session is not None:
+                duration = (time.perf_counter() - host_start) * 1000 / len(runtime_items)
+                for item in runtime_items:
+                    timings = tiletune_session.records[item["idx"]]["timings_ms"]
+                    timings["host_compile"] = timings.get("host_compile", 0) + duration
 
         with timed_autotune_stage(
             "grouped.import_module",
@@ -481,8 +488,53 @@ def compile_grouped_unit_tvm_ffi(
                 unit_results.append((idx, config_arg, None, e))
     except Exception as e:
         completed = {result[0] for result in unit_results}
-        for item in lowered_items:
-            if item["idx"] not in completed:
-                unit_results.append((item["idx"], item["config_arg"], None, e))
+        pending = [item for item in lowered_items if item["idx"] not in completed]
+        if len(pending) <= 1:
+            unit_results.extend((item["idx"], item["config_arg"], None, e) for item in pending)
+        elif pending:
+            # A merged device/host build cannot identify which member poisoned
+            # the group. Bisect only unfinished configs until a failing
+            # singleton is isolated. Reuse the already elaborated PrimFuncs;
+            # analysis, selection, completed results, and policy rejections are
+            # never repeated or replaced.
+            midpoint = max(1, len(pending) // 2)
+            retry_groups = [pending[:midpoint], pending[midpoint:]]
+            failed_indices = [item["idx"] for item in pending]
+            retry_indices = [[item["idx"] for item in group] for group in retry_groups if group]
+            logger.warning(
+                "Grouped compilation failed for configs %s; retrying %s: %s",
+                failed_indices,
+                retry_indices,
+                e,
+            )
+            if tiletune_session is not None:
+                for item in pending:
+                    tiletune_session.records[item["idx"]].setdefault("grouped_compile_fallbacks", []).append(
+                        dict(configs=failed_indices, retry_groups=retry_indices, error=str(e))
+                    )
+            for group in retry_groups:
+                if not group:
+                    continue
+                prepared = {}
+                retry_items = []
+                for item in group:
+                    idx = item["idx"]
+                    program = item["program"]
+                    symbol = str(program.attrs["global_symbol"])
+                    suffix = f"_gc_{idx}"
+                    if symbol.endswith(suffix):
+                        program = program.with_attr("global_symbol", symbol[: -len(suffix)])
+                    prepared[idx] = program
+                    retry_items.append((idx, item["config_arg"]))
+                unit_results.extend(
+                    compile_grouped_unit_tvm_ffi(
+                        retry_items,
+                        compile_args,
+                        elaborate_func,
+                        filter_config=filter_config,
+                        tiletune_session=tiletune_session,
+                        _prepared_programs=prepared,
+                    )
+                )
 
     return unit_results

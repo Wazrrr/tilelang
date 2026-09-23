@@ -19,7 +19,7 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
     The legacy recorder's default zeros are not observations. Its optional
     ``observed_fields`` marker distinguishes a reported zero from a default.
     """
-    config = TileTuneConfig.from_value(config)
+    config = TileTuneConfig.from_value(config).compiler_resource_config()
     register_budget = resolve_register_budget(config, target)
     backend = register_budget["target_model"]["kind"]
     launches = {info.function_name: info for info in launch_infos or []}
@@ -118,6 +118,10 @@ def check_compiler_resources(resource_usage, function_names, config=None, *, tar
                 else:
                     policy_reasons.append(reason)
     return {
+        "policy": {
+            key: getattr(config, key)
+            for key in ("mode", "register_cap", "max_spill_bytes", "max_local_bytes")
+        },
         "keep": not reasons or config.mode == "report_only",
         "would_reject": bool(reasons),
         "status": "reject" if reasons else "unknown" if unknown else "pass",

@@ -5,6 +5,9 @@ The suite calls
 directly. Q, K, and beta use BF16; cumulative gates and accumulation use FP32;
 the `Aqk` and `Akk` coefficient outputs use BF16. Every workload uses DK=128,
 chunk size 64, and sub-chunk size 16.
+There is no separate SM100 implementation of this token-parallel KDA stage in
+`examples/`; the architecture-neutral example above is therefore the
+authoritative kernel on B200 as well.
 
 The five development/final cases cover 2K–16K sequences, 32/64 heads, and a
 batched shape. Training uses `(B,H,S)=(1,16,1024)` and `(2,16,2048)`; validation
@@ -23,8 +26,9 @@ Every case uses the same 513-config B200 pool:
 At 256 threads, odd `block_H` values above one are excluded because the B200
 layout planner rejects them. All other combinations compile, and all 32 native
 example autotune configurations are included. The pool has no alternative
-presets or budget cap. Carver is explicitly unsupported because its chunk-level
-template does not model these token-parallel coefficient semantics.
+presets or budget cap. Carver uses the dedicated `KDAIntraTemplate` plus an
+experiment-grid traffic/occupancy adapter; the older `KDAChunkTemplate` models
+a different KDA output stage and is not reused here.
 
 ```bash
 python -m experiments.kda.tiletune.run --suite final --device blackwell --plan

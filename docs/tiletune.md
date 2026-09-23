@@ -234,11 +234,14 @@ num_waves = ceil(grid_CTAs / (SM_count × resident_CTAs_per_SM))
 traffic_waves_score = (logical_traffic_bytes_per_CTA + 1) × num_waves
 ```
 
-The default metric is `pipeline_time`, which requires an explicit device profile
-and a supported schedule. Missing timing information leaves scores unknown;
-there is no automatic fallback. Select `ranking_metric="traffic_waves"` for
-traffic-based ranking without a timing profile. Matrix work uses aggregate tensor
-and shared-memory service ceilings, plus an optional WGMMA per-warpgroup ceiling.
+The default metric is `memory`, a profile-free, kernel-family-independent
+ordering of logical global byte-waves, pipeline depth, and logical access-waves.
+Select `ranking_metric="pipeline_time"` explicitly to use a matching device
+profile and supported schedule, or `ranking_metric="traffic_waves"` for the
+legacy occupancy-aware traffic ordering. Missing timing information leaves a
+requested `pipeline_time` score unknown; there is no automatic fallback. Matrix
+work uses aggregate tensor and shared-memory service ceilings, plus an optional
+WGMMA per-warpgroup ceiling.
 Scalar, exponential and reduction components use:
 
 ```text

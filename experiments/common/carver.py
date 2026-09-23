@@ -9,6 +9,7 @@ def workload_template(workload, configs=None, *, arch=None):
         FP8MatmulTemplate,
         FlashAttentionTemplate,
         GroupedMatmulTemplate,
+        KDAIntraTemplate,
         MatmulTemplate,
     )
 
@@ -48,6 +49,20 @@ def workload_template(workload, configs=None, *, arch=None):
             in_dtype=workload.dtype,
             out_dtype=workload.dtype,
             accum_dtype="float32",
+            **common,
+        )
+    if workload.op == "kda_chunk_intra_token_parallel":
+        return KDAIntraTemplate(
+            batch_size=p["batch"],
+            num_heads=p["heads"],
+            sequence=p["sequence"],
+            key_dim=p["dim"],
+            chunk_size=p["chunk_size"],
+            sub_chunk_size=p["sub_chunk_size"],
+            in_dtype=workload.dtype,
+            out_dtype=workload.dtype,
+            accum_dtype="float32",
+            gate_dtype="float32",
             **common,
         )
     if workload.op == "grouped_gemm":
@@ -177,14 +192,8 @@ def attention_rank(workload, device, configs, top_k):
         traffic = element_bytes * (2 * bm * dim + average_iterations * 2 * bn * dim)
         shared = element_bytes * (2 * bm * dim + 2 * bn * dim * depth)
         register_words = math.ceil((bm * bn * 6 + bm * dim * 4 + bm * 5 * 4) / 4)
-        valid, blocks, waves = _occupancy(
-            arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"]
-        )
-        valid = (
-            valid
-            and _full_row_gemm_supported(bm, bn, c["threads"])
-            and _full_row_gemm_supported(bm, dim, c["threads"])
-        )
+        valid, blocks, waves = _occupancy(arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"])
+        valid = valid and _full_row_gemm_supported(bm, bn, c["threads"]) and _full_row_gemm_supported(bm, dim, c["threads"])
         return dict(
             valid=valid,
             traffic_bytes_per_cta=traffic,

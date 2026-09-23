@@ -2,10 +2,16 @@
 
 import pytest
 import tilelang.language as T
-from tilelang.tiletune import analyze_prim_func
+from tilelang.tiletune import analyze_prim_func as _analyze_prim_func
 from tilelang.tiletune.pipeline import estimate_pipeline_cycles
 from test_cost import LIMITS
 from test_modules import PROFILE, TARGET
+
+
+def analyze_prim_func(func, config=None, **kwargs):
+    """Pipeline tests opt into the timing model after memory became default."""
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
 
 
 def matrix_pipeline(threads=128, stages=3):

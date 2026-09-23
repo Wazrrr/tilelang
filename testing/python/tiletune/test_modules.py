@@ -1,7 +1,7 @@
 """Shared analysis modules on GEMM and online-softmax attention IR."""
 
 import pytest
-from tilelang.tiletune import analyze_prim_func, TileTuneConfig
+from tilelang.tiletune import analyze_prim_func as _analyze_prim_func, TileTuneConfig
 from tilelang.tiletune.pipeline import estimate_pipeline_cycles
 from test_analysis import gemm
 from test_cost import LIMITS
@@ -24,6 +24,12 @@ PROFILE = dict(
     barrier_cycles=16,
 )
 MODULES = {"register_pressure", "warp_specialization", "pipeline_overlap", "memory_traffic", "waves", "ranking"}
+
+
+def analyze_prim_func(func, config=None, **kwargs):
+    """Request detailed pipeline modules unless a test names another metric."""
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
 
 
 def attention(layout="bshd", causal=False, stages=2, sequence=128, block_n=64):
@@ -124,10 +130,10 @@ def test_attention_timing_contains_both_gemms_softmax_and_once_only_query():
 
 def test_profiles_and_specializations_are_in_cache_identity():
     default = TileTuneConfig().to_cache_key_dict()
-    assert default == TileTuneConfig(ranking_metric="pipeline_time").to_cache_key_dict()
+    assert default == TileTuneConfig(ranking_metric="memory").to_cache_key_dict()
     assert default != TileTuneConfig(ranking_metric="traffic_waves").to_cache_key_dict()
     assert default != TileTuneConfig(memory_diagnostics=True).to_cache_key_dict()
-    assert default != TileTuneConfig(specialization="attention").to_cache_key_dict()
+    assert default != TileTuneConfig(ranking_metric="pipeline_time", specialization="attention").to_cache_key_dict()
     assert default != TileTuneConfig(ranking_metric="pipeline_time", performance_model=PROFILE).to_cache_key_dict()
     assert TileTuneConfig(report_path="one").to_cache_key_dict() == TileTuneConfig(report_path="two").to_cache_key_dict()
     for profile in ({"unknown": 1}, {"global_bytes_per_cycle": 0}, {"copy_latency_cycles": float("nan")}):

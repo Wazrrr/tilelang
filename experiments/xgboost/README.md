@@ -55,6 +55,24 @@ python -m experiments.common.run --manifest heldout.json \
   --method xgboost --xgb-model /path/to/model.json --top-k 20
 ```
 
+For a retrospective model per completed B200 E1 workload, use disjoint
+configuration subsets from each exhaustive oracle:
+
+```bash
+python -m experiments.xgboost.oracle_training \
+  --oracle-root /path/to/E1/E1 \
+  --output /path/to/xgboost-within-workload
+```
+
+This auxiliary analysis uses 10% of configurations for training, a disjoint
+10% for validation, and the rest for held-out reporting. XGBoost fitting is on
+the CPU. `training-summary.json` reports measured CPU fitting time and estimates
+the one-GPU time needed to collect training and validation labels by scaling the
+source oracle's recorded `tuning_seconds` by each attempted subset's share of
+the full pool. Failed attempts consume the collection budget. This is a
+within-workload configuration-generalization analysis, not the primary
+cross-shape baseline described below.
+
 Collection directories contain `experiment.json`, candidate outcomes and a
 completed result. The reader preserves the declared pool and original collection
 cost. Sampled collections are not sampled a second time. Explicit subsets retain

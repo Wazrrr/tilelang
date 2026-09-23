@@ -5,13 +5,25 @@ from types import SimpleNamespace
 
 import pytest
 
-from tilelang.tiletune import TileTuneConfig, analyze_prim_func, check_compiler_resources, current_target, resolve_target
+from tilelang.tiletune import (
+    TileTuneConfig,
+    analyze_prim_func as _analyze_prim_func,
+    check_compiler_resources,
+    current_target,
+    resolve_target,
+)
 from tilelang.tiletune.compute import fragment_reduction_work
 from tilelang.tiletune.profiling.device_profile import load_device_profile
 from tilelang.tiletune.src.device import query_device_limits
 from test_pipeline import matrix_pipeline
 from test_modules import PROFILE
 from examples.gemm.example_gemm_tiletune_trace import ILLUSTRATIVE_LIMITS
+
+
+def analyze_prim_func(func, config=None, **kwargs):
+    """Target-policy tests exercise the detailed timing/occupancy path."""
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
 
 
 @pytest.mark.parametrize(

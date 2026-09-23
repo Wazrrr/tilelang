@@ -86,10 +86,17 @@ def test_every_experiment_family_has_a_carver_common_grid_adapter(op):
             assert all(not record["model"]["valid"] for record in result["configs"][:8])
 
 
-def test_token_parallel_kda_carver_is_explicitly_unsupported():
-    from experiments.common.baselines import carver_support_reason
-    from experiments.common.spec import Device, TARGETS
+def test_token_parallel_kda_carver_ranks_the_common_grid():
+    from experiments.common.baselines import carver_rank, carver_support_reason
+    from experiments.common.spec import Device, TARGETS, configurations
     from experiments.kda.cases import cases
 
-    reason = carver_support_reason(cases(holdout=True)[0], Device("blackwell", TARGETS["blackwell"]))
-    assert reason == "Carver has no template for token-parallel KDA intra coefficients"
+    workload = cases(holdout=True)[0]
+    device = Device("blackwell", TARGETS["blackwell"])
+    configs = configurations(workload, device)
+    assert carver_support_reason(workload, device) is None
+    result = carver_rank(workload, device, configs, top_k=20)
+    assert result["template"] == "KDAIntraTemplate"
+    assert result["selection"]["selected_count"] >= 20
+    assert len(result["configs"]) == 513
+    assert all(result["configs"][index]["model"]["valid"] for index in result["selection"]["selected_indices"])

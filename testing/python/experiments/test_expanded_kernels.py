@@ -65,6 +65,13 @@ def test_example_fp8_gemm_native_schedule(gpu_target):
     )
 
 
+def test_fp8_gemm_declares_native_output_parameter():
+    from experiments.common.kernels import make_case
+
+    w = Workload("fp8", "gemm_fp8", dict(m=256, n=256, k=256, transpose_b=True), dtype="float8_e4m3fn")
+    assert make_case(w).out_idx == [4]
+
+
 def test_retired_rewrite_knobs_are_not_silently_ignored():
     from experiments.common.kernels import make_case
 

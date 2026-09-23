@@ -5,6 +5,11 @@ This family follows [gemm/](../gemm/README.md) and calls
 directly. It uses the concatenated forward example, with FP32 accumulation and
 the example's masked fragment-to-global output. The adapter contains no local
 TileLang kernel. Pointer-table and backward examples are outside this family.
+The Blackwell-specific
+[`grouped_gemm_mxfp8_blockscaled_1d1d.py`](../../examples/blockscaled_gemm_sm100/grouped_gemm_mxfp8_blockscaled_1d1d.py)
+is not a drop-in replacement: it is an FP8 block-scaled operation with explicit
+scale tensors, whereas this family deliberately measures the BF16 concatenated
+grouped-GEMM contract.
 
 For group sizes `batch_sizes=[M0, M1, ...]`, A has shape `(sum(Mi), K)`.
 B has shape `(G, K, N)` with `transpose_b=False`, or `(G, N, K)` with

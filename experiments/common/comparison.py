@@ -199,7 +199,11 @@ def main(argv=None):
     parser.add_argument("--phase", choices=("all", "selection", "oracle"), default="all")
     parser.add_argument("--oracle-root", type=Path, help="Shared oracle directory, used only after all seed selections are frozen")
     parser.add_argument("--measurement-identity", type=Path, help="Verified measurement identity supplied by the baseline coordinator")
-    parser.add_argument("--skip-profile", action="store_true", help="Baseline-only collection needs no TileTune primitive profile")
+    parser.add_argument(
+        "--skip-profile",
+        action="store_true",
+        help="Skip optional primitive-profile preparation; memory-default TileTune does not require it",
+    )
     parser.add_argument("--skip-validation", action="store_true", help="Use the oracle table without additional winner reruns")
     parser.add_argument("--output", type=Path, default=Path("experiments/results/portable-comparison"))
     parser.add_argument("--resume", action="store_true")
@@ -291,8 +295,6 @@ def main(argv=None):
     settings.update(memory_regime="streaming", trace=False, seed=args.input_seed)
     if args.measurement_identity:
         settings["measurement_identity"] = json.loads(args.measurement_identity.read_text())
-    if args.skip_profile and any(m.startswith("tiletune") for m in args.methods):
-        parser.error("TileTune requires profile preparation")
     xgb_training = dict(
         rounds=DEFAULT_ROUNDS, max_depth=DEFAULT_MAX_DEPTH, learning_rate=DEFAULT_LEARNING_RATE, subsample=DEFAULT_SUBSAMPLE
     )
@@ -343,7 +345,7 @@ def main(argv=None):
         raise ValueError("source/native build changed since collection; use a new output directory")
     write_json(root / "provenance.json", provenance)
 
-    def run(workload, device, method, output, metric="pipeline_time", model=None, sampling=None, exploration=0):
+    def run(workload, device, method, output, metric="memory", model=None, sampling=None, exploration=0):
         indices = settings["config_indices"]
         if indices is None and device.subsets:
             indices = device.subsets.get(workload.name)
@@ -463,8 +465,8 @@ def main(argv=None):
             # Both analytical metrics are declared in advance. Neither is chosen
             # after reading this workload's oracle or validation measurements.
             for label, method, metric in (
-                ("tiletune", "top_k", "pipeline_time"),
-                ("tiletune_exploration", "top_k", "pipeline_time"),
+                ("tiletune", "top_k", "memory"),
+                ("tiletune_exploration", "top_k", "memory"),
                 ("tiletune_traffic", "top_k", "traffic_waves"),
                 ("carver", "carver", "pipeline_time"),
                 ("xgboost", "xgboost", "pipeline_time"),

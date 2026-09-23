@@ -79,7 +79,10 @@ def make_case(workload):
                 group_size=group_size,
                 column_major=column_major,
             )
-        return _program(implementation, **kwargs)
+        # Keep the output contract explicit in KernelCase. The implicit
+        # tilelang_out_idx attribute is not retained by every parallel tuning
+        # path, while an explicit compile argument is.
+        return _program(implementation, **kwargs).without_attr("tilelang_out_idx")
 
     def inputs(device, generator):
         from examples.blockscaled_gemm_sm100.gemm_mxfp8_blockscaled_1d1d import quantize_fp8_with_packed_ue8m0
@@ -88,4 +91,7 @@ def make_case(workload):
         b, scale_b, _ = quantize_fp8_with_packed_ue8m0(_random((n, k), "bfloat16", device, generator), gran_k=128)
         return [a, b, scale_a, scale_b]
 
-    return BlockScaledFP8KernelCase(build, inputs, reference, None, rtol=0.03, atol=0.03)
+    # The native SM100 example materializes C as the fifth PrimFunc parameter.
+    # Mark it as an output so the runtime allocates it instead of expecting the
+    # caller to supply five input tensors.
+    return BlockScaledFP8KernelCase(build, inputs, reference, [4], rtol=0.03, atol=0.03)

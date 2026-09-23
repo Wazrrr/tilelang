@@ -22,4 +22,5 @@ from .template import (  # noqa: F401
     GroupedMXFP8MatmulTemplate,
     GroupedMatmulTemplate,
     KDAChunkTemplate,
+    KDAIntraTemplate,
 )

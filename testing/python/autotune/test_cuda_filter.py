@@ -638,6 +638,44 @@ def test_filter_targets_can_be_disabled_independently():
     assert decision.reason == "filter_targets_passed"
 
 
+def test_filter_none_limits_capture_resources_without_rejecting():
+    filter_config = AutotuneFilterConfig(
+        enabled=True,
+        action="report",
+        check_spills=True,
+        max_spills=None,
+        check_local_memory=True,
+        max_local_size_bytes=None,
+        check_registers=False,
+        check_c_local=False,
+        check_output_elements_per_thread=False,
+        check_wgmma_register_pressure=False,
+        check_k_loop=False,
+        check_tma_tiny_tile=False,
+        check_tma_store_count=False,
+        check_quant_dequant_elements_per_thread=False,
+        check_sparse_mask=False,
+        check_attention_spills=True,
+        max_attention_spills=None,
+        check_attention_local_memory=True,
+        max_attention_local_size_bytes=None,
+        check_attention_state_elements_per_thread=False,
+    )
+    decision = evaluate_post_compile_filter(
+        launch_infos=[LaunchResourceInfo("main_kernel", block_dims=(128, 1, 1))],
+        resource_usage={"main_kernel": KernelResourceUsage(n_spills=1094, local_size_bytes=2600)},
+        kernel_source=SLOW_KERNEL_SOURCE,
+        config={"block_M": 256, "block_N": 256, "thread_num": 128, "num_stages": 0},
+        filter_config=filter_config,
+    )
+
+    assert filter_config.needs_cuda_resource_usage()
+    assert decision.verdict == "keep"
+    assert decision.reason == "filter_targets_passed"
+    assert decision.details["kernels"][0]["n_spills"] == 1094
+    assert decision.details["kernels"][0]["local_size_bytes"] == 2600
+
+
 def test_filter_report_action_keeps_advisory_findings():
     decision = evaluate_pre_compile_filter(
         launch_infos=[LaunchResourceInfo("main_kernel", block_dims=(128, 1, 1))],

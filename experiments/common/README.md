@@ -193,8 +193,9 @@ still means exhaustive **report-only TileTune** analysis/measurement. The new
 Carver adapters map the exact supplied grids through one canonical template
 selector. Plain FP16/BF16 GEMM uses `MatmulTemplate`, FP8 GEMM uses the dedicated
 `FP8MatmulTemplate`, attention uses `FlashAttentionTemplate`, grouped GEMM uses
-`GroupedMatmulTemplate`. Token-parallel KDA-intra is unsupported. Other unsupported fused or
-batched GEMM forms are still rejected by their family contracts.
+`GroupedMatmulTemplate`, and token-parallel KDA-intra uses
+`KDAIntraTemplate`. Other unsupported fused or batched GEMM forms are still
+rejected by their family contracts.
 
 Each test case records method outcomes, an independent oracle table, ranking
 diagnostics, and repeated winner measurements in `comparison.json`. Diagnostics
@@ -457,9 +458,10 @@ CUDA GEMM/attention analysis and the common top-K interface remain in use.
 Analysis version 20 adds Ampere compiler-ordered pipeline timing, generic
 reduction ownership, per-iteration external accesses and MMA operand storage.
 It corrects scalar work counts, per-thread expression reuse and per-output reduction synchronization, and uses profile version 5 for asynchronous-copy
-and `rsqrt` service. The default metric is `pipeline_time`; lower scores rank
-first. Supply a matching timing profile, or select `--metric traffic_waves`
-explicitly for traffic-based ranking. Old profiles without the required
+and `rsqrt` service. The default metric is `memory`; lower scores rank first
+without a timing profile or kernel-family model. Select `--metric pipeline_time`
+explicitly with a matching timing profile, or `--metric traffic_waves` for the
+legacy occupancy-aware traffic ordering. Old profiles without the required
 asynchronous-copy fields cannot score positive-stage Ampere pipelines.
 
 For a completed comparison or suite run, [audit_model.py](audit_model.py) audits all saved

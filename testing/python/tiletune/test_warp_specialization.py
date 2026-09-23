@@ -1,12 +1,18 @@
 import pytest
 import tilelang.language as T
-from tilelang.tiletune import analyze_prim_func
+from tilelang.tiletune import analyze_prim_func as _analyze_prim_func
 from tilelang.transform import PassContext
 from test_analysis import gemm
 from test_cost import LIMITS
 
 
 TARGET = {"kind": "cuda", "arch": "sm_90a"}
+
+
+def analyze_prim_func(func, config=None, **kwargs):
+    """Warp-specialization tests explicitly opt into pipeline analysis."""
+    config = {"ranking_metric": "pipeline_time", **(config or {})}
+    return _analyze_prim_func(func, config, **kwargs)
 
 
 @pytest.mark.parametrize("threads,consumer_request", [(128, 240), (256, 240), (384, 160)])

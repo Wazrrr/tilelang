@@ -174,8 +174,8 @@ def test_adapter_program_equals_example(w, dtype):
     p = w.parameters
     example = grouped_gemm.get_tir(
         K=p["k"], N=p["n"], batch_sizes_list=tuple(p["batch_sizes"]), trans_b=p["transpose_b"], dtype=dtype, **CONFIG
-    )
-    assert case.out_idx is None
+    ).without_attr("tilelang_out_idx")
+    assert case.out_idx == [5]
     tvm.ir.assert_structural_equal(case.build(**CONFIG), example)
 
 

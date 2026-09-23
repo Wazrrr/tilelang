@@ -12,6 +12,8 @@ class TileTuneConfig:
     register_cap: int | None = None  # Optional tighter cap; known targets supply the hardware ceiling.
     max_spill_bytes: int | None = 0  # None records spills without imposing a limit.
     max_local_bytes: int | None = 0  # None records local memory without imposing a limit.
+    # Override compiler-resource policy without changing analysis or selection.
+    post_compile_policy: dict | None = None
     # Soft tile-demand allowance in 32-bit registers per attention computing thread.
     # Physical occupancy and post-compile limits remain strict and independent.
     attention_spill_budget_registers_per_thread: int = 0
@@ -24,7 +26,9 @@ class TileTuneConfig:
     exploration_seed: int = 123
     device_limits: dict | None = None
     specialization: str = "auto"
-    ranking_metric: str = "pipeline_time"
+    # The profile-free, kernel-family-independent memory ordering is the
+    # default. Timing and occupancy models remain explicit opt-ins.
+    ranking_metric: str = "memory"
     performance_model: dict | None = None
     trace_path: str | None = None  # Append intermediate analysis snapshots for manual review.
     facts_path: str | None = None  # Optional portable compiler-fact artifact.
@@ -36,6 +40,12 @@ class TileTuneConfig:
     input_values: dict | None = None
 
     def __post_init__(self):
+        if self.post_compile_policy is not None:
+            allowed = {"mode", "register_cap", "max_spill_bytes", "max_local_bytes"}
+            if not isinstance(self.post_compile_policy, dict) or self.post_compile_policy.keys() - allowed:
+                raise ValueError("post_compile_policy accepts mode, register_cap, max_spill_bytes and max_local_bytes")
+            # Reuse validation for the effective compiler-only settings.
+            self.compiler_resource_config()
         if self.input_values is not None and (
             not isinstance(self.input_values, dict)
             or any(
@@ -134,6 +144,12 @@ class TileTuneConfig:
         else:
             raise TypeError("tiletune must be a bool, dict, or TileTuneConfig")
         return replace(config, **kwargs)
+
+    def compiler_resource_config(self):
+        """Resolve compiler-only overrides; pre-lowering uses the original config."""
+        if self.post_compile_policy is None:
+            return self
+        return replace(self, post_compile_policy=None, **self.post_compile_policy)
 
     def to_cache_key_dict(self):
         values = asdict(self)

@@ -35,6 +35,14 @@ def _offline_hopper():
         ),
         (
             _workload(
+                "kda",
+                "kda_chunk_intra_token_parallel",
+                {"batch": 1, "heads": 2, "sequence": 128, "dim": 64, "chunk_size": 64, "sub_chunk_size": 16},
+            ),
+            "KDAIntraTemplate",
+        ),
+        (
+            _workload(
                 "grouped",
                 "grouped_gemm",
                 {"batch_sizes": [31, 65], "n": 128, "k": 64, "transpose_b": True},
@@ -66,9 +74,7 @@ def test_fp8_template_preserves_kernel_dtype_and_uses_tensorizable_model_dtype(k
     assert template.kernel_dtype == kernel_dtype
     assert template.in_dtype == model_dtype
     assert template.out_dtype == "bfloat16"
-    _, tags = get_tensorized_func_and_tags(
-        template.equivalent_function(), template.arch.target, allow_gemv=True
-    )
+    _, tags = get_tensorized_func_and_tags(template.equivalent_function(), template.arch.target, allow_gemv=True)
     assert tags
 
 
@@ -86,15 +92,19 @@ def test_fused_templates_model_the_full_semantic_graph():
         assert stage in attention_ir
 
 
-
-def test_token_parallel_kda_has_no_incorrect_chunk_level_template():
-    workload = _workload(
-        "kda",
-        "kda_chunk_intra_token_parallel",
-        {"batch": 1, "heads": 2, "sequence": 128, "dim": 64, "chunk_size": 64, "sub_chunk_size": 16},
+def test_token_parallel_kda_uses_coefficient_template():
+    template = workload_template(
+        _workload(
+            "kda",
+            "kda_chunk_intra_token_parallel",
+            {"batch": 1, "heads": 2, "sequence": 128, "dim": 64, "chunk_size": 64, "sub_chunk_size": 16},
+        ),
+        arch=_offline_hopper(),
     )
-    with pytest.raises(ValueError, match="No Carver template"):
-        workload_template(workload, arch=_offline_hopper())
+    script = template.equivalent_function().script()
+    assert type(template).__name__ == "KDAIntraTemplate"
+    for name in ("Q", "K", "GK", "Beta", "Aqk", "Akk"):
+        assert name in script
 
 
 def test_grouped_template_preserves_padded_cta_domain():

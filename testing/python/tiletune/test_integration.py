@@ -61,9 +61,9 @@ def test_gpu_exhaustive(tmp_path, grouped, mode):
         assert "analysis" in report["stage_cost_percent"]
         assert len(report["ranking"]) == 2
         assert sorted(r["index"] for r in report["ranking"]) == [0, 1]
-        assert report["settings"]["ranking_metric"] == "pipeline_time"
-        assert all(r["tile_cost"]["score"] is None for r in report["configs"])  # no timing profile
-        assert all(r["tile_cost"]["input_bytes_per_block"] > 0 for r in report["configs"])
+        assert report["settings"]["ranking_metric"] == "memory"
+        assert all(r["tile_cost"]["score"] is not None for r in report["configs"])
+        assert all(r["tile_cost"]["logical_byte_waves"] > 0 for r in report["configs"])
 
 
 @pytest.mark.parametrize("grouped", [False, True])
@@ -274,7 +274,7 @@ def test_ws_analysis_receives_effective_compile_override(monkeypatch):
     from tilelang.tiletune.runtime import TileTuneSession
     from tvm.target import Target
 
-    session = TileTuneSession(tilelang.TileTuneConfig(enabled=True), [{}])
+    session = TileTuneSession(tilelang.TileTuneConfig(enabled=True, ranking_metric="pipeline_time"), [{}])
 
     def elaborate():
         return kernel(64, stages=2).with_attr("tilelang_pass_configs", {"tl.disable_warp_specialized": True})

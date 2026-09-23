@@ -1,8 +1,12 @@
 # GEMM experiments
 
-This experiment uses one kernel: [`make_autotune_kernel_builder`](../../examples/gemm/example_gemm_advanced_autotune.py)
-from the advanced GEMM example. `kernel.py` supplies inputs, a numerical reference
-and the runner interface. There are no local TileLang kernels or legacy runners.
+This experiment uses one kernel: the Blackwell-specific
+[`matmul`](../../examples/gemm_sm100/gemm_tcgen5mma.py) TCGen05 example.
+`kernel.py` supplies inputs, a numerical reference and the runner interface.
+There are no local TileLang kernels or legacy runners. The configuration pool
+also covers every schedule from the earlier architecture-neutral advanced GEMM
+example so that moving to the native SM100 kernel does not narrow the original
+tuning space.
 
 A has shape (M,K), B has shape (N,K), and the kernel computes C=A@B.T using FP32
 accumulation and the example's shared-memory output. All named-suite workloads

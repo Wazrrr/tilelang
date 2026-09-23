@@ -92,7 +92,7 @@ def study_plan(suite, devices=None, *, families=None, config_space=None):
         suite=suite,
         families=families,
         budget=budget,
-        metric="pipeline_time",
+        metric="memory",
         top_k=20,
         dtypes=sorted({w.dtype for w in tests}),
         devices=[d.to_dict() for d in planned],
@@ -170,7 +170,7 @@ def execute_smoke(plan, output, settings):
                 request = make_request(
                     workload,
                     device,
-                    dict(settings, method="smoke", metric="pipeline_time", top_k=20, seed=123, trace=False, memory_regime="streaming"),
+                    dict(settings, method="smoke", metric="memory", top_k=20, seed=123, trace=False, memory_regime="streaming"),
                 )
                 result = _existing_or_run(request, output / device.name / workload.name)
             results.append(result)

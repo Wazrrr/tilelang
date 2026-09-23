@@ -5,6 +5,11 @@ spaces, and experiment commands.
 
 The active dtype, shape, scale-layout, and architecture-specific kernel rules
 are frozen in [BENCHMARK_CONTRACT.md](BENCHMARK_CONTRACT.md).
+The three-run B200 final protocol is frozen in
+[B200_FINAL_THREE_RUN_PLAN.md](B200_FINAL_THREE_RUN_PLAN.md).
+Its resumable coordinator is available as `python -m experiments.common.b200`;
+the preemptible one-mode-per-job Slurm entry point is
+`experiments/common/run_b200_slurm.sh`.
 
 For a new kernel family, follow the [agent guide](.agent). For existing kernels,
 start in the family folder:
@@ -77,11 +82,11 @@ winner receives seven checks. Preparation costs are recorded separately.
 Carver resolves supported workloads through one canonical template selector:
 `MatmulTemplate` for GEMM, `FP8MatmulTemplate` for FP8 GEMM,
 `FlashAttentionTemplate` for attention and `GroupedMatmulTemplate` for grouped
-GEMM. Token-parallel KDA-intra is explicitly unsupported because Carver has no
-matching semantic template. Every supported adapter scores the exact shared
-experiment pool rather than a separately generated grid. FP8 templates retain
-the kernel format while lowering `float8_e4m3fn` to Carver's tensorizable
-`float8_e4m3` spelling internally.
+GEMM. Token-parallel KDA-intra uses the matching `KDAIntraTemplate`. Every
+supported adapter scores the exact shared experiment pool rather than a
+separately generated grid. FP8 templates retain the kernel format while
+lowering `float8_e4m3fn` to Carver's tensorizable `float8_e4m3` spelling
+internally.
 
 The family command checks acceptance for its requested cases and targets. Its
 report identifies the scope; full five-target final acceptance requires all five

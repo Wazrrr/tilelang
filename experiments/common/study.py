@@ -50,7 +50,7 @@ def execute(plan, output, settings, *, baseline_root, baseline_seed=123):
                 manifest_sha256=hashlib.sha256((bundle / "complete.json").read_bytes()).hexdigest(),
             )
         write_json(output / "baselines.json", references)
-        if not device.profiles and not device.performance_model:
+        if plan["metric"] != "memory" and not device.profiles and not device.performance_model:
             profiles = {}
             for item in plan["splits"]["test"]:
                 workload = Workload(**item)
@@ -76,7 +76,7 @@ def execute(plan, output, settings, *, baseline_root, baseline_seed=123):
                 options = dict(
                     settings,
                     method="top_k",
-                    metric="pipeline_time",
+                    metric="memory",
                     top_k=plan["top_k"],
                     seed=123,
                     selection_seed=seed,
