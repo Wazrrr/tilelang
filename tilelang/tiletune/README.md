@@ -16,7 +16,8 @@ package; native operator metadata continues to come from the compiler.
 `TileTuneConfig(ranking_metric="memory", alpha=0.5)` uses a lean analysis by
 default. It reads global accesses, loop visits, launch size and pipeline depth
 from the PrimFunc, then orders candidates by logical byte work, request count
-and depth. The [H200 study](../../experiments/H200_UNIFIED_MEMORY.md) describes
+and depth after applying the fitted launch-underfill adjustment. The
+[H200 study](../../experiments/H200_UNIFIED_MEMORY.md) describes
 the score and its fixed-pool results.
 
 Set `memory_diagnostics=True` to additionally construct reaching dependencies,
@@ -48,11 +49,13 @@ tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
 tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5, memory_diagnostics=True)
 ```
 
-Analysis version 37 includes compiler-only resource policy in the cache identity.
+Analysis version 38 introduces the `(U, -D, E)` memory ordering and invalidates
+cached scores from the previous formula. Version 37 added compiler-only resource
+policy to the cache identity.
 Deferred metadata resolution was introduced in version 36. The diagnostic
 setting remains part of the cache identity.
 Portable memory facts use `memory.v3`, whose `dependencies` field may be `null`;
-the score inputs and formula are unchanged from `memory.v2`.
+the input schema is unchanged, while analysis version 38 controls the new score.
 
 ## Post-compile resource policy
 
@@ -320,8 +323,9 @@ rates. Use your measured `performance_model` for performance interpretation.
 Use `TileTuneConfig(ranking_metric="memory", ...)` to rank by logical memory
 work without compute profiles, pipeline timing, or occupancy prediction. The
 target's SM count is required. The primary order is (logical byte-waves,
-logical access-waves, descending IR pipeline depth). Equal triples share their
-group's tail rank; original index only orders report entries. Storage
+adjusted for launch underfill, descending IR pipeline depth, logical
+access-waves), written `(U, -D, E)`. Equal triples share their group's tail
+rank; original index only orders report entries. Storage
 and dependency facts remain available; unresolved scheduling or a soft register estimate does
 not prevent a memory score. Explicit resource policies still apply.
 
@@ -329,18 +333,21 @@ Memory mode uses primitive operator semantics and backend hardware inputs,
 without family-policy objects or GEMM/attention recognition. It rejects explicit
 GEMM/attention specialization and nonzero attention-specific spill allowances.
 Rules for an MMA accumulator or a reduction's source region apply uniformly in
-every kernel that contains that operator. The current byte score does not use
+every kernel that contains that operator. The current score does not use
 the dependency graph or live-storage estimates as a timing prediction.
 
-Analysis version 34 uses the B200 pipeline-depth and strict-selection rules,
-with logical request count included in the common primary order. Versioned
-`memory.v2` facts retain the requested depth and can be replayed using
+Analysis version 38 uses a fitted three-SM-wave launch target. For raw byte-waves
+`B`, per-CTA accesses `e`, grid blocks `G`, SM count `S`, access-waves `E`, and
+pipeline depth `D`, it defines
+`U = ceil(B * (G + e + max(0, 3*S - G)) / (G + e))` and ranks by
+`(U, -D, E)`. Versioned `memory.v3` facts retain the inputs and can be replayed using
 `score_memory(accesses, grid_blocks, sm_count, pipeline_depth)`.
 
-This opt-in path scores every oracle winner in the saved 25-case H200 study.
-All 25 conservative tail ranks fit a strict 50% budget; the worst is 90/192
-(46.875%). The byte-only version reached 20/25. This is a retrospective result
-on the frozen FP16/E4M3 kernels and pools, not fresh GPU performance validation.
+This opt-in path scores every oracle winner in the saved 25-workload E2 study.
+All 25 conservative tail ranks fit a strict 50% budget; the worst is
+`gemm_fp8_prefill` at 272/576 (47.22%). The three-wave target was selected using
+these same oracle labels, so this is an in-sample fixed-pool result, not fresh
+GPU performance validation or evidence of generalization.
 See [the implementation, results and limitations](../../experiments/MEMORY_RANKING.md).
 
 ```python

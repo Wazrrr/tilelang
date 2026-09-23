@@ -139,10 +139,10 @@ def test_missing_memory_effects_and_device_inputs_remain_unknown():
 
 
 def test_wave_rounding_memory_ties_and_measurement_independence():
-    # Equal logical bytes, but fewer transfers/dependency events in candidate 7.
-    fine = score_memory([dict(operation=0, bytes=64, visits=4)], 133, 132)
-    coarse = score_memory([dict(operation=0, bytes=128, visits=2)], 133, 132)
-    assert fine["logical_byte_waves"] == coarse["logical_byte_waves"] == 512
+    # Above the underfill target, equal bytes use access-waves as the final key.
+    fine = score_memory([dict(operation=0, bytes=64, visits=4)], 397, 132)
+    coarse = score_memory([dict(operation=0, bytes=128, visits=2)], 397, 132)
+    assert fine["logical_byte_waves"] == coarse["logical_byte_waves"] == 1024
     assert coarse["score"] < fine["score"]
     records = [
         dict(index=2, tile_cost=dict(fine, ranking_metric="memory")),
@@ -161,6 +161,29 @@ def test_wave_rounding_memory_ties_and_measurement_independence():
     assert TileTuneConfig(ranking_metric="memory").to_cache_key_dict() != TileTuneConfig().to_cache_key_dict()
 
 
+def test_three_wave_underfill_adjustment_is_access_damped():
+    light = score_memory([dict(operation=0, bytes=100, visits=1)], 132, 132)
+    heavy = score_memory([dict(operation=0, bytes=1, visits=100)], 132, 132)
+    full_grid = score_memory([dict(operation=0, bytes=100, visits=1)], 396, 132)
+
+    assert light["logical_byte_waves"] == heavy["logical_byte_waves"] == 100
+    assert light["launch_underfill_shortfall_blocks"] == heavy["launch_underfill_shortfall_blocks"] == 264
+    assert light["adjusted_logical_byte_waves"] == 299
+    assert heavy["adjusted_logical_byte_waves"] == 214
+    assert full_grid["adjusted_logical_byte_waves"] == full_grid["logical_byte_waves"] == 300
+    assert full_grid["launch_underfill_shortfall_blocks"] == 0
+
+
+def test_pipeline_depth_precedes_access_waves_at_equal_adjusted_bytes():
+    shallow_few = score_memory([dict(operation=0, bytes=100, visits=1)], 396, 132, pipeline_depth=1)
+    deep_many = score_memory([dict(operation=0, bytes=1, visits=100)], 396, 132, pipeline_depth=8)
+
+    assert shallow_few["adjusted_logical_byte_waves"] == deep_many["adjusted_logical_byte_waves"] == 300
+    assert shallow_few["logical_memory_access_waves"] == 3
+    assert deep_many["logical_memory_access_waves"] == 300
+    assert deep_many["score"] < shallow_few["score"]
+
+
 @pytest.mark.parametrize("field,value", [("bytes", -1), ("bytes", True), ("visits", 1.5)])
 def test_invalid_resolved_memory_facts_raise(field, value):
     access = dict(operation=0, bytes=16, visits=2)
@@ -170,16 +193,17 @@ def test_invalid_resolved_memory_facts_raise(field, value):
 
 
 def test_exact_score_preserves_lexicographic_order_above_float_precision():
-    # Exhaust both extreme request counts and depths around adjacent byte bands.
-    scores = []
+    # Exhaust both extreme request counts and depths around adjacent U bands.
+    results = []
     for size in (2**30, 2**30 + 1):
         for events in (1, size):
             for depth in (65535, 1):
                 accesses = [dict(operation=0, bytes=size, visits=1)] if events == 1 else [dict(operation=0, bytes=1, visits=size)]
-                result = score_memory(accesses, 1, 132, depth)
+                result = score_memory(accesses, 396, 132, depth)
                 assert type(result["score"]) is int and result["score"] > 2**53
-                scores.append(result["score"])
-    assert scores == sorted(set(scores))
+                key = (result["adjusted_logical_byte_waves"], -depth, result["logical_memory_access_waves"])
+                results.append((key, result["score"]))
+    assert [score for _, score in sorted(results)] == sorted({score for _, score in results})
 
 
 @pytest.mark.parametrize("depth", [0, -1, True, 1.5, 65536])
@@ -294,7 +318,15 @@ def test_memory_diagnostics_preserve_scores_and_resource_rejections(kernel_kind,
         for diagnostics in (False, True)
     ]
     assert func.script() == before
-    for key in ("score", "logical_byte_waves", "logical_memory_access_waves", "pipeline_depth", "precision", "unknown"):
+    for key in (
+        "score",
+        "logical_byte_waves",
+        "adjusted_logical_byte_waves",
+        "logical_memory_access_waves",
+        "pipeline_depth",
+        "precision",
+        "unknown",
+    ):
         assert lean["tile_cost"][key] == full["tile_cost"][key]
     for key in ("keep", "would_reject", "physical_reasons", "policy_reasons"):
         assert lean["pressure"]["decision"][key] == full["pressure"]["decision"][key]

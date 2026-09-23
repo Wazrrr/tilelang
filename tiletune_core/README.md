@@ -2,10 +2,12 @@
 
 `tiletune_core.memory.score_memory` provides a profile-free ordering over resolved
 logical memory accesses, launch size, and IR pipeline depth. It orders candidates
-by (byte-waves, access-waves, descending pipeline depth), encoded as an exact
-integer, without estimating compute cycles or physical occupancy. Equal triples
-share their group's tail rank. Default top-K selection retains the complete
-boundary group; `strict_budget=True` excludes a group crossing the budget.
+by (underfill-adjusted byte-waves, descending pipeline depth, access-waves),
+encoded as an exact integer, without estimating compute cycles or physical
+occupancy. The adjustment uses a three-SM-wave launch target and per-CTA access
+count as a dampener. Equal triples share their group's tail rank. Default top-K
+selection retains the complete boundary group; `strict_budget=True` excludes a
+group crossing the budget.
 `alpha_budget(pool_size, alpha)` resolves a strict original-pool fraction with
 floor rounding, including failed and unknown candidates in the denominator.
 See the [memory-ranking study](../experiments/MEMORY_RANKING.md) for its fixed-pool

@@ -136,7 +136,7 @@ def replay(study, output, alpha=0.5):
         ranked_path.write_text(
             json.dumps(
                 dict(
-                    version=2,
+                    version=3,
                     settings=dict(ranking_metric="memory", sm_count=sm_count, alpha=alpha),
                     measurement_scope="ranking only; no new compilation or GPU measurements",
                     source=ref,
@@ -174,7 +174,16 @@ def replay(study, output, alpha=0.5):
             if candidate["index"] is not None:
                 cost = by_index[candidate["index"]]["tile_cost"]
                 candidate.update(
-                    {key: cost[key] for key in ("score", "logical_byte_waves", "logical_memory_access_waves", "pipeline_depth")}
+                    {
+                        key: cost[key]
+                        for key in (
+                            "score",
+                            "logical_byte_waves",
+                            "adjusted_logical_byte_waves",
+                            "logical_memory_access_waves",
+                            "pipeline_depth",
+                        )
+                    }
                 )
         first = method["first_oracle_hit_k"]
         rows.append(
@@ -218,7 +227,7 @@ def replay(study, output, alpha=0.5):
                 "experiments/utils/results.py",
             )
         ],
-        semantics="Retrospective replay of frozen collector facts. The primary order is (logical byte-waves, logical access-waves, descending IR pipeline depth). Equal triples share their group's tail rank; alpha selection includes only complete groups within floor(alpha * original pool size). Kernels, pool, input values, oracle timings and hard resource policies are unchanged. No GPU work. Scoring time excludes IR capture and file I/O.",
+        semantics="Retrospective replay of frozen collector facts. The primary order is (underfill-adjusted logical byte-waves, descending IR pipeline depth, logical access-waves), written (U, -D, E). Equal triples share their group's tail rank; alpha selection includes only complete groups within floor(alpha * original pool size). Kernels, pool, input values, oracle timings and hard resource policies are unchanged. No GPU work. Scoring time excludes IR capture and file I/O.",
         rows=rows,
         all_oracles_scored=all(r["first_oracle_hit_k"] is not None for r in rows),
         hits_20_percent=sum(r["hits_20_percent"] for r in rows),
@@ -250,7 +259,7 @@ def render(result):
         "",
         f"All-case cutoff: **{result['all_hit_whole_pool_percent']}%**, with per-pool budgets rounded up.",
         "",
-        "Primary order: (logical byte-waves, logical access-waves, descending pipeline depth), encoded exactly as an integer. Equal triples share their group's last rank. Original index orders display only. No compute rates, inferred overlap, or occupancy prediction.",
+        "Primary order: (underfill-adjusted logical byte-waves, descending pipeline depth, logical access-waves), written (U, -D, E) and encoded exactly as an integer. Equal triples share their group's last rank. Original index orders display only. No compute rates, inferred overlap, or occupancy prediction.",
         "",
         "| Case | Pool | Scored | Previous oracle rank | New oracle rank | Pool share | Replay scoring ms |",
         "|---|---:|---:|---:|---:|---:|---:|",

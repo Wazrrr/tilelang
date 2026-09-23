@@ -91,7 +91,13 @@ def validate_case(study, replay_row, output, alpha):
             raise AssertionError(f"analysis changed PrimFunc {name}/{index}")
         cost = result["tile_cost"]
         # Check interpretable components as well as the exact composite integer.
-        keys = ("score", "logical_byte_waves", "logical_memory_access_waves", "pipeline_depth")
+        keys = (
+            "score",
+            "logical_byte_waves",
+            "adjusted_logical_byte_waves",
+            "logical_memory_access_waves",
+            "pipeline_depth",
+        )
         differences = {
             key: {"live": cost.get(key), "replay": saved["tile_cost"].get(key)}
             for key in keys
@@ -110,7 +116,7 @@ def validate_case(study, replay_row, output, alpha):
     folder.mkdir(parents=True, exist_ok=False)
     ranked_path = folder / "tiletune.json"
     report = dict(
-        version=2,
+        version=3,
         settings=config.to_cache_key_dict(),
         configs=records,
         ranking=ranking,
@@ -179,7 +185,16 @@ def validate(study, replay, output, alpha, workers):
                 if candidate["index"] is not None:
                     cost = by_index[candidate["index"]]
                     candidate.update(
-                        {key: cost[key] for key in ("score", "logical_byte_waves", "logical_memory_access_waves", "pipeline_depth")}
+                        {
+                            key: cost[key]
+                            for key in (
+                                "score",
+                                "logical_byte_waves",
+                                "adjusted_logical_byte_waves",
+                                "logical_memory_access_waves",
+                                "pipeline_depth",
+                            )
+                        }
                     )
             rank = method["first_oracle_hit_k"]
             row.update(
