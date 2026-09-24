@@ -1,0 +1,121 @@
+"""Logical memory-work ordering, without compute rates or occupancy prediction."""
+
+PIPELINE_DEPTH_RADIX = 1 << 16
+PIPELINE_DEPTH_COUNT = PIPELINE_DEPTH_RADIX - 1
+LAUNCH_TARGET_WAVES = 3
+
+
+def _ceil_div(numerator, denominator):
+    return (numerator + denominator - 1) // denominator
+
+
+def _adjusted_byte_waves(byte_waves, grid_blocks, accesses_per_cta, sm_count):
+    """Return the three-SM-wave launch-underfill adjustment to byte waves.
+
+    ``byte_waves`` already multiplies logical per-CTA bytes by the launch wave
+    count. Grids smaller than three full SM waves are penalized; heavier CTAs
+    (more logical accesses per CTA) damp that penalty. This is the h200-new
+    ``U`` term.
+    """
+    shortfall = max(0, LAUNCH_TARGET_WAVES * sm_count - grid_blocks)
+    denominator = grid_blocks + accesses_per_cta
+    return _ceil_div(byte_waves * (denominator + shortfall), denominator)
+
+
+def _encode_memory_order(adjusted_byte_waves, waves, pipeline_depth, access_waves):
+    """Exactly encode the lexicographic key ``(U, waves, E, -D)``.
+
+    For every nonempty access ledger ``0 <= E <= B <= U``, and when bytes are
+    nonempty ``waves <= U``. A variable base of ``U + 1`` therefore covers both
+    middle components without an arbitrary upper bound, while pipeline depth
+    keeps the fixed radix.
+    """
+    base = adjusted_byte_waves + 1
+    depth_inv = PIPELINE_DEPTH_COUNT - pipeline_depth
+    return ((adjusted_byte_waves * base + waves) * base + access_waves) * PIPELINE_DEPTH_RADIX + depth_inv
+
+
+def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1):
+    """Rank by adjusted byte-waves, launch waves, access-waves, then depth.
+
+    The first component ``U`` is the h200-new adjusted byte-wave term. The
+    second component prefers fewer launch waves inside an equal ``U`` group.
+    The third component prefers fewer logical memory requests, and the fourth
+    prefers deeper pipeline buffering. These are ordinal preferences, not
+    fitted service-time costs.
+    """
+    unknown = []
+    for name, value in (("grid_blocks", grid_blocks), ("sm_count", sm_count)):
+        if value is None:
+            unknown.append(f"unresolved {name}")
+        elif type(value) is not int or value <= 0:
+            raise ValueError(f"{name} must be a positive integer or None")
+    if type(pipeline_depth) is not int or not 0 < pipeline_depth < PIPELINE_DEPTH_RADIX:
+        raise ValueError(f"pipeline_depth must be an integer in [1, {PIPELINE_DEPTH_RADIX - 1}]")
+    byte_work = 0
+    events = 0
+    for access in accesses:
+        size, visits = access["bytes"], access["visits"]
+        for name, value in (("bytes", size), ("visits", visits)):
+            if value is None:
+                unknown.append(f"operation {access['operation']}: unresolved {name}")
+            elif type(value) is not int or value < 0:
+                raise ValueError(f"access {name} must be a nonnegative integer or None")
+        if size is not None and visits is not None:
+            byte_work += size * visits
+            events += visits if size else 0
+
+    waves = _ceil_div(grid_blocks, sm_count) if grid_blocks is not None and sm_count is not None else None
+    byte_waves = byte_work * waves if waves is not None and not unknown else None
+    event_waves = events * waves if waves is not None and not unknown else None
+    shortfall = (
+        max(0, LAUNCH_TARGET_WAVES * sm_count - grid_blocks)
+        if grid_blocks is not None and sm_count is not None
+        else None
+    )
+    adjusted_byte_waves = (
+        _adjusted_byte_waves(byte_waves, grid_blocks, events, sm_count)
+        if byte_waves is not None and grid_blocks is not None and sm_count is not None
+        else None
+    )
+    # A ledger with no bytes has U == 0, so waves cannot fit the U + 1 base.
+    # Such kernels have no global-memory work to order by wave count.
+    encoded_waves = waves if byte_work > 0 else 0
+    score = (
+        _encode_memory_order(adjusted_byte_waves, encoded_waves, pipeline_depth, event_waves)
+        if adjusted_byte_waves is not None and event_waves is not None
+        else None
+    )
+
+    return {
+        "metric": "memory",
+        "score": score,
+        "tie_break_score": event_waves,
+        "units": "lexicographic memory-order units",
+        "formula": (
+            "((adjusted_byte_waves * (adjusted_byte_waves + 1) + waves) * "
+            "(adjusted_byte_waves + 1) + access_waves) * 65536 + (65535 - pipeline_depth)"
+        ),
+        "tie_break_formula": "logical_memory_accesses_per_cta * ceil(grid_blocks / sm_count)",
+        "logical_global_bytes_per_cta": byte_work if not unknown else None,
+        "logical_byte_waves": byte_waves,
+        "adjusted_logical_byte_waves": adjusted_byte_waves,
+        "logical_memory_accesses_per_cta": events if not unknown else None,
+        "logical_memory_access_waves": event_waves,
+        "single_cta_waves": waves,
+        "launch_target_waves": LAUNCH_TARGET_WAVES,
+        "launch_underfill_shortfall_blocks": shortfall,
+        "pipeline_depth": pipeline_depth,
+        "precision": "unknown" if unknown else "estimate",
+        "unknown": unknown,
+        "assumptions": [
+            "padded and predicated logical accesses; no transaction, cache, coalescing, or bandwidth model",
+            "single-CTA waves account for grid size without predicting physical residency",
+            "three SM waves are an E2-fitted ordinal launch target, not a physical occupancy threshold",
+            "per-CTA logical access count dampens the launch-underfill penalty applied to byte-waves",
+            "fewer launch waves order equal adjusted byte-waves; fewer access-waves order equal adjusted byte-waves and waves",
+            "deeper buffering orders otherwise equal candidates",
+            "exact integer encoding of (adjusted byte-waves, waves, access-waves, -pipeline depth); equal tuples share one tail rank",
+            "storage and scheduling uncertainty do not exclude a resolved memory score",
+        ],
+    }
