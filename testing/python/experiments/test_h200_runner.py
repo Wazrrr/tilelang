@@ -79,7 +79,7 @@ def test_plan_is_75_resource_scheduled_workloads_with_identical_pools():
         assert e3["settings"]["group_size"] == 8
         assert all(e["settings"]["benchmark_backend"] == "cupti" for e in (e1, e2, e3))
         assert all(e["settings"]["cpu_contention_policy"] == "observe" for e in (e1, e2, e3))
-    assert sum(len(p["configs"]) for p in plan[:25]) == 21145
+    assert sum(len(p["configs"]) for p in plan[:25]) == 14425
     preflight = h200.study_plan(preflight=True)
     assert len(preflight) == 15
     assert all(len(p["configs"]) == 8 for p in preflight if p["experiment"] != "E3")

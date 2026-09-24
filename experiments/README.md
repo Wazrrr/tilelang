@@ -95,7 +95,7 @@ python -m experiments.grouped_gemm.tiletune.run --suite development --device hop
 A development run uses five test cases per operation, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case per operation and up to 16 configurations.
 All five families call their example builders directly; each family README identifies its source.
-Each operation has one complete `expanded` pool: GEMM 1,920, FlashAttention 512,
+Each operation has one complete `expanded` pool: GEMM 576, FlashAttention 512,
 FP8 GEMM 576, grouped GEMM 576, and KDA intra-chunk
 645 configs per case. There is no cap or structural prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.

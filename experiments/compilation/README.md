@@ -25,12 +25,12 @@ family with target SM90a and NVCC 12.9.86, with GPUs hidden.
 
 | Family | Retained pool | Original configs included | Successful config/workload compilations |
 | --- | ---: | ---: | ---: |
-| GEMM | 1,920 | 288 | 9,600 |
+| GEMM | 576 | 288 | 2,880 |
 | FP8 GEMM | 576 | 288 | 2,880 |
 | Grouped GEMM | 576 | 1 explicit default | 2,880 |
 | FlashAttention | 512 | 1 | 2,560 |
 | KDA intra-chunk | 645 | 32 | 3,225 |
-| Total | | | 21,145 |
+| Total | | | 14,425 |
 
 ## Reproduce without GPU execution
 

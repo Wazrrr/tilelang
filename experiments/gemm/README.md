@@ -12,11 +12,11 @@ requests are unsupported by this experiment.
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) expands the original 288-config grid. For M=32/64/128,
-it uses N=32/64/96/128/192/256, K=16/32/48/64, stages=0–5,
-threads=128/256, and rasterization on/off. M=256 retains the qualified
-N=32/64/96/128/192/256, K=32/64 and stages=0–3 domain. The combined pool has
-1,920 candidates.
+[`spaces.py`](spaces.py) expands the original 288-config grid only along the N
+axis by adding tiles 32, 96 and 192. Candidate axes are M=64/128/256,
+N=32/64/96/128/192/256, K=32/64, stages=0–3, threads=128/256, and
+rasterization on/off: 576 candidates. The original space in
+`examples/gemm/example_gemm_advanced_autotune.py` remains unchanged.
 The active pool is the intersection compiled successfully for all five final
 H200 shapes. Its certificate lives in `../compilation/gemm.json`.
 
@@ -84,7 +84,7 @@ measurements validate it. Foreign GPU processes invalidate an affected shard,
 which is retried. Monitoring polls every second and cannot exclude shorter
 interference.
 
-Space version 5 identifies this pool. Old measured records are archived under
+Space version 6 identifies this pool. Old measured records are archived under
 `experiments/results/gemm-pre-single-pool-20260916/heuristics/`; their timings
 belong to their original programs and pools. New results include source/build
 hashes, raw outcomes, device observations and elapsed time.

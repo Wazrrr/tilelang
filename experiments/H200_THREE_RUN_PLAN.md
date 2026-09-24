@@ -13,7 +13,7 @@ and runs monitored preflights before the complete oracle-retention study.
 Use `dev-h200-new`, including grouped-compile recovery and the KDA intra-chunk
 migration. Freeze the actual code revision after the runner changes below. Use the current
 [benchmark contract](BENCHMARK_CONTRACT.md), contract version 4 and configuration
-space version 10. The older FP16/E4M3 29,200-candidate study does not establish
+space version 11. The older FP16/E4M3 29,200-candidate study does not establish
 oracle retention for this BF16/original-FP8 suite.
 
 ## Experiment matrix
@@ -59,20 +59,20 @@ while the three runs still perform independent correctness and timing checks.
 
 | Family | Five final workload names | Pool per workload | E3 maximum selected per workload |
 | --- | --- | ---: | ---: |
-| GEMM | gemm_decode, gemm_prefill, gemm_ffn_down, gemm_square, gemm_square_large | 1,920 | 960 |
+| GEMM | gemm_decode, gemm_prefill, gemm_ffn_down, gemm_square, gemm_square_large | 576 | 288 |
 | Attention | attention_short_causal, attention_batched_causal, attention_noncausal, attention_causal, attention_long_causal | 512 | 256 |
 | KDA intra-chunk | kda_intra_short, kda_intra_medium, kda_intra_regular, kda_intra_batched, kda_intra_long | 645 | 322 |
 | FP8 GEMM | gemm_fp8_decode, gemm_fp8_prefill, gemm_fp8_ffn_down, gemm_fp8_square, gemm_fp8_square_large | 576 | 288 |
 | Grouped GEMM | grouped_gemm_decode, grouped_gemm_prefill, grouped_gemm_aligned, grouped_gemm_down_aligned, grouped_gemm_ragged | 576 | 288 |
 
-Each exhaustive experiment attempts 21,145 candidates. E3 elaborates/analyzes
-all 21,145 and selects at most 10,570 for compilation. Whole equal-score groups
+Each exhaustive experiment attempts 14,425 candidates. E3 elaborates/analyzes
+all 14,425 and selects at most 7,210 for compilation. Whole equal-score groups
 must fit inside `floor(0.5 * original_pool_size)`. A group crossing the boundary
 is excluded; ties are not split or expanded. Failures and unknown scores stay
 in the original denominator. Do not refill after analysis, compilation,
 post-compile rejection, correctness, or benchmark failures.
 
-There are at most 52,860 candidate slots submitted for compilation across
+There are at most 36,060 candidate slots submitted for compilation across
 the three full experiments, excluding preflight and winner verification.
 Failed shared builds add retry attempts, which must be counted and timed.
 Actual benchmark counts will be smaller when candidates fail or are filtered.
@@ -94,13 +94,11 @@ construction and reference computation are outside the benchmark interval.
 | gemm_square | 4096 | 4096 | 4096 | `[4096,4096]` | `[4096,4096]` | `[4096,4096]` |
 | gemm_square_large | 4096 | 14336 | 4096 | `[4096,4096]` | `[14336,4096]` | `[4096,14336]` |
 
-The 1,920-config pool comes from [gemm/spaces.py](gemm/spaces.py). For
-`block_M={32,64,128}`, use `block_N={32,64,96,128,192,256}`,
-`block_K={16,32,48,64}`, `num_stages=0..5`, `thread_num={128,256}`, and
-rasterization on/off (1,728 configs). For `block_M=256`, use the same N tiles,
-`block_K={32,64}`, `num_stages=0..3`, both thread counts, and rasterization
-on/off (192 configs). This compiler-qualified H200 pool contains the complete
-original 288-config example pool.
+The 576-config pool comes from [gemm/spaces.py](gemm/spaces.py). It uses
+`block_M={64,128,256}`, `block_N={32,64,96,128,192,256}`,
+`block_K={32,64}`, `num_stages=0..3`, `thread_num={128,256}`, and
+rasterization on/off. This compiler-qualified H200 pool contains the complete
+original 288-config example pool unchanged and adds the N tiles 32, 96 and 192.
 
 ### 2. FP8 GEMM
 
@@ -367,12 +365,12 @@ configs per shape, and failed samples consume the budget without replacement:
 
 | Family | Per training/validation shape | Two training shapes | One validation shape |
 | --- | ---: | ---: | ---: |
-| GEMM | 192 | 384 | 192 |
+| GEMM | 58 | 116 | 58 |
 | Attention | 52 | 104 | 52 |
 | KDA intra-chunk | 65 | 130 | 65 |
 | FP8 GEMM | 58 | 116 | 58 |
 | Grouped GEMM | 58 | 116 | 58 |
-| Total | 425 | 850 | 425 |
+| Total | 291 | 582 | 291 |
 
 Compile, check, and benchmark these samples with the same CUPTI measurement
 contract. Fit the CPU `hist` regressor to log latency with at most 600 rounds,
