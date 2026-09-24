@@ -24,12 +24,14 @@ def _compiles_on_b200(config):
 
 
 def get_configs():
+    # Keep every configuration from the advanced example while trimming the
+    # experiment-only expansion to roughly the size of the other family pools.
     configs = [
         config
         for config in grid(
             block_M=[32, 64, 96, 128, 192, 256],
-            block_N=[32, 64, 96, 128, 192, 256],
-            block_K=[16, 32, 48, 64],
+            block_N=[64, 128, 192, 256],
+            block_K=[32, 64],
             num_stages=[0, 1, 2, 3],
             thread_num=[128, 256],
             enable_rasteration=[True, False],

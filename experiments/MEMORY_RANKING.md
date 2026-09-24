@@ -61,9 +61,9 @@ transaction, bandwidth, compute, or physical-occupancy model. Dependency and
 storage reports remain available for inspection and explicit resource policies,
 but they do not become an implicit timing formula.
 
-## Current compile-valid pool migration check
+## Archived space-version-11 compile-valid pool migration check
 
-Space version 11 removes configurations that failed B200 compilation and keeps
+Space version 11 removed configurations that failed B200 compilation and kept
 every pool above 500 candidates. The 25 stored live reports were rescored over
 the retained configurations. The attention stage-6–12 and KDA stage-8 additions
 reuse the same global-access and grid facts as their stage-5/stage-7 counterparts

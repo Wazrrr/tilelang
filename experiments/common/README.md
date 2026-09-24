@@ -33,13 +33,13 @@ existing A100 heuristic schema, with additional contention and validation paths.
 
 ## Configuration spaces
 
-Space version 11 gives each final family exactly one B200 `expanded` pool. Each pool
+Space version 12 gives each final family exactly one B200 `expanded` pool. Each pool
 uses the example's native parameters and includes its original configs/defaults.
 The same complete domain is used for both cases and all native targets.
 
 | Family | Configs per case | Example coverage |
 | --- | ---: | --- |
-| [GEMM](../gemm/README.md) | 1,473 | All 288 autotune configs plus the SM100 example launch |
+| [GEMM](../gemm/README.md) | 609 | All 288 autotune configs plus the SM100 example launch |
 | [FlashAttention](../flash_attention/README.md) | 520 | Native/default launches and B200-compilable SS/TS tiles |
 | [KDA intra](../kda/README.md) | 513 | All 32 native autotune configs |
 | [FP8 GEMM](../gemm_fp8/README.md) | 533 | Complete native B200 grid |
@@ -494,7 +494,7 @@ workloads and `--methods`; the named suites retain their fixed study protocol.
 `python -m experiments.suite --suite smoke --plan` plans one representative
 shape from each of five families with deterministic subsets. Development uses
 twenty-five cases and up to 256
-configurations; final uses the complete `expanded` pools (GEMM 1,473,
+configurations; final uses the complete `expanded` pools (GEMM 609,
 FlashAttention 520, KDA-intra 513, FP8 GEMM 533, and grouped GEMM 576 per case) and three seeds. See
 [validation](../validation.md) for
 commands, verified behavior, and the incomplete native-device milestones.

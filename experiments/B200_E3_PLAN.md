@@ -31,12 +31,12 @@ into E3. Equal `(B, -D, E)` triples remain one primary-score tie group.
 
 | Family | Workloads | Pool/workload | Strict floor(pool/2) | Maximum selected |
 | --- | ---: | ---: | ---: | ---: |
-| BF16 GEMM | 5 | 1,473 | 736 | 3,680 |
+| BF16 GEMM | 5 | 609 | 304 | 1,520 |
 | FlashAttention | 5 | 520 | 260 | 1,300 |
 | KDA intra | 5 | 513 | 256 | 1,280 |
 | FP8 GEMM | 5 | 533 | 266 | 1,330 |
 | Grouped GEMM | 5 | 576 | 288 | 1,440 |
-| **Total** | **25** | **18,075 analyzed** | — | **9,030 maximum** |
+| **Total** | **25** | **13,755 analyzed** | — | **6,870 maximum** |
 
 For each workload, TileTune elaborates and analyzes every original candidate.
 Selection uses `alpha=0.5` with a strict budget: include an equal-score group

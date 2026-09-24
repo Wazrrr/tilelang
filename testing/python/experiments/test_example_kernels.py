@@ -1,7 +1,5 @@
 """Final workloads must elaborate the example programs, not parallel rewrites."""
 
-from dataclasses import replace
-
 import pytest
 
 from experiments.suite import core_cases
@@ -128,7 +126,7 @@ def test_expanded_retains_every_advanced_example_configuration(target):
     d = Device(target, TARGETS[target])
     for w in core_cases("final")[:2]:
         pool = configurations(w, d)
-        assert len(pool) == 1473
+        assert len(pool) == 609
         assert EXAMPLE_CONFIGS["gemm"] in pool
 
 

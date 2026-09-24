@@ -11,12 +11,12 @@ compilation. E2 also supplies an independent unfiltered oracle set for E3.
 
 | Family | Final workloads | Pool per workload | E2 candidates |
 | --- | ---: | ---: | ---: |
-| BF16 GEMM | 5 | 1,473 | 7,365 |
+| BF16 GEMM | 5 | 609 | 3,045 |
 | FlashAttention | 5 | 520 | 2,600 |
 | KDA intra | 5 | 513 | 2,565 |
 | FP8 GEMM | 5 | 533 | 2,665 |
 | Grouped GEMM | 5 | 576 | 2,880 |
-| **Total** | **25** | — | **18,075** |
+| **Total** | **25** | — | **13,755** |
 
 For every workload, the ordered config dictionaries and config IDs must equal
 E1 position by position. A different physical B200 allocation is allowed, but
@@ -32,7 +32,7 @@ native build, and candidate pools remain frozen.
 - Compiler pool: one shared pool of exactly 64 workers—not 64 per GPU.
 - Compile/benchmark overlap: disabled.
 - Grouped compilation: disabled.
-- Candidate policy: exhaustive; attempt all 18,075 slots.
+- Candidate policy: exhaustive; attempt all 13,755 slots.
 - Timing, seed, cache, correctness, CPU placement, and candidate timeout:
   identical to E1.
 

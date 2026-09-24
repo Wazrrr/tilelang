@@ -46,7 +46,7 @@ Its explicit 128/128/1/128 launch is also included. The pool expands these
 native tile, stage and thread parameters; it preserves the example's causal
 loop, fragment recurrence, FullRow GEMMs and shared output.
 
-Space version 11 has no alternative `current`, `large` or `exhaustive` presets
+Space version 12 has no alternative `current`, `large` or `exhaustive` presets
 for this family. There is no cap, protected subset, target-dependent domain or
 budget cap. The declared combinations are the B200 compiler-verified domain;
 correctness and launch failures remain recorded.

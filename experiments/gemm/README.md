@@ -16,16 +16,16 @@ requests are unsupported by this experiment.
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 1,473
+[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 609
 configurations. It retains all 288 configurations from the advanced autotuning
-example, removes combinations rejected by B200 TCGen05 lowering, and adds the
-active SM100 example's explicit 128x128x128 launch.
+example, adds selected B200 TCGen05 tile shapes, removes combinations rejected
+by lowering, and adds the active SM100 example's explicit 128x128x128 launch.
 
 | Parameter | Values |
 | --- | --- |
 | `block_M` | 32, 64, 96, 128, 192, 256 |
-| `block_N` | 32, 64, 96, 128, 192, 256 |
-| `block_K` | 16, 32, 48, 64 |
+| `block_N` | 64, 128, 192, 256 |
+| `block_K` | 32, 64 |
 | `num_stages` | 0, 1, 2, 3 |
 | `thread_num` | 128, 256 |
 | `enable_rasteration` | True, False |
@@ -100,7 +100,7 @@ measurements validate it. Foreign GPU processes invalidate an affected shard,
 which is retried. Monitoring polls every second and cannot exclude shorter
 interference.
 
-Space version 4 identifies this pool. Old measured records are archived under
+Space version 12 identifies this pool. Old measured records are archived under
 `experiments/results/gemm-pre-single-pool-20260916/heuristics/`; their timings
 belong to their original programs and pools. New results include source/build
 hashes, raw outcomes, device observations and elapsed time.

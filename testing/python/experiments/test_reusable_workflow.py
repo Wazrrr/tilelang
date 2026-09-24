@@ -20,9 +20,7 @@ def write(path, data):
     write_json(path, data)
 
 
-@pytest.mark.parametrize(
-    "family,count", [("gemm", 1473), ("flash_attention", 520), ("kda", 513), ("gemm_fp8", 533), ("grouped_gemm", 576)]
-)
+@pytest.mark.parametrize("family,count", [("gemm", 609), ("flash_attention", 520), ("kda", 513), ("gemm_fp8", 533), ("grouped_gemm", 576)])
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
     assert len(plan) == 25

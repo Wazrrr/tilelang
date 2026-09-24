@@ -12,12 +12,12 @@ remove or reorder E1 candidates.
 
 | Family | Final workloads | Pool per workload | E1 candidates |
 | --- | ---: | ---: | ---: |
-| BF16 GEMM | 5 | 1,473 | 7,365 |
+| BF16 GEMM | 5 | 609 | 3,045 |
 | FlashAttention | 5 | 520 | 2,600 |
 | KDA intra | 5 | 513 | 2,565 |
 | FP8 GEMM | 5 | 533 | 2,665 |
 | Grouped GEMM | 5 | 576 | 2,880 |
-| **Total** | **25** | — | **18,075** |
+| **Total** | **25** | — | **13,755** |
 
 The exact workloads come from
 `experiments.common.spec.default_workloads(smoke=False)`. The ordered pools and
@@ -31,7 +31,7 @@ config IDs must match E2 and E3 exactly.
 - Compiler pool: one shared pool of exactly 64 workers.
 - Compile/benchmark overlap: disabled.
 - Grouped compilation: disabled.
-- Candidate policy: exhaustive; attempt every one of the 18,075 slots.
+- Candidate policy: exhaustive; attempt every one of the 13,755 slots.
 - Timing: CUDA events only, 10 ms warmup, 50 ms measurement, 60 s candidate
   timeout, and a 256 MiB L2 flush outside the measured event interval.
 - Seed: 123; TF32 disabled; fresh worker process and cold TileLang/autotune

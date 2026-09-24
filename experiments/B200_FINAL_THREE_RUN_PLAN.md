@@ -15,7 +15,7 @@ by E3 is implemented in `tilelang/autotuner/grouped_compile.py` and covered by
 
 A live one-GPU B200 smoke under the final shared 64-worker compiler setting
 passed for both exhaustive and E3 execution under the former CUPTI protocol:
-the E3 smoke analyzed the full 1,473-config GEMM pool, froze a strict alpha
+the E3 smoke analyzed the then-current 1,473-config GEMM pool, froze a strict alpha
 selection, compiled eight candidates as one group, observed complete zero-spill
 PTXAS counters, and checked correctness. That smoke is implementation evidence
 only; the change to CUDA-event timing requires fresh one- and four-GPU event
@@ -234,7 +234,7 @@ source identity; never let E3 silently filter that oracle.
 
 | Family | Experiment adapter | Authoritative kernel source | Operation and dtype | Pool/workload |
 | --- | --- | --- | --- | ---: |
-| GEMM | `experiments/gemm/kernel.py` | `examples/gemm_sm100/gemm_tcgen5mma.py::matmul` | SM100 TCGen05, `C=A@B.T`; BF16 inputs/output, FP32 accumulation | 1,473 |
+| GEMM | `experiments/gemm/kernel.py` | `examples/gemm_sm100/gemm_tcgen5mma.py::matmul` | SM100 TCGen05, `C=A@B.T`; BF16 inputs/output, FP32 accumulation | 609 |
 | FlashAttention | `experiments/flash_attention/kernel.py` | `examples/flash_attention_sm100/mha_fwd_bshd.py::flashattn` | SM100 TCGen05/TMEM BSHD forward; BF16 Q/K/V/O, FP32 softmax/accumulation | 520 |
 | KDA intra | `experiments/kda/kernel.py` | `examples/kda/chunk_intra_token_parallel.py::tilelang_chunk_kda_fwd_intra_token_parallel` | Token-parallel coefficient stage; BF16 Q/K/beta/outputs and FP32 gates/accumulation | 513 |
 | FP8 GEMM | `experiments/gemm_fp8/kernel.py` | `examples/blockscaled_gemm_sm100/gemm_mxfp8_blockscaled_1d1d.py` | SM100 two-CTA/persistent TCGen05; E4M3 A/B, packed UE8M0 scales, FP32 accumulation, BF16 C | 533 |
@@ -245,13 +245,13 @@ it has different input, scale, dtype, and output semantics.
 
 ## Final workload inventory
 
-All listed counts are per workload. E1 and E2 each attempt 18,075 candidates.
-E3 analyzes all 18,075 and can select at most 9,030 before tie-boundary
-exclusions and failures. Across E1/E2/E3, at most 45,180 original candidate
+All listed counts are per workload. E1 and E2 each attempt 13,755 candidates.
+E3 analyzes all 13,755 and can select at most 6,870 before tie-boundary
+exclusions and failures. Across E1/E2/E3, at most 34,380 original candidate
 slots are submitted for compilation; grouped-build retries are additional work
 and must remain in end-to-end timing.
 
-### GEMM — BF16, pool 1,473
+### GEMM — BF16, pool 609
 
 | Workload | M | N | K | B layout |
 | --- | ---: | ---: | ---: | --- |
@@ -261,7 +261,7 @@ and must remain in end-to-end timing.
 | `gemm_square` | 4,096 | 4,096 | 4,096 | `(N,K)`, transposed by GEMM |
 | `gemm_square_large` | 4,096 | 14,336 | 4,096 | `(N,K)`, transposed by GEMM |
 
-E3 strict maximum: 736 configs per workload.
+E3 strict maximum: 304 configs per workload.
 
 ### FlashAttention — BF16 BSHD, pool 520
 
