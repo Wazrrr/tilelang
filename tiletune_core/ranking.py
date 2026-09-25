@@ -177,10 +177,10 @@ def rank_records(records):
         tier = "pressure_rejected" if decision.get("would_reject") else "unknown" if score is None else "eligible"
         entry = {"index": record["index"], "tier": tier, "score": score}
         cost = record.get("tile_cost") or {}
-        if cost.get("ranking_metric") == "memory":
+        if cost.get("ranking_metric") in ("memory", "bound_aware"):
             secondary = cost.get("tie_break_score")
             if score is not None and (type(secondary) not in (int, float) or not math.isfinite(secondary) or secondary < 0):
-                raise ValueError("memory ranking requires a finite nonnegative tie_break_score")
+                raise ValueError("memory-derived ranking requires a finite nonnegative tie_break_score")
             entry["tie_break_score"] = secondary
         entries.append(entry)
     order = {"eligible": 0, "unknown": 1, "pressure_rejected": 2}

@@ -6,7 +6,7 @@ import pytest
 import tilelang.language as T
 
 from tilelang.tiletune import analyze_prim_func, TileTuneConfig
-from tiletune_core.memory import score_memory
+from tiletune_core.memory import classify_bound, score_memory
 from tiletune_core.ranking import rank_records, select_top_k
 from test_analysis import gemm
 from test_cost import LIMITS
@@ -70,12 +70,13 @@ def test_memory_mode_skips_timing_occupancy_and_family_policies(monkeypatch, tmp
     assert not result["specialization"]["roles"]
 
 
+@pytest.mark.parametrize("metric", ["memory", "bound_aware"])
 @pytest.mark.parametrize(
     "settings", [dict(specialization="gemm"), dict(specialization="attention"), dict(attention_spill_budget_registers_per_thread=32)]
 )
-def test_memory_mode_rejects_kernel_family_hints(settings):
+def test_memory_mode_rejects_kernel_family_hints(metric, settings):
     with pytest.raises(ValueError, match="kernel-family independent"):
-        TileTuneConfig(ranking_metric="memory", **settings)
+        TileTuneConfig(ranking_metric=metric, **settings)
 
 
 @pytest.mark.parametrize("target", [TARGET, {"kind": "hip", "mcpu": "gfx950"}])
@@ -172,6 +173,78 @@ def test_three_wave_underfill_adjustment_is_access_damped():
     assert heavy["adjusted_logical_byte_waves"] == 214
     assert full_grid["adjusted_logical_byte_waves"] == full_grid["logical_byte_waves"] == 300
     assert full_grid["launch_underfill_shortfall_blocks"] == 0
+
+
+def test_bound_classifier_and_occupancy_penalty_are_coarse_and_exact():
+    assert classify_bound(199, 1, 200.0) == "memory"
+    assert classify_bound(200, 1, 200.0) == "compute"
+    assert classify_bound(None, 1, 200.0) is None
+    assert classify_bound(1, 0, 200.0) is None
+
+    accesses = [dict(operation=0, bytes=100, visits=1)]
+    baseline = score_memory(accesses, 396, 132)
+    penalized = score_memory(accesses, 396, 132, occupancy_penalty=3)
+    assert baseline["occupancy_penalty"] == 1
+    assert penalized["occupancy_penalty"] == 3
+    assert penalized["adjusted_logical_byte_waves"] == 3 * baseline["adjusted_logical_byte_waves"]
+    assert penalized["score"] > baseline["score"]
+    for invalid in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="occupancy_penalty"):
+            score_memory(accesses, 396, 132, occupancy_penalty=invalid)
+
+
+def test_bound_aware_hopper_gate_penalizes_only_compute_bound_schedule(monkeypatch, tmp_path):
+    def compute_intensity(*_):
+        return {
+            "compute_work": 600,
+            "unique_global_bytes": 2,
+            "matrix_flops_per_cta": 600,
+            "grid_blocks": 1,
+            "precision": "estimate",
+            "unknown": [],
+            "assumptions": ["synthetic integration fixture"],
+        }
+
+    def occupancy(*_):
+        return {
+            "resident_blocks_per_sm_estimate": 1,
+            "warps_per_block": 3,
+            "active_warps_per_sm_estimate": 3,
+        }
+
+    monkeypatch.setattr("tilelang.tiletune.memory.analyze_compute_intensity", compute_intensity)
+    monkeypatch.setattr("tilelang.tiletune.memory.resident_warps_estimate", occupancy)
+    path = tmp_path / "bound.json"
+    result = analyze_prim_func(
+        gemm(),
+        dict(ranking_metric="bound_aware", facts_path=str(path)),
+        target=TARGET,
+        device_limits=LIMITS,
+    )
+    bound = result["modules"]["bound"]
+    facts = json.loads(path.read_text())
+
+    assert bound["bound"] == "compute"
+    assert bound["ridge_flops_per_byte"] == 200.0
+    assert bound["occupancy_penalty"] == 3
+    assert result["tile_cost"]["occupancy_penalty"] == 3
+    assert result["tile_cost"]["ranking_metric"] == "bound_aware"
+    assert result["specialization"]["name"] == "generic"
+    assert result["modules"]["pipeline_overlap"]["precision"] == "disabled"
+    assert result["modules"]["waves"]["precision"] == "disabled"
+    assert facts["backend"] == "bound_aware.v1"
+    assert facts["bound"]["occupancy_penalty"] == 3
+
+
+def test_bound_aware_memory_bound_kernel_keeps_neutral_penalty(monkeypatch):
+    def forbidden(*_):
+        pytest.fail("memory-bound candidates must not run the occupancy gate")
+
+    monkeypatch.setattr("tilelang.tiletune.memory.resident_warps_estimate", forbidden)
+    result = analyze_prim_func(gemm(), dict(ranking_metric="bound_aware"), target=TARGET, device_limits=LIMITS)
+    bound = result["modules"]["bound"]
+    assert bound["bound"] == "memory"
+    assert bound["occupancy_penalty"] == result["tile_cost"]["occupancy_penalty"] == 1
 
 
 def test_pipeline_depth_precedes_access_waves_at_equal_adjusted_bytes():

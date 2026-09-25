@@ -20,6 +20,15 @@ and depth after applying the fitted launch-underfill adjustment. The
 [H200 study](../../experiments/H200_UNIFIED_MEMORY.md) describes
 the score and its fixed-pool results.
 
+`ranking_metric="bound_aware"` keeps that lean path and the lexicographic
+memory key, but changes its primary term from `U` to `U * P`. A coarse roofline
+split uses a 200 FLOP/byte ridge on Ampere and Hopper. Memory-bound or unresolved
+schedules use `P = 1`; compute-bound schedules use
+`P = max(1, ceil(8 / active_warps_per_sm))`, where active warps are estimated
+from shared-memory, thread, and block limits. The full key is `(U * P, -D, E)`.
+This multiplier changes ordering only: it does not reject a configuration or
+act as a pre- or post-compile resource filter.
+
 Set `memory_diagnostics=True` to additionally construct reaching dependencies,
 report backward tile propagation, estimate live register tiles, and plan shared
 storage from tile lifetimes. These diagnostics do not change the memory score,
@@ -49,9 +58,10 @@ tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
 tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5, memory_diagnostics=True)
 ```
 
-Analysis version 38 introduces the `(U, -D, E)` memory ordering and invalidates
-cached scores from the previous formula. Version 37 added compiler-only resource
-policy to the cache identity.
+Analysis version 39 adds the bound-aware `(U * P, -D, E)` ordering. Version 38
+introduced the `(U, -D, E)` memory ordering and invalidated cached scores from
+the previous formula. Version 37 added compiler-only resource policy to the
+cache identity.
 Deferred metadata resolution was introduced in version 36. The diagnostic
 setting remains part of the cache identity.
 Portable memory facts use `memory.v3`, whose `dependencies` field may be `null`;
