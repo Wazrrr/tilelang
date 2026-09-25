@@ -269,7 +269,7 @@ class TileTuneSession:
             else "include_boundary_score_group",
             "rank_policy": "equal primary scores share the group's last rank",
             "tie_break": "original configuration index"
-            if self.config.ranking_metric == "memory"
+            if self.config.ranking_metric in ("memory", "bound_aware")
             else (
                 "fixed-primitive uncertainty group, then original configuration index"
                 if any(row.get("score_relative_uncertainty", 0) for row in self.ranking)

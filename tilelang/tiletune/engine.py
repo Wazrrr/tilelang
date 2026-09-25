@@ -19,6 +19,15 @@ from .trace import AnalysisTrace, collector_snapshot, propagation_snapshot
 from .families import select_specialization
 
 
+# Datasheet roofline split (dense tensor-core FLOPs per byte) used only as a
+# coarse gate. B200 uses 2.25 PFLOP/s dense BF16/FP16 divided by 8 TB/s HBM3e.
+# Unknown architectures retain the pure memory ordering.
+BOUND_RIDGE_FLOPS_PER_BYTE = {"ampere": 200.0, "sm_100a": 281.25}
+# Below this resident-warp count, compute-bound schedules receive a coarse,
+# piecewise-constant latency-hiding penalty.
+BOUND_TARGET_ACTIVE_WARPS = 8
+
+
 @dataclass
 class AnalysisContext:
     func: object
@@ -107,7 +116,7 @@ def run_modules(context, pressure):
     from .ranking import apply_ranking_metric
 
     trace = context.trace
-    memory_mode = context.config.ranking_metric == "memory"
+    memory_mode = context.config.ranking_metric in ("memory", "bound_aware")
     detailed_memory = memory_mode and context.config.memory_diagnostics
     if memory_mode:
         specialization = None
@@ -169,8 +178,8 @@ def run_modules(context, pressure):
     tile_cost = {"score": None, "precision": "disabled"}
     modules.update({name: {"precision": "disabled"} for name in ("memory_traffic", "waves", "pipeline_overlap", "ranking")})
     if context.config.ranking and memory_mode:
-        from .memory import analyze_memory_accesses
-        from tiletune_core.memory import score_memory
+        from .memory import analyze_compute_intensity, analyze_memory_accesses, resident_warps_estimate
+        from tiletune_core.memory import classify_bound, score_memory
 
         memory = analyze_memory_accesses(
             context.collector, context.buffer_facts, include_dependencies=detailed_memory
@@ -180,12 +189,46 @@ def run_modules(context, pressure):
             if detailed_memory
             else _disabled_shared_memory()
         )
+        occupancy_penalty = 1
+        if context.config.ranking_metric == "bound_aware":
+            bound = analyze_compute_intensity(context.collector, context.buffer_facts, memory["grid_blocks"])
+            target_model = pressure.get("target_model") or {}
+            ridge = BOUND_RIDGE_FLOPS_PER_BYTE.get(
+                target_model.get("arch"), BOUND_RIDGE_FLOPS_PER_BYTE.get(target_model.get("architecture"))
+            )
+            bound["bound"] = (
+                classify_bound(bound["compute_work"], bound["unique_global_bytes"], ridge)
+                if ridge is not None
+                else None
+            )
+            bound["ridge_flops_per_byte"] = ridge
+            if bound["bound"] == "compute":
+                occupancy_shared = shared
+                if not detailed_memory:
+                    occupancy_shared = shared_memory.analyze_shared_memory(
+                        context.collector, context.buffer_facts, context.pass_configs
+                    )
+                occupancy_facts = resident_warps_estimate(
+                    context.collector,
+                    occupancy_shared.get("shared_memory_bytes_estimate"),
+                    context.device_limits,
+                )
+                active = (occupancy_facts or {}).get("active_warps_per_sm_estimate") or 0
+                if active > 0:
+                    occupancy_penalty = max(1, -(-BOUND_TARGET_ACTIVE_WARPS // active))
+                bound["occupancy"] = occupancy_facts
+            bound["occupancy_penalty"] = occupancy_penalty
+            modules["bound"] = bound
+            trace.record("bound", lambda: bound)
         ranking = score_memory(
             memory["accesses"],
             memory["grid_blocks"],
             (context.device_limits or {}).get("sm_count"),
             memory["pipeline_depth"],
+            occupancy_penalty=occupancy_penalty,
+            launch_underfill=context.config.ranking_metric == "bound_aware",
         )
+        ranking["metric"] = context.config.ranking_metric
         if memory["unknown"]:
             ranking.update(score=None, tie_break_score=None, precision="unknown")
             ranking["unknown"].extend(memory["unknown"])
@@ -197,7 +240,7 @@ def run_modules(context, pressure):
             "logical_byte_waves": ranking["logical_byte_waves"],
             "logical_memory_access_waves": ranking["logical_memory_access_waves"],
             "score_formula": ranking["formula"],
-            "ranking_metric": "memory",
+            "ranking_metric": context.config.ranking_metric,
             "precision": ranking["precision"],
             "unknown": ranking["unknown"],
         }
@@ -209,7 +252,10 @@ def run_modules(context, pressure):
             import json
             from pathlib import Path
 
-            facts = {"version": 1, "backend": "memory.v2", **memory, "sm_count": (context.device_limits or {}).get("sm_count")}
+            backend = "memory.v2" if context.config.ranking_metric == "memory" else "bound_aware.v1"
+            facts = {"version": 1, "backend": backend, **memory, "sm_count": (context.device_limits or {}).get("sm_count")}
+            if context.config.ranking_metric == "bound_aware":
+                facts["bound"] = modules["bound"]
             path = Path(context.config.facts_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(facts, indent=2, allow_nan=False) + "\n")
@@ -328,7 +374,7 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
             },
         )
         trace.record("prim_func", lambda: func.script())
-        memory_mode = config.ranking_metric == "memory"
+        memory_mode = config.ranking_metric in ("memory", "bound_aware")
         detailed_memory = memory_mode and config.memory_diagnostics
         strict_registers = memory_mode and _strict_register_analysis(config)
         col = _Collector(

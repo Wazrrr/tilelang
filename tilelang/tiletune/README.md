@@ -140,9 +140,10 @@ propagate; the autotuner records `analysis_failed` and stops that candidate.
 
 Package-root exports, settings, signatures, reports, and trace checkpoints are
 stable for the existing timing metrics. Internal imports use the source map
-above; obsolete forwarding modules are removed. Analysis version 35 includes
-the refined memory order, native alpha, lean diagnostics, and declared metadata
-contract; device-profile version 4 is unchanged.
+above; obsolete forwarding modules are removed. Analysis version 37 includes
+the B200 bound-aware ridge point while preserving the three-level memory order,
+native alpha, lean diagnostics, and declared metadata contract; device-profile
+version 4 is unchanged.
 
 `profiling/device_profile.py` and `profiling/device_probes.py` moved together
 without content changes. Their source fingerprints are unchanged. Loading a
@@ -247,6 +248,40 @@ depth. The summed band widths are exact because `0 <= E <= B`; no floating-point
 score or arbitrary event bound is used. Original index orders only identical
 triples. Every equal-score member receives the group's last position as its
 conservative rank, and default top-K retains the whole boundary group.
+
+### Bound-aware memory ranking
+
+`ranking_metric="bound_aware"` keeps the family-independent memory path and
+adds a coarse roofline gate. It divides dynamic tensor-core FLOPs by distinct
+global tensor bytes and compares that arithmetic intensity with the target
+architecture's reference ridge point. The current table uses `200 FLOPs/byte`
+for Ampere and `281.25 FLOPs/byte` specifically for B200 (`sm_100a`), derived
+from 2.25 dense BF16/FP16 PFLOP/s and 8 TB/s of HBM3e bandwidth. An unknown
+architecture or unresolved kernel falls back to the neutral memory ordering.
+
+For a compute-bound kernel, the scorer estimates resident warps from shared
+memory and launch limits, then multiplies the byte-wave term by the integer
+penalty `ceil(8 / active_warps_per_sm)`. It does not call the timing, full
+occupancy, register-allocation, warp-specialization, or family models. The
+three-level lexicographic key remains:
+
+```text
+W = ceil(grid_blocks / SM_count)
+Q = max(0, 3 * SM_count - grid_blocks)
+U = ceil(logical_bytes_per_CTA * W
+         * (grid_blocks + accesses_per_CTA + Q)
+         / (grid_blocks + accesses_per_CTA))
+U_eff = U * occupancy_penalty
+key = (U_eff, -pipeline_depth, logical_access_waves)
+```
+
+The three-SM-wave target detects underfilled launches; the per-CTA logical
+access count dampens its penalty. No separate launch-wave component is added:
+`U` already contains `W`. Memory-bound kernels use a neutral occupancy penalty
+of one while retaining the launch-underfill adjustment. The split, ridge point,
+resident-warp facts, and selected penalty are reported under `modules.bound`;
+the launch target and shortfall are reported under `modules.ranking`. Exported
+facts use `bound_aware.v1`.
 
 This is logical work rather than measured traffic: it does not model cache
 behavior, coalescing, bandwidth, transaction size, compute throughput, or

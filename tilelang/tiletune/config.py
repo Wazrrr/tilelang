@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 35
+ANALYSIS_VERSION = 37
 
 
 @dataclass(frozen=True)
@@ -73,8 +73,8 @@ class TileTuneConfig:
             raise ValueError("trace_path must be a nonempty string or None")
         if self.specialization not in ("auto", "generic", "gemm", "attention"):
             raise ValueError("specialization must be auto, generic, gemm, or attention")
-        if self.ranking_metric not in ("memory", "traffic_waves", "pipeline_time"):
-            raise ValueError("ranking_metric must be memory, traffic_waves, or pipeline_time")
+        if self.ranking_metric not in ("memory", "bound_aware", "traffic_waves", "pipeline_time"):
+            raise ValueError("ranking_metric must be memory, bound_aware, traffic_waves, or pipeline_time")
         if not isinstance(self.memory_diagnostics, bool):
             raise ValueError("memory_diagnostics must be a bool")
         if self.performance_model is not None:
@@ -122,7 +122,9 @@ class TileTuneConfig:
         spill_budget = self.attention_spill_budget_registers_per_thread
         if isinstance(spill_budget, bool) or not isinstance(spill_budget, int) or spill_budget < 0:
             raise ValueError("attention_spill_budget_registers_per_thread must be a nonnegative integer")
-        if self.ranking_metric == "memory" and (self.specialization not in ("auto", "generic") or spill_budget):
+        if self.ranking_metric in ("memory", "bound_aware") and (
+            self.specialization not in ("auto", "generic") or spill_budget
+        ):
             raise ValueError(
                 "memory ranking is kernel-family independent; family specialization and attention spill allowances are unsupported"
             )
