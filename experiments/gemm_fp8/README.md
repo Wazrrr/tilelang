@@ -29,6 +29,9 @@ outcomes. Carver uses `FP8MatmulTemplate` with FP8 operands and FP32 accumulatio
 TileTune requires a measured profile for the specific FP8 format and actual
 matrix instruction, including the FP32-to-FP8 output conversion measured by
 profile version 7; an FP16 profile cannot score FP8 work.
+Profile version 8 additionally measures both MMA and WGMMA on Hopper so tiles
+that select MMA use their own FP8 matrix rate. Regenerate older Hopper profiles
+to cover those schedules.
 
 The reference computes FP32 matmul and rounds the output to FP8. Checks require
 the exact output dtype/shape, finite values, at most one FP8 quantization step

@@ -20,14 +20,16 @@ def write(path, data):
     write_json(path, data)
 
 
-@pytest.mark.parametrize("family,count", [("gemm", 2304), ("flash_attention", 320), ("kda", 720), ("gemm_fp8", 2304)])
+@pytest.mark.parametrize(
+    "family,count", [("gemm", 576), ("flash_attention", 480), ("kda", 234), ("gemm_fp8", 2304), ("grouped_gemm", 576)]
+)
 def test_system_ablations_share_final_cases_and_full_ordered_pool(family, count):
     plan = system_plan(family)
     assert len(plan) == 25
     assert len({row["workload"]["name"] for row in plan}) == 5
     assert {row["variant"] for row in plan} == set(VARIANTS)
     assert all(
-        row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "float16")
+        row["indices"] == list(range(count)) and row["workload"]["dtype"] == ("float8_e4m3fn" if family == "gemm_fp8" else "bfloat16")
         for row in plan
     )
     assert system_plan(family, variants=["combined"], indices=[3, 1])[0]["indices"] == [3, 1]
@@ -72,6 +74,7 @@ def test_runtime_probe_does_not_serialize_full_candidate_pools(monkeypatch):
         return '{"device": "test"}'
 
     monkeypatch.setattr(baseline_store.subprocess, "check_output", probe)
+    monkeypatch.setattr(monitor, "select_cuda_gpu", lambda device: {"uuid": "GPU-test"})
     assert baseline_store.runtime_identity(device) == {"device": "test"}
 
 
@@ -121,7 +124,8 @@ def ranking(configs):
     )
 
 
-def test_two_tiletune_runs_collect_baselines_once_and_preserve_artifacts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("carver_status", ["unsupported", "model_unavailable"])
+def test_two_tiletune_runs_collect_baselines_once_and_preserve_artifacts(tmp_path, monkeypatch, carver_status):
     import experiments.suite as suite
 
     plan, device, configs = fixture_plan()
@@ -139,7 +143,7 @@ def test_two_tiletune_runs_collect_baselines_once_and_preserve_artifacts(tmp_pat
         base = Path(command[command.index("--output") + 1]) / device.name / "test" / workload["name"]
         report = ranking(configs)
         success = dict(status="completed", correctness="passed", tuning_seconds=10, winner=dict(config=configs[0], index=0))
-        methods = dict(brute_force=success, xgboost=success, carver=dict(status="unsupported", reason="GEMM only"))
+        methods = dict(brute_force=success, xgboost=success, carver=dict(status=carver_status, reason="no eligible Carver candidates"))
         write(base / "methods.json", methods)
         for method, result in methods.items():
             write(base / method / "result.json", result)
@@ -147,6 +151,15 @@ def test_two_tiletune_runs_collect_baselines_once_and_preserve_artifacts(tmp_pat
                 write(base / method / (method + ".json"), report)
                 write(base / method / "experiment.json", dict(workload=workload, configs=configs, measurement_identity=measurement))
         write(base / "brute_force/outcomes.json", report["configs"])
+        if carver_status == "model_unavailable":
+            rejected = deepcopy(report)
+            rejected["selection"]["selected_indices"] = []
+            for row in rejected["configs"]:
+                row.update(status="model_rejected")
+                del row["latency_ms"]
+            for row in rejected["ranking"]:
+                row.update(tier="unknown", score=None)
+            write(base / "carver/carver.json", rejected)
 
     monkeypatch.setattr(
         study,
@@ -186,7 +199,13 @@ def test_two_tiletune_runs_collect_baselines_once_and_preserve_artifacts(tmp_pat
         else:
             assert current_hashes == original_hashes
         curve = json.loads(next(output.rglob("oracle-curves.json")).read_text())
-        assert curve["methods"][0]["status"] == "unsupported"
+        carver = curve["methods"][0]
+        if carver_status == "unsupported":
+            assert carver["status"] == "unsupported"
+        else:
+            assert carver["status"] == "evaluated" and carver["available_count"] == 0
+            assert all(row["status"] == "no_success" and row["oracle_at_k"] is None for row in carver["curves"])
+            assert carver["saved_selection"]["selected_indices"] == []
         assert curve["methods"][2]["curves"][0]["oracle_at_k"] == 1
     assert calls == dict(collection=1, tiletune=2, remeasure=2)
     bundle = Path(references[device.name]["gemm_fp8"]["path"])
@@ -217,7 +236,11 @@ def test_result_comparison_accepts_ranking_revision_only_when_measurement_identi
 
 def test_monitor_kills_contended_worker_and_records_rejection(tmp_path, monkeypatch):
     gpu = dict(index="0", uuid="GPU-test", name="test", **{"utilization.gpu": "0"})
-    observations = iter([dict(gpus=[gpu], processes=[]), dict(gpus=[gpu], processes=[dict(pid="999999", gpu_uuid="GPU-test")])])
+    observations = iter([
+        dict(gpus=[gpu], processes=[]),
+        dict(gpus=[gpu], processes=[dict(pid="999998", gpu_uuid="GPU-test")]),
+        dict(gpus=[gpu], processes=[dict(pid=p, gpu_uuid="GPU-test") for p in ("999998", "999999")]),
+    ])
     monkeypatch.setattr(monitor, "snapshot", lambda: next(observations))
     monkeypatch.setattr(monitor, "foreign_processes", lambda obs, *args: obs["processes"])
     monkeypatch.setattr(monitor.time, "sleep", lambda _: None)
@@ -236,6 +259,46 @@ def test_monitor_kills_contended_worker_and_records_rejection(tmp_path, monkeypa
         monitor.run_monitored(["worker"], tmp_path, [gpu])
     assert process.killed
     assert json.loads((tmp_path / "monitor.json").read_text())["status"] == "contended"
+
+
+def test_unresolvable_gpu_pid_is_busy(monkeypatch):
+    def missing(pid):
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(monitor.os, "getpgid", missing)
+    row = dict(pid="999999", gpu_uuid="GPU-test")
+    assert monitor.foreign_processes(dict(processes=[row]), "GPU-test") == [row]
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_monitor_tracks_host_pids_without_local_pid_mapping(tmp_path, monkeypatch, replacement):
+    gpu = dict(uuid="GPU-test", **{"utilization.gpu": "0"})
+    observations = iter([
+        dict(gpus=[gpu], processes=[]),
+        dict(gpus=[gpu], processes=[dict(pid="900000", gpu_uuid="GPU-test")]),
+        dict(gpus=[gpu], processes=[dict(pid="900001" if replacement else "900000", gpu_uuid="GPU-test")]),
+    ])
+    monkeypatch.setattr(monitor, "snapshot", lambda: next(observations))
+    monkeypatch.setattr(monitor.time, "sleep", lambda _: None)
+
+    class Process:
+        pid = 100
+        returncode = 0
+        polls = 0
+
+        def poll(self):
+            self.polls += 1
+            return 0 if self.polls >= 2 else None
+
+    monkeypatch.setattr(monitor.subprocess, "Popen", lambda *a, **kw: Process())
+    monkeypatch.setattr(monitor, "stop_worker", lambda p: None)
+    if replacement:
+        with pytest.raises(RuntimeError, match="discard this invocation"):
+            monitor.run_monitored(["worker"], tmp_path, [gpu])
+    else:
+        monitor.run_monitored(["worker"], tmp_path, [gpu])
+    audit = json.loads((tmp_path / "monitor.json").read_text())
+    assert audit["status"] == ("contended" if replacement else "uncontended")
 
 
 def test_rejected_measurements_are_not_left_under_successful_report_names(tmp_path, monkeypatch):

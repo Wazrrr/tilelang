@@ -84,6 +84,22 @@ def operation_work(op, col=None):
         # Access-region reflection is not a timing implementation. In particular
         # scans, transpose and atomics must not silently receive zero cost.
         work["elementwise_ops"] = None
+    if op.kind == "elementwise" or (op.kind in ("copy", "async_copy", "fill") and not any(r.buffer.scope() == "global" for r in op.reads)):
+        # Input copies already use the producer's end-to-end transfer service.
+        # Internal shared loads/stores (gating, masking, epilogues) consume
+        # shared bandwidth too. Scalar accesses are charged per logical tile
+        # element, before compiler predication, broadcast reuse or bank effects.
+        parallel = [_int(r.extent) for _, r, kind in op.loops if kind == "1"] if op.kind == "elementwise" else []
+        visits = prod(parallel) if all(n is not None for n in parallel) else None
+        for region in op.reads + op.writes:
+            if not region.buffer.scope().startswith("shared") or region.buffer.scope() == "shared.tmem":
+                continue
+            dims = [_int(r.extent) for r in region.ranges]
+            if visits is None or any(n is None for n in dims):
+                work["shared_bytes"] = None
+                break
+            dtype = tvm.DataType(region.buffer.dtype)
+            work["shared_bytes"] += (prod(dims) * visits * dtype.bits * dtype.lanes + 7) // 8
     return work
 
 

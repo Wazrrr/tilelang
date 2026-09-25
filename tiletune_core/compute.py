@@ -3,8 +3,26 @@
 from .profile_schema import CONSUMER_RATE_FIELDS, reduction_rate_field
 
 
+def gemm_profile(phase, profile):
+    """Select a measured instruction rate, retaining strict operand dtypes."""
+    signature = profile.get("gemm_signature")
+    if not phase["work"].get("gemm_flops") or not signature:
+        return profile
+    participants = phase.get("compute_participants") or {}
+    if any(participants.get(k) != v for k, v in signature.items() if k != "instruction"):
+        return None
+    instruction = participants.get("instruction")
+    if instruction == signature["instruction"]:
+        return profile
+    rates = profile.get("gemm_instruction_rates", {}).get(instruction)
+    return {**profile, **rates} if rates else None
+
+
 def estimate_phase_cycles(phase, profile, concurrent_ctas):
     """Apply aggregate SM rates and optional consumer/warpgroup ceilings."""
+    profile = gemm_profile(phase, profile)
+    if profile is None:
+        return None
     terms = {}
 
     def service(amount, rate_key):

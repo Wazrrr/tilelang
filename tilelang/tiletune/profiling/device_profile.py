@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from ..targets import current_target, resolve_target
 
-PROFILE_VERSION = 7
+PROFILE_VERSION = 9
 
 
 def _signature(input_dtype, accum_dtype, instruction="cuda.wgmma"):
@@ -72,7 +72,7 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
     data = json.loads(Path(path).read_text())
     if memory_regime not in ("cached", "streaming"):
         raise ValueError("memory_regime must be cached or streaming")
-    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, 5, 6, PROFILE_VERSION):
+    if data.get("identity", {}).get("profile_version") not in (2, 3, 4, 5, 6, 7, 8, PROFILE_VERSION):
         raise ValueError("unsupported device profile version; regenerate the profile")
     if expected_identity is not None and data["identity"] != expected_identity:
         raise ValueError("device/profile fingerprint mismatch; use a separate cache path or refresh explicitly")
@@ -83,15 +83,31 @@ def load_device_profile(path, *, input_dtype, accum_dtype="float32", expected_id
     model = data["gemm_models"][key]
     rates = {**data["common"]["rates"], **model["rates"]}
     streaming_rate = rates.pop("dram_bytes_per_cycle", None)
+    streaming_latency = rates.pop("async_copy_streaming_latency_cycles", None)
     if memory_regime == "streaming":
         if streaming_rate is None:
             raise ValueError("device profile has no streaming memory measurement")
+        if data["identity"].get("l2_cache_bytes"):
+            rates["l2_bytes_per_cycle"] = rates["global_bytes_per_cycle"]
+            rates["l2_cache_bytes"] = data["identity"]["l2_cache_bytes"]
         rates["global_bytes_per_cycle"] = streaming_rate
+        if streaming_latency is not None:
+            rates["async_copy_latency_cycles"] = streaming_latency
     consumer_rates = copy.deepcopy(data["common"].get("consumer_rates", {}))
     for threads, row in model.get("consumer_rates", {}).items():
         consumer_rates.setdefault(threads, {}).update(row)
     if consumer_rates:
         rates["consumer_rates"] = consumer_rates
+    instruction_rates = {}
+    for model_key, measured in data["gemm_models"].items():
+        other = json.loads(model_key)
+        if other == signature or any(other.get(k) != v for k, v in signature.items() if k != "instruction"):
+            continue
+        instruction_rates[other["instruction"]] = {
+            k: v for k, v in measured["rates"].items() if k in ("gemm_flops_per_cycle", "wgmma_flops_per_cycle_per_warpgroup")
+        }
+    if instruction_rates:
+        rates["gemm_instruction_rates"] = instruction_rates
     result = {
         **rates,
         "gemm_signature": signature,
@@ -166,10 +182,18 @@ def profile_device(*, input_dtype="float16", accum_dtype="float32", cache_path=N
                 raise ValueError("device/profile fingerprint mismatch; use a separate cache path or refresh explicitly")
         if data is None:
             data = {"identity": identity, "common": _measure_common(identity), "gemm_models": {}}
-        signature = _signature(input_dtype, accum_dtype, _instruction(identity))
-        key = json.dumps(signature, sort_keys=True)
-        if key not in data["gemm_models"]:
-            data["gemm_models"][key] = _measure_gemm(identity, data["common"]["clock_mhz"], input_dtype, accum_dtype)
+        instructions = [_instruction(identity)]
+        if instructions == ["cuda.wgmma"]:
+            # Hopper lowers small/non-WGMMA tiles to MMA, including the
+            # 48-row KDA case. Never apply WGMMA throughput to those phases.
+            instructions.append("cuda.mma")
+        for instruction in instructions:
+            signature = _signature(input_dtype, accum_dtype, instruction)
+            key = json.dumps(signature, sort_keys=True)
+            if key in data["gemm_models"]:
+                continue
+            measurement = dict(identity, matrix_instruction=instruction)
+            data["gemm_models"][key] = _measure_gemm(measurement, data["common"]["clock_mhz"], input_dtype, accum_dtype)
             data["updated_at_unix"] = time.time()
             temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
             temporary.write_text(json.dumps(data, indent=2) + "\n")
@@ -193,11 +217,13 @@ def _clock_mhz():
     return value
 
 
-def _benchmark(func, inputs, out_idx, check=None, required_source=None, *, target=None):
+def _benchmark(func, inputs, out_idx, check=None, required_source=None, *, target=None, pass_configs=None):
     import torch
     import tilelang
 
-    kernel = tilelang.compile(func, target=target or current_target(), out_idx=out_idx, execution_backend="tvm_ffi")
+    kernel = tilelang.compile(
+        func, target=target or current_target(), out_idx=out_idx, execution_backend="tvm_ffi", pass_configs=pass_configs
+    )
     source = kernel.get_kernel_source()
     if required_source is not None and required_source not in source:
         raise RuntimeError(f"primitive did not compile to its required instruction: {required_source}")
@@ -330,6 +356,9 @@ def _measure_common(identity):
             "method": "clock64: eight 16-byte copies per lane, 128-thread CTA; readiness measured through wait_group and a dependent shared load; cached fixed addresses",
             "latency_semantics": "minimum ready time including service, combined with byte-service completion by max, without subtracting unrelated aggregate rates",
         }
+        ready, observation = _measure_streaming_copy(identity)
+        rates["async_copy_streaming_latency_cycles"] = ready
+        evidence["async_copy_streaming"] = observation
     return {
         "rates": rates,
         **_measure_consumer_rates(clock),
@@ -338,6 +367,33 @@ def _measure_common(identity):
         "memory_regime": "cached logical tile service; streaming rate measured separately",
         "note": "Fixed primitives independent of candidate kernels. Rates include probe-specific overhead and may not predict absolute runtime.",
     }
+
+
+def _measure_streaming_copy(identity):
+    """Measure cold load-to-use latency without candidate data or a warmup replay."""
+    import torch
+    import tilelang
+    from .device_probes import async_copy_streaming_clocks
+
+    kernel = tilelang.compile(async_copy_streaming_clocks(), target=current_target(), out_idx=[1], execution_backend="tvm_ffi")
+    source = kernel.get_kernel_source()
+    if "cp.async.cg.shared.global" not in source:
+        raise RuntimeError("streaming copy probe requires cp.async.cg.shared.global")
+    data = torch.ones((65536,), device="cuda")
+    flush = torch.empty(max(256 * 1024 * 1024, identity["l2_cache_bytes"] * 2), dtype=torch.uint8, device="cuda")
+    samples = []
+    for _ in range(7):
+        flush.zero_()
+        torch.cuda.synchronize()
+        samples.append(kernel(data).double().median().item())
+    if not all(math.isfinite(value) and value > 0 for value in samples):
+        raise RuntimeError("invalid streaming copy readiness measurement")
+    return statistics.median(samples), dict(
+        ready_cycles=samples,
+        source_sha256=hashlib.sha256(source.encode()).hexdigest(),
+        flush_bytes=flush.numel(),
+        method="clock64: 128 distinct 2 KB tiles, one 128-thread CTA; L2 flushed before each invocation; wait_group and dependent shared load",
+    )
 
 
 def _measure_gemm(identity, clock, input_dtype, accum_dtype):
@@ -361,6 +417,7 @@ def _measure_gemm(identity, clock, input_dtype, accum_dtype):
                 [2],
                 lambda out: torch.testing.assert_close(out, torch.zeros_like(out)),
                 required_source="tl::wgmma_ss" if hopper else "tl::mma_sync",
+                pass_configs={"tl.disable_wgmma": not hopper},
             )
             for n in (128, 256)
         ]

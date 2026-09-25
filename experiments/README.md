@@ -10,8 +10,9 @@ start in the family folder:
 | --- | --- | --- |
 | GEMM | Five continuous-batch decode/prefill projection and FFN shapes | [gemm/](gemm/README.md) |
 | FlashAttention | Five 512–8192-token causal/noncausal prefill shapes | [flash_attention/](flash_attention/README.md) |
-| KDA | Five 2K–16K and batched chunk-output shapes at DK=DV=128 | [kda/](kda/README.md) |
+| KDA | Five 2K–16K and batched intra-chunk coefficient shapes at dim=128 | [kda/](kda/README.md) |
 | FP8 GEMM | Five decode/prefill projection and FFN shapes with E4M3 inputs/output | [gemm_fp8/](gemm_fp8/README.md) |
+| Grouped GEMM | Five MoE decode/prefill and aligned/ragged projections | [grouped_gemm/](grouped_gemm/README.md) |
 
 ## Layout
 
@@ -19,8 +20,9 @@ start in the family folder:
 experiments/
 ├── gemm/                    Cases, spaces, kernels, references, commands
 ├── flash_attention/         Same family conventions
-├── kda/                     Direct chunk-output example study
+├── kda/                     Intra-chunk coefficient study
 ├── gemm_fp8/                Direct FP8 GEMM example study
+├── grouped_gemm/            Direct grouped GEMM example study
 ├── common/                  Shared execution and comparison protocol
 ├── utils/                   Monitoring, baseline storage, result I/O and shared helpers
 ├── xgboost/                 Shared sampling, training, and prediction
@@ -43,9 +45,10 @@ python -m experiments.gemm_fp8.tiletune.run --suite development --device ampere 
 
 A development run uses five test cases per family, up to 256 configurations per
 pool, and seed 123. Smoke uses the first case and up to 16 configurations.
-The four final kernels call their [example builders directly](example_alignment.md).
-Each family has one complete `expanded` pool: GEMM 2,304, FlashAttention 320,
-KDA 720, and FP8 GEMM 2,304 configs per case. There is no cap or structural
+The five families call their example builders directly; see the
+[backend unification audit](backend_unification_20260917.md).
+Each family has one complete `expanded` pool: GEMM 576, FlashAttention 480,
+KDA 234, FP8 GEMM 2,304, and grouped GEMM 576 configs per case. There is no cap or structural
 prefilter. Final uses seeds 123, 456 and 789. All methods share the same pool for each workload. Smoke/development
 budgets select indices from that pool.
 
@@ -64,16 +67,28 @@ settings are 600 rounds, depth 10, learning rate 0.05, subsampling 0.8, and
 validation patience 20. Baselines use one fixed seed (123 by default) and are
 reused across TileTune's three repeats and later revisions. Each new TileTune
 winner receives seven checks. Preparation costs are recorded separately.
-Carver uses its existing Matmul and FlashAttention templates and the KDA chunk-output
-template. The attention graph includes masking, stable normalization and the
-probability cast; KDA includes both query casts, gating and the causal term.
+Carver uses canonical Matmul, FP8Matmul, GroupedMatmul and FlashAttention
+templates. The attention graph includes masking, stable normalization and the
+probability cast. KDA uses a dedicated intra-chunk traffic/wave adapter that
+models the gated QK/KK memory ledger instead of assuming tensor-core MMA.
 Carver retains its traffic-times-waves priority. Its assumptions are saved in each
 ranking; TileTune separately models the example’s actual loop and ownership.
-Native FP8 requires suitable hardware: A100 records both FP8 cases as unsupported
-and still completes the six FP16 cases. Unavailable cases remain in acceptance reports.
+KDA's shared gate and beta consumers are included in the Hopper producer/consumer model.
+Profile version 8 measures both MMA and WGMMA on Hopper, and TileTune selects
+rates per GEMM instruction; regenerate older Hopper profiles for MMA coverage.
+TileTune also charges consumer shared-memory reads and writes, including KDA's
+gating and masking and the attention kernels' shared output paths. Carver's attention
+adapter charges Q/output once per CTA and K/V over the actual causal or noncausal
+loop, with clipped tails; its priority is `(mean_cta_traffic + 1) * waves`.
+These remain analytical estimates: scalar shared accesses precede compiler
+predication and reuse, and Carver does not model online-recurrence cycles.
+See the [model fidelity checks](model_fidelity_20260917.md) for validation scope
+and retained unsupported or rejected cases.
+Native FP8 requires suitable hardware: A100 records all five FP8 cases as unsupported
+and retains the twenty non-FP8 cases. Unavailable cases remain in acceptance reports.
 
 The family command checks acceptance for its requested cases and targets. Its
-report identifies the scope; full five-target final acceptance requires all four
+report identifies the scope; full five-target final acceptance requires all five
 families, all five targets, and all three seeds. Final execution requires a
 passing development report covering the requested cases and targets.
 
@@ -107,7 +122,7 @@ python -m experiments.suite --suite full --devices hopper \
   --output experiments/results/tiletune/revision-b
 ```
 
-`full` uses all twenty final cases and complete pools without asserting final
+`full` uses all twenty-five final cases and complete pools without asserting final
 acceptance. Family commands support the same flags. Baselines are collected once
 per family/device/experiment identity under `baseline-root/TARGET/FAMILY/HASH/`.
 The bundle contains all oracle outcomes, Carver rankings or explicit unsupported
@@ -149,7 +164,7 @@ CUDA is not detected automatically, set `CUDA_HOME` to the installed toolkit and
 
 ## System optimization ablations
 
-All four default-family `system/run.py` entry points use the shared
+All five default-family `system/run.py` entry points use the shared
 [system runner](common/system.py) and the same five final cases/pools:
 
 ```bash
@@ -158,7 +173,7 @@ python -m experiments.kda.system.run --variant all \
   --output experiments/results/kda/system-v1
 ```
 
-Replace `kda` with `gemm`, `flash_attention` or `gemm_fp8`. `--variant all` runs
+Replace `kda` with `gemm`, `flash_attention`, `gemm_fp8`, or `grouped_gemm`. `--variant all` runs
 `baseline`, `pipeline`, `grouped`, `multi_gpu`, and `combined` in fresh processes
 with cold caches, identical inputs and numerical checks. Pipeline overlaps
 compilation/benchmarking; grouped combines compilation; multi_gpu distributes
@@ -225,7 +240,7 @@ in `spaces.py`. Each family owns its structural legality and equivalence rules;
 `common/spaces.py` handles deterministic enumeration and audit records. Counts
 are declared candidates before compilation and correctness validation.
 
-All four final families use only `expanded`, with the example's native parameter
+All five final families use only `expanded`, with the example's native parameter
 names. Their full grids include the original example configs/defaults. Explicit
 CUDA/HIP configs must be members of these grids. Separate vector workloads
 retain their existing presets. The
@@ -251,7 +266,7 @@ Family `system/run.py` commands benchmark compiler execution strategies using
 the same example builders; they are separate from tuner quality.
 
 Softmax and the former supplementary vector experiments are removed from the active matrix.
-The FP8 GEMM family directly uses the native example and the shared protocol. The shared runner also uses the twenty family-owned
+The FP8 GEMM family directly uses the native example and the shared protocol. The shared runner also uses the twenty-five family-owned
 cases; `--smoke` chooses their development shapes.
 Use the canonical `experiments.common.*` commands and `experiments.suite`.
 Source fingerprints cover active code roots and exclude `results/`; historical

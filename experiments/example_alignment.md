@@ -1,4 +1,4 @@
-> Historical checkpoint. The active suite now replaces softmax with native FP8 GEMM and has Carver templates for all four families; see the [current contracts](README.md).
+> Historical checkpoint. The active suite now replaces softmax with native FP8 GEMM and includes grouped GEMM and has Carver templates for all five families; see the [current contracts](README.md).
 
 # Example-kernel alignment (2026-09-16)
 
@@ -17,7 +17,6 @@ also tested at BF16.
 | --- | --- | --- | --- |
 | GEMM | [`make_autotune_kernel_builder`](../examples/gemm/example_gemm_advanced_autotune.py) | The final runner used `kernels/tiled.py`: 3-D NN tensors, dummy bias and direct fragment-to-global output. The advanced replica existed but was only used by the legacy path. | 2-D A=(M,K), B=(N,K), C=(M,N), `transpose_B=True`, FP32 accumulation, shared-memory epilogue. |
 | FlashAttention | [`flashattn`](../examples/flash_attention/example_mha_fwd_bshd.py) | Expanded candidates selected a rewrite with shared score/probability transfers and a full-KV pipelined causal loop. | The example's BSHD tensors, fragment probability path, FullRow GEMMs and causal loop bound. |
-| KDA chunk output | [`tilelang_chunk_fwd_o`](../examples/kda/chunk_o.py) | Rewritten BHSD kernels, independent row/causal tiles, a different gated-query rounding sequence, and direct output. | BSHD tensors; hidden=(B,chunks,H,DK,DV); the example's two casts, GEMMs and shared-memory output; block_S=chunk_size. |
 | Softmax | [`softmax_kernel`](../examples/online_softmax/online_softmax.py) | Separate full-row/streamed implementations and explicit layout choices. | The example's two passes and log2/exp2 recurrence, with a tail mask added in the example itself. |
 
 The adapters in each family's `kernel.py` supply inputs, references, configuration
@@ -60,7 +59,6 @@ attention/KDA/softmax knobs are rejected, not silently mapped to ignored values.
 | --- | ---: | ---: | ---: | ---: |
 | GEMM | 108 | 3,000 | 1,024 | 12,000 |
 | Attention | 54 | 250 | 1,024 | 1,280 |
-| KDA chunk output | 24 | 90 | 1,024 | 1,280 |
 | Softmax | 6 | 32 | 224 | 224 |
 
 These are declared candidate counts, before compilation/correctness checks.

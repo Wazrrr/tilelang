@@ -83,12 +83,12 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
             phase["scalar_work_basis"] = (
                 "compiler fragment ownership and pure-expression reuse within each thread; address instructions excluded"
             )
-        if ampere is not None:
-            from .ampere import external_work
+        # Tail masks and metadata-dependent addresses apply on every backend.
+        from .ampere import external_work
 
-            phase["external_work"] = external_work(op)
-            if any(value is None for value in phase["external_work"].values()):
-                add_unknown("unresolved_external_access", f"operation {op.index} has unresolved external access bytes", op.index)
+        phase["external_work"] = external_work(op)
+        if any(value is None for value in phase["external_work"].values()):
+            add_unknown("unresolved_external_access", f"operation {op.index} has unresolved external access bytes", op.index)
         phase["reduction"] = reduction_work(op, col, pressure, participants, layout_cache)
         reduction = phase["reduction"]
         if reduction and reduction["precision"] == "unknown":
@@ -110,10 +110,9 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
     except Exception as error:
         producer_buffers, producer_unknown = [], [str(error)]
     if performance_model and performance_model.get("gemm_signature"):
-        signature = performance_model["gemm_signature"]
-        if any(
-            p["work"]["gemm_flops"] and any((p["compute_participants"] or {}).get(k) != v for k, v in signature.items()) for p in phases
-        ):
+        from tiletune_core.compute import gemm_profile
+
+        if any(gemm_profile(p, performance_model) is None for p in phases):
             add_unknown("profile_mismatch", "device profile GEMM instruction/dtype signature does not match the kernel")
     iterations = {"min": None, "max": None, "precision": "unknown"}
     stages = None
@@ -190,6 +189,7 @@ def _analyze_single_pipeline(col, memory, pressure, performance_model=None, pass
             "optional WGMMA per-warpgroup rate limits a CTA's compute service independently of the aggregate per-SM rate",
             "optional single-CTA primitive rates limit scalar/exp/reduction service at the original consumer thread count",
             "consumer probes use eight independent chains; actual instruction dependencies and phase occupancy can differ",
+            "consumer shared loads/stores count logical accesses before predication, broadcast reuse and bank conflicts; input copies use producer transfer service",
         ],
     }
     result["timing"] = estimate_pipeline_cycles(result)

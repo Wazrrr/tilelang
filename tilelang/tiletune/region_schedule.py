@@ -165,6 +165,25 @@ def _operation(op, phase, domains, col):
         for region in regions:
             if region.buffer.scope() != "global":
                 continue
+            # Resolve singleton CTA coordinates before bounding parallel axes.
+            # Otherwise an interval analyzer may union unrelated arms of a
+            # metadata lookup and turn one row tile into a span across groups.
+            fixed = {v: tir.const(lo, v.dtype) for v, (lo, n) in domains.items() if n == 1}
+            if fixed:
+                from .src.ir import Region
+
+                ana = Analyzer()
+                region = Region(
+                    region.buffer,
+                    [
+                        Range.from_min_extent(
+                            ana.simplify(tir.stmt_functor.substitute(r.min, fixed)),
+                            ana.simplify(tir.stmt_functor.substitute(r.extent, fixed)),
+                        )
+                        for r in region.ranges
+                    ],
+                    region.precision,
+                )
             intervals = {v: tvm.arith.IntervalSet(lo, lo + n - 1) for v, (lo, n) in active.items()}
             if op.kind == "elementwise" and not rectangular_scalar_access(region, op.loops):
                 raise UnresolvedRegion("unresolved_memory_bounds", "nonrectangular scalar access requires an exact address-count model")
@@ -242,7 +261,7 @@ def build_region_schedule(col, phases, pressure):
     try:
         schedules = [(prod(n for _, n in domains.values()), sequence(tree, domains))]
         repetitions = 1
-    except UnresolvedRegion as original:
+    except UnresolvedRegion:
         for axis_index, axis in enumerate(axes):
             var, _ = col.block_domains[axis]
             lo, n = domains[var]
@@ -255,7 +274,31 @@ def build_region_schedule(col, phases, pressure):
             except UnresolvedRegion:
                 continue
         else:
-            raise original
+            # A tail or metadata branch can vary on more than one launch axis.
+            # Keep identical rows compressed while splitting the outer axes,
+            # then retain CUDA's x-fastest order in the bounded group list.
+            def grid_rows(axis_index, bounds):
+                if axis_index < 0:
+                    return [(1, sequence(tree, bounds))]
+                var, _ = col.block_domains[axes[axis_index]]
+                lo, n = bounds[var]
+                runs = _split(
+                    (var, lo, n),
+                    lambda v, start, length: grid_rows(axis_index - 1, {**bounds, v: (start, length)}),
+                    budget,
+                )
+                rows = []
+                for count, row in runs:
+                    if len(row) == 1:
+                        rows.append((count * row[0][0], row[0][1]))
+                    else:
+                        if len(rows) + count * len(row) > 4096:
+                            raise UnresolvedRegion("unsupported_scheduling", "bounded launch schedule exceeded 4096 groups")
+                        rows.extend(row * count)
+                return [(sum(n for n, _ in group), body) for body, group in groupby(rows, key=lambda pair: pair[1])]
+
+            schedules = grid_rows(len(axes) - 1, domains)
+            repetitions = 1
     variants, groups = [], []
     for count, body in schedules:
         if body not in variants:

@@ -1,58 +1,49 @@
+"""Token-parallel KDA intra-chunk coefficient construction.
+
+Each CTA owns one token and a tile of heads. It constructs the causal
+query/key coefficients for the enclosing chunk and the beta-weighted key/key
+coefficients for the enclosing sub-chunk. This is the KDA-specific intra stage;
+unlike ``chunk_o.py`` it does not mix a prepared state with values.
+"""
+
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
-import torch
-import torch.nn.functional as F
-from FLA_KDA.fla_chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
-from FLA_KDA.cumsum import chunk_local_cumsum
-from test_utils_kda import do_bench
-
-torch.random.manual_seed(42)
 
 
-def prepare_input(
-    B,
-    S,
-    H,
-    DK,
-    chunk_size,
-    input_dtype,
-    output_dtype,
-    accum_dtype,
-    gate_dtype,
-):
-    q = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
-    k = torch.randn(B, S, H, DK, dtype=input_dtype).cuda()
-    beta = torch.randn(B, S, H, dtype=input_dtype).cuda()
-    gk = torch.randn(B, S, H, DK, dtype=gate_dtype).cuda()
-    gk = F.logsigmoid(gk)
-    gk = chunk_local_cumsum(gk, chunk_size)
+def prepare_input(B, S, H, DK, chunk_size, input_dtype, output_dtype, accum_dtype, gate_dtype):
+    """Create the inputs used by the standalone correctness/performance demo."""
+    del output_dtype, accum_dtype
+    import torch
+    import torch.nn.functional as F
+
+    q = torch.randn(B, S, H, DK, dtype=input_dtype, device="cuda")
+    k = torch.randn(B, S, H, DK, dtype=input_dtype, device="cuda")
+    beta = torch.randn(B, S, H, dtype=input_dtype, device="cuda").sigmoid()
+    gates = F.logsigmoid(torch.randn(B, S, H, DK, dtype=gate_dtype, device="cuda"))
+    gk = gates.reshape(B, S // chunk_size, chunk_size, H, DK).cumsum(2).reshape(B, S, H, DK)
     return q, k, gk, beta
 
 
-def prepare_output(
-    B,
-    S,
-    H,
-    chunk_size,
-    sub_chunk_size,
-    output_dtype,
-):
-    Aqk = torch.empty(B, S, H, chunk_size, dtype=output_dtype).cuda()
-    Akk = torch.empty(B, S, H, sub_chunk_size, dtype=output_dtype).cuda()
-    return Aqk, Akk
+def prepare_output(B, S, H, chunk_size, sub_chunk_size, output_dtype):
+    """Allocate zeroed coefficient tensors for the sparse intra blocks."""
+    import torch
+
+    aqk = torch.zeros(B, S, H, chunk_size, dtype=output_dtype, device="cuda")
+    akk = torch.zeros(B, S, H, sub_chunk_size, dtype=output_dtype, device="cuda")
+    return aqk, akk
 
 
 def get_configs():
+    """Return the example's native autotuning grid."""
     import itertools
 
-    block_H = [1, 2, 4, 8]
-    threads = [128, 256]
-    num_stages = [0, 1, 2, 3]
-    _configs = list(itertools.product(block_H, threads, num_stages))
-
-    configs = [{"block_H": c[0], "threads": c[1], "num_stages": c[2]} for c in _configs]
-    return configs
+    return [
+        {"block_H": block_h, "threads": threads, "num_stages": stages, "block_DK": block_dk}
+        for block_h, threads, stages, block_dk in itertools.product(
+            [1, 2, 4, 8], [128, 256], [0, 1, 2, 3], [32, 64, 128]
+        )
+    ]
 
 
 @autotune(configs=get_configs(), warmup=3, rep=5)
@@ -68,107 +59,95 @@ def tilelang_chunk_kda_fwd_intra_token_parallel(
     gate_dtype,
     chunk_size,
     sub_chunk_size,
+    scale,
     block_H=1,
-    threads=32,
+    threads=128,
     num_stages=1,
+    block_DK=128,
 ):
-    CS = chunk_size
-    SCS = sub_chunk_size
-    Q_shape = (B, S, H, DK)
-    K_shape = (B, S, H, DK)
-    GK_shape = (B, S, H, DK)
-    Beta_shape = (B, S, H)
-    Aqk_shape = (B, S, H, CS)
-    Akk_shape = (B, S, H, SCS)
+    """Build the fixed-length BSHD token-parallel KDA intra kernel."""
+    assert S % chunk_size == 0, "sequence length must contain complete chunks"
+    assert chunk_size % sub_chunk_size == 0, "chunk size must contain complete sub-chunks"
+    assert DK % block_DK == 0, "DK must be divisible by block_DK"
+    cs, scs = chunk_size, sub_chunk_size
+    q_shape = (B, S, H, DK)
+    k_shape = (B, S, H, DK)
+    gk_shape = (B, S, H, DK)
+    beta_shape = (B, S, H)
+    aqk_shape = (B, S, H, cs)
+    akk_shape = (B, S, H, scs)
 
     @T.prim_func
     def kernel(
-        Q: T.Tensor(Q_shape, dtype=input_dtype),
-        K: T.Tensor(K_shape, dtype=input_dtype),
-        GK: T.Tensor(GK_shape, dtype=gate_dtype),
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
-        Aqk: T.Tensor(Aqk_shape, dtype=output_dtype),
-        Akk: T.Tensor(Akk_shape, dtype=output_dtype),
+        Q: T.Tensor(q_shape, dtype=input_dtype),
+        K: T.Tensor(k_shape, dtype=input_dtype),
+        GK: T.Tensor(gk_shape, dtype=gate_dtype),
+        Beta: T.Tensor(beta_shape, dtype=input_dtype),
+        Aqk: T.Tensor(aqk_shape, dtype=output_dtype),
+        Akk: T.Tensor(akk_shape, dtype=output_dtype),
     ):
-        with T.Kernel(B * S, T.ceildiv(H, block_H), threads=threads) as (bbs, bh):  # block_index_bs, block_index_dh
+        with T.Kernel(B * S, T.ceildiv(H, block_H), threads=threads) as (bbs, bh):
             bb, bs = bbs // S, bbs % S
-            i_c = bs // CS  # indice chunk
-            i_s = (bs % CS) // SCS  # indice subchunk
-            i_tc = i_c * CS
-            i_ts = i_tc + i_s * SCS
-            loops = bs + 1 - i_ts
+            chunk = bs // cs
+            sub_chunk = (bs % cs) // scs
+            chunk_start = chunk * cs
+            sub_chunk_start = chunk_start + sub_chunk * scs
+            iterations = bs + 1 - sub_chunk_start
 
-            Q_i_shared = T.alloc_shared((block_H, DK), dtype=input_dtype)
-            K_i_shared = T.alloc_shared((block_H, DK), dtype=input_dtype)
-            GK_i_shared = T.alloc_shared((block_H, DK), dtype=gate_dtype)
-            Beta_shared = T.alloc_shared(
-                (block_H,),
-                dtype=input_dtype,
-            )
-            K_j_shared = T.alloc_shared((block_H, DK), dtype=input_dtype)
-            GK_j_shared = T.alloc_shared((block_H, DK), dtype=gate_dtype)
-            Aqk_shared = T.alloc_shared((block_H, DK), dtype=accum_dtype)
-            Akk_shared = T.alloc_shared((block_H, DK), dtype=accum_dtype)
-            Sum_Aqk_shared = T.alloc_shared((block_H, CS), dtype=output_dtype)
-            Sum_Akk_shared = T.alloc_shared((block_H, SCS), dtype=output_dtype)
+            q_i_shared = T.alloc_shared((block_H, DK), dtype=input_dtype)
+            k_i_shared = T.alloc_shared((block_H, DK), dtype=input_dtype)
+            g_i_shared = T.alloc_shared((block_H, DK), dtype=gate_dtype)
+            beta_shared = T.alloc_shared((block_H,), dtype=input_dtype)
+            k_j_shared = T.alloc_shared((block_H, block_DK), dtype=input_dtype)
+            g_j_shared = T.alloc_shared((block_H, block_DK), dtype=gate_dtype)
+            aqk_product_fragment = T.alloc_fragment((block_H, block_DK), dtype=accum_dtype)
+            akk_product_fragment = T.alloc_fragment((block_H, block_DK), dtype=accum_dtype)
+            aqk_shared = T.alloc_shared((block_H, cs), dtype=output_dtype)
+            akk_shared = T.alloc_shared((block_H, scs), dtype=output_dtype)
 
-            Q_i_fragment = T.alloc_fragment(
-                (block_H, DK),
-                dtype=input_dtype,
-            )
-            K_i_fragment = T.alloc_fragment(
-                (block_H, DK),
-                dtype=input_dtype,
-            )
-            K_j_fragment = T.alloc_fragment(
-                (block_H, DK),
-                dtype=accum_dtype,
-            )
+            k_j_fragment = T.alloc_fragment((block_H, block_DK), dtype=accum_dtype)
+            aqk_sum = T.alloc_fragment((block_H,), dtype=accum_dtype)
+            akk_sum = T.alloc_fragment((block_H,), dtype=accum_dtype)
 
-            Sum_Aqk_fragment = T.alloc_fragment(
-                (block_H,),
-                dtype=accum_dtype,
-            )
-            Sum_Akk_fragment = T.alloc_fragment(
-                (block_H,),
-                dtype=accum_dtype,
-            )
+            T.copy(Q[bb, bs, bh * block_H : (bh + 1) * block_H, :], q_i_shared)
+            T.copy(K[bb, bs, bh * block_H : (bh + 1) * block_H, :], k_i_shared)
+            T.copy(GK[bb, bs, bh * block_H : (bh + 1) * block_H, :], g_i_shared)
+            for i_h in T.Parallel(block_H):
+                global_h = bh * block_H + i_h
+                beta_shared[i_h] = T.if_then_else(global_h < H, Beta[bb, bs, global_h], 0)
 
-            T.copy(Q[bb, bs, bh * block_H : (bh + 1) * block_H, :], Q_i_shared)
-            T.copy(K[bb, bs, bh * block_H : (bh + 1) * block_H, :], K_i_shared)
-            T.copy(GK[bb, bs, bh * block_H : (bh + 1) * block_H, :], GK_i_shared)  # TMA
+            T.clear(aqk_shared)
+            T.clear(akk_shared)
+            for offset in T.Pipelined(iterations, num_stages=num_stages):
+                j = offset + sub_chunk_start
+                T.clear(aqk_sum)
+                T.clear(akk_sum)
+                for dk in T.serial(DK // block_DK):
+                    T.copy(
+                        K[bb, j, bh * block_H : (bh + 1) * block_H, dk * block_DK : (dk + 1) * block_DK],
+                        k_j_shared,
+                    )
+                    T.copy(
+                        GK[bb, j, bh * block_H : (bh + 1) * block_H, dk * block_DK : (dk + 1) * block_DK],
+                        g_j_shared,
+                    )
+                    for i_h, i_k in T.Parallel(block_H, block_DK):
+                        global_k = dk * block_DK + i_k
+                        k_j_fragment[i_h, i_k] = k_j_shared[i_h, i_k] * T.exp2(
+                            g_i_shared[i_h, global_k] - g_j_shared[i_h, i_k]
+                        )
+                        aqk_product_fragment[i_h, i_k] = q_i_shared[i_h, global_k] * scale * k_j_fragment[i_h, i_k]
+                        akk_product_fragment[i_h, i_k] = k_i_shared[i_h, global_k] * beta_shared[i_h] * k_j_fragment[i_h, i_k]
 
-            T.disable_warp_group_reg_alloc()
-            for i_h in T.Parallel(block_H):  # cannot use TMA
-                Beta_shared[i_h] = Beta[bb, bs, bh * block_H + i_h]
+                    T.reduce_sum(aqk_product_fragment, aqk_sum, dim=-1, clear=False)
+                    T.reduce_sum(akk_product_fragment, akk_sum, dim=-1, clear=False)
 
-            for i_h, i_k in T.Parallel(block_H, DK):
-                K_i_fragment[i_h, i_k] = K_i_shared[i_h, i_k] * Beta_shared[i_h]
-                Q_i_fragment[i_h, i_k] = Q_i_shared[i_h, i_k]
+                T.copy(aqk_sum, aqk_shared[:, j % cs])
+                for i_h in T.Parallel(block_H):
+                    akk_shared[i_h, offset] = T.if_then_else(j < bs, akk_sum[i_h], 0)
 
-            T.clear(Sum_Akk_shared)
-            T.clear(Sum_Aqk_shared)
-
-            for d in T.Pipelined(loops, num_stages=num_stages):
-                j = d + i_ts
-                T.copy(K[bb, j, bh * block_H : (bh + 1) * block_H, :], K_j_shared)
-                T.copy(GK[bb, j, bh * block_H : (bh + 1) * block_H, :], GK_j_shared)
-                # T.copy(K_j_shared, K_j_fragment)
-                for i_h, i_k in T.Parallel(block_H, DK):
-                    K_j_fragment[i_h, i_k] = K_j_shared[i_h, i_k] * T.exp2(GK_i_shared[i_h, i_k] - GK_j_shared[i_h, i_k])
-                    Aqk_shared[i_h, i_k] = Q_i_fragment[i_h, i_k] * K_j_fragment[i_h, i_k]
-                    Akk_shared[i_h, i_k] = K_i_fragment[i_h, i_k] * K_j_fragment[i_h, i_k]
-
-                T.reduce_sum(Aqk_shared, Sum_Aqk_fragment, dim=-1, clear=True)
-                T.reduce_sum(Akk_shared, Sum_Akk_fragment, dim=-1, clear=True)
-
-                T.copy(Sum_Aqk_fragment, Sum_Aqk_shared[:, j % CS])
-
-                if j < bs:
-                    T.copy(Sum_Akk_fragment, Sum_Akk_shared[:, d])
-
-            T.copy(Sum_Aqk_shared, Aqk[bb, bs, bh * block_H : (bh + 1) * block_H, :])
-            T.copy(Sum_Akk_shared, Akk[bb, bs, bh * block_H : (bh + 1) * block_H, :])
+            T.copy(aqk_shared, Aqk[bb, bs, bh * block_H : (bh + 1) * block_H, :])
+            T.copy(akk_shared, Akk[bb, bs, bh * block_H : (bh + 1) * block_H, :])
 
     return kernel
 
@@ -186,6 +165,16 @@ def run_test(
     chunk_size,
     sub_chunk_size,
 ):
+    """Compare the example against the optional FLA Triton implementation."""
+    import torch
+
+    if __package__:
+        from .FLA_KDA.fla_chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
+        from .test_utils_kda import do_bench
+    else:
+        from FLA_KDA.fla_chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
+        from test_utils_kda import do_bench
+
     q, k, gk, beta = prepare_input(
         B,
         S,
@@ -197,13 +186,18 @@ def run_test(
         getattr(torch, accum_dtype),
         getattr(torch, gate_dtype),
     )
-    Aqk_ref, Akk_ref = prepare_output(B, S, H, chunk_size, sub_chunk_size, getattr(torch, output_dtype))
-    Aqk_tilelang, Akk_tilelang = prepare_output(B, S, H, chunk_size, sub_chunk_size, getattr(torch, output_dtype))
-
-    Aqk_ref, Akk_ref = chunk_kda_fwd_intra_token_parallel(
-        q=q, k=k, gk=gk, beta=beta, Aqk=Aqk_ref, Akk=Akk_ref, scale=scale, chunk_size=chunk_size, sub_chunk_size=sub_chunk_size
+    aqk_ref, akk_ref = prepare_output(B, S, H, chunk_size, sub_chunk_size, getattr(torch, output_dtype))
+    aqk_ref, akk_ref = chunk_kda_fwd_intra_token_parallel(
+        q=q,
+        k=k,
+        gk=gk,
+        beta=beta,
+        Aqk=aqk_ref,
+        Akk=akk_ref,
+        scale=scale,
+        chunk_size=chunk_size,
+        sub_chunk_size=sub_chunk_size,
     )
-
     kernel = tilelang_chunk_kda_fwd_intra_token_parallel(
         B,
         S,
@@ -215,51 +209,40 @@ def run_test(
         gate_dtype,
         chunk_size,
         sub_chunk_size,
+        scale,
     )
-    # kernel_source  = kernel.get_kernel_source()
-    # print(kernel_source)
-    # exit()
-    # # scale 如何传值
-    # r = torch.cuda.nvtx.range_start("TILELANG_KDA")
-    Aqk_tilelang, Akk_tilelang = kernel(
-        q,
-        k,
-        gk,
-        beta,
+    aqk_tilelang, akk_tilelang = kernel(q, k, gk, beta)
+    torch.testing.assert_close(aqk_tilelang, aqk_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(akk_tilelang, akk_ref, rtol=2e-2, atol=2e-2)
+    print(
+        "fla time:",
+        do_bench(
+            chunk_kda_fwd_intra_token_parallel,
+            q=q,
+            k=k,
+            gk=gk,
+            beta=beta,
+            Aqk=aqk_ref,
+            Akk=akk_ref,
+            scale=scale,
+            chunk_size=chunk_size,
+            sub_chunk_size=sub_chunk_size,
+        ),
+        "ms",
     )
-    # torch.cuda.nvtx.range_end(r)
-
-    fla_time = do_bench(
-        chunk_kda_fwd_intra_token_parallel,
-        q=q,
-        k=k,
-        gk=gk,
-        beta=beta,
-        Aqk=Aqk_ref,
-        Akk=Akk_ref,
-        scale=scale,
-        chunk_size=chunk_size,
-        sub_chunk_size=sub_chunk_size,
-    )
-    tilelang_time = do_bench(
-        kernel,
-        q,
-        k,
-        gk,
-        beta,
-    )
-
-    print(f"fla time: {fla_time} ms")
-    print(f"tilelang time: {tilelang_time} ms")
+    print("tilelang time:", do_bench(kernel, q, k, gk, beta), "ms")
 
 
 def main():
+    import torch
+
+    torch.random.manual_seed(42)
     run_test(
         B=1,
-        S=1024 * 8,  # 32768
+        S=8192,
         H=64,
         DK=128,
-        scale=1.0,
+        scale=128**-0.5,
         input_dtype="bfloat16",
         output_dtype="bfloat16",
         accum_dtype="float32",

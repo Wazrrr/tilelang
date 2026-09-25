@@ -82,7 +82,7 @@ def rank_configs(
             )
         )
     ranking = rank_records(records)
-    selected = select_top_k(ranking, top_k)
+    selected = select_top_k(ranking, top_k, include_ties=False)
     for record in records:
         record["selected"] = record["index"] in selected
         if record["status"] == "analyzed" and not record["selected"]:

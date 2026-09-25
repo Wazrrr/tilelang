@@ -10,34 +10,41 @@ defines the single configuration pool using the example's parameter names;
 
 ## Cases
 
-All named-suite cases use FP16. Smoke uses the first development case.
+All named-suite cases use BF16. Smoke uses the first development case.
 
 | Split | Case | Parameters |
 | --- | --- | --- |
-| Training | `attention_train_a` | batch=1, heads=16, sequence=512, dim=128, causal=false |
-| Training | `attention_train_b` | batch=1, heads=16, sequence=1024, dim=128, causal=true |
-| Validation | `attention_validation` | batch=1, heads=16, sequence=2048, dim=128, causal=true |
-| Development | `attention_short_causal` | batch=1, heads=32, sequence=256, dim=128, causal=true |
-| Development | `attention_medium_causal` | batch=1, heads=32, sequence=1024, dim=128, causal=true |
+| Training | `attention_train_a` | batch=1, heads=16, sequence=512, dim=64, causal=false |
+| Training | `attention_train_b` | batch=2, heads=8, sequence=1024, dim=128, causal=true |
+| Validation | `attention_validation` | batch=1, heads=24, sequence=2048, dim=64, causal=true |
+| Development | `attention_short_causal` | batch=1, heads=32, sequence=256, dim=64, causal=true |
+| Development | `attention_batched_causal` | batch=2, heads=16, sequence=1024, dim=64, causal=true |
 | Development | `attention_noncausal` | batch=1, heads=32, sequence=2048, dim=128, causal=false |
 | Development | `attention_causal` | batch=1, heads=32, sequence=2048, dim=128, causal=true |
-| Development | `attention_long_causal` | batch=1, heads=32, sequence=4096, dim=128, causal=true |
-| Final | `attention_short_causal` | batch=1, heads=32, sequence=512, dim=128, causal=true |
-| Final | `attention_medium_causal` | batch=1, heads=32, sequence=2048, dim=128, causal=true |
+| Development | `attention_long_causal` | batch=1, heads=16, sequence=4096, dim=128, causal=true |
+| Final | `attention_short_causal` | batch=1, heads=32, sequence=512, dim=64, causal=true |
+| Final | `attention_batched_causal` | batch=2, heads=16, sequence=2048, dim=64, causal=true |
 | Final | `attention_noncausal` | batch=1, heads=32, sequence=4096, dim=128, causal=false |
 | Final | `attention_causal` | batch=1, heads=32, sequence=4096, dim=128, causal=true |
-| Final | `attention_long_causal` | batch=1, heads=32, sequence=8192, dim=128, causal=true |
+| Final | `attention_long_causal` | batch=1, heads=16, sequence=8192, dim=128, causal=true |
 
 ## Configuration space
 
-Every case uses the same complete **320-config `expanded` pool**:
+Every case uses the same complete **480-config `expanded` pool**:
 
 | Parameter | Values |
 | --- | --- |
-| `block_M` | 32, 64, 128, 192, 256 |
-| `block_N` | 16, 32, 48, 64, 96, 128, 192, 256 |
-| `num_stages` | 0, 1, 2, 3 |
-| `threads` | 128, 256 |
+| `block_M` | 16, 32, 64, 128 |
+| `block_N` | 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256 |
+| `num_stages` | 0, 1, 2 |
+| `threads` | 32, 64, 128, 256 |
+
+Only `block_M`/`threads` combinations compatible with the FullRow GEMM warp
+partition are kept (`block_M * 2` must be divisible by `threads`, so every warp
+owns a multiple of 16 rows); the earlier 128/256-thread grid contained
+incompatible 32-row and 64-row/256-thread tiles that are removed. `num_stages`
+is capped at 2 because on Ampere 3+ stages push the K/V pipeline buffers past
+the 164 KB shared-memory limit and fail at kernel launch.
 
 The example's `get_configs()` contains one config: 64/64/1/128.
 Its explicit 128/128/1/128 launch is also included. The pool expands these
@@ -94,7 +101,7 @@ python -m experiments.flash_attention.tiletune.run --suite full --device hopper 
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
-on all five final FP16 cases. New TileTune output directories reuse verified baseline
+on all five final BF16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
 Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `FlashAttentionTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

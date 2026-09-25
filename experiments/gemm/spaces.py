@@ -1,12 +1,12 @@
-"""One 2,304-config expansion of the advanced example's 288-config grid."""
+"""One 576-config expansion of the advanced example's 288-config grid."""
 
 from experiments.utils.grid import grid
 
 
 def get_configs():
     return grid(
-        block_M=[32, 64, 96, 128, 192, 256],
-        block_N=[32, 64, 96, 128, 192, 256],
+        block_M=[64, 128, 256],
+        block_N=[64, 128, 256],
         block_K=[16, 32, 48, 64],
         num_stages=[0, 1, 2, 3],
         thread_num=[128, 256],

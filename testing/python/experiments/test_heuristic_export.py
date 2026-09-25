@@ -82,7 +82,10 @@ def test_standalone_oracle_records_unsupported_fp8_without_launching(tmp_path, m
     names = [w.name for w in cases(holdout=True)]
     output = tmp_path / "run"
     monkeypatch.setattr("sys.argv", ["brute_force", "--device", "ampere", "--output", str(output), "--workloads", *names])
-    monkeypatch.setattr(brute_force, "snapshot", lambda: dict(gpus=[dict(uuid="GPU-test", index="0", name="NVIDIA A100")], processes=[]))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(
+        brute_force, "snapshot", lambda: dict(gpus=[dict(uuid="GPU-test", index="0", name="NVIDIA A100", compute_cap="8.0")], processes=[])
+    )
 
     def forbidden(*args, **kwargs):
         raise AssertionError("unsupported FP8 must not launch a worker")

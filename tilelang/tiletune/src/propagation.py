@@ -137,6 +137,20 @@ def _propagate_tiles(col, outputs):
     Regions retain symbolic launch/iteration offsets. Loop coverage is derived
     from these inputs; it does not require another backward traversal.
     """
+    if col.input_values:
+        # Metadata-dependent addresses already resolve to the supplied input
+        # contract. Charge the actual accesses, including the metadata loads,
+        # instead of repeatedly intersecting piecewise-address demand regions.
+        inputs, coverage, loops = [], [], []
+        for op in col.operations:
+            for region in op.reads:
+                if region.buffer.scope() != "global":
+                    continue
+                tile = _written_region(op, region) if op.kind == "elementwise" else region
+                inputs.append(tile)
+                loops.append(tuple(entry for entry in op.loops if entry[2] != "1"))
+                coverage.append(_bound(tile, _domains(tuple(entry for entry in op.loops if entry[2] not in ("1", "4")))))
+        return PropagationResult(col.operations, inputs, coverage, col.unknown, loops)
     for op in col.operations:
         op.demands.clear()
     demands = list(outputs)

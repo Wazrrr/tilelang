@@ -481,8 +481,23 @@ def compile_grouped_unit_tvm_ffi(
                 unit_results.append((idx, config_arg, None, e))
     except Exception as e:
         completed = {result[0] for result in unit_results}
-        for item in lowered_items:
-            if item["idx"] not in completed:
+        remaining = [item for item in lowered_items if item["idx"] not in completed]
+        if len(remaining) <= 1:
+            for item in remaining:
                 unit_results.append((item["idx"], item["config_arg"], None, e))
+        else:
+            for item in remaining:
+                try:
+                    unit_results.extend(
+                        compile_grouped_unit_tvm_ffi(
+                            [(item["idx"], item["config_arg"])],
+                            compile_args,
+                            elaborate_func,
+                            filter_config=filter_config,
+                            tiletune_session=tiletune_session,
+                        )
+                    )
+                except Exception as singleton_error:
+                    unit_results.append((item["idx"], item["config_arg"], None, singleton_error))
 
     return unit_results

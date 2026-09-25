@@ -5,9 +5,13 @@ from importlib import import_module
 FAMILIES = {
     "gemm": "gemm",
     "attention": "flash_attention",
-    "kda_chunk_o": "kda",
+    "kda_chunk_intra_token_parallel": "kda",
     "gemm_fp8": "gemm_fp8",
+    "grouped_gemm": "grouped_gemm",
 }
+
+# The active matrix; archived studies retain their frozen manifests.
+DEFAULT_OPS = tuple(FAMILIES)
 
 
 def family_module(op, component):

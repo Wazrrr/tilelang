@@ -9,9 +9,29 @@ from test_cost import LIMITS
 TARGET = {"kind": "cuda", "arch": "sm_90a"}
 
 
+@pytest.mark.parametrize("arch", ["sm_80", "sm_90a", "sm_100a"])
+def test_mma_operand_storage_follows_the_actual_instruction(arch):
+    result = analyze_prim_func(
+        gemm(stages=0), target=dict(kind="cuda", arch=arch), device_limits=LIMITS, pass_configs={"tl.disable_wgmma": True}
+    )
+    operands = result["pressure"]["mma_operand_registers"]
+    assert operands and all(row["registers_per_block"] > 0 for row in operands.values())
+    assert "native MMA operand fragments" in result["tile_cost"]["register_estimate_basis"]
+
+
+def test_wgmma_does_not_inherit_mma_operand_fragments():
+    from test_pipeline import matrix_pipeline
+
+    result = analyze_prim_func(matrix_pipeline(stages=0), target=TARGET, device_limits=LIMITS)
+    assert result["pressure"]["mma_operand_registers"] == {}
+
+
 @pytest.mark.parametrize("threads,consumer_request", [(128, 240), (256, 240), (384, 160)])
-def test_pipeline_policy_preserves_accumulator_and_accounts_for_producers(threads, consumer_request):
-    results = [analyze_prim_func(gemm(stages=s, threads=threads), target=TARGET, device_limits=LIMITS) for s in range(4)]
+@pytest.mark.parametrize("arch", ["sm_90a", "sm_100a"])
+def test_pipeline_policy_preserves_accumulator_and_accounts_for_producers(threads, consumer_request, arch):
+    results = [
+        analyze_prim_func(gemm(stages=s, threads=threads), target=dict(kind="cuda", arch=arch), device_limits=LIMITS) for s in range(4)
+    ]
     assert len({r["pressure"]["modeled_lower_bound"] for r in results}) == 1
     assert results[0]["pressure"]["warp_specialization"]["applies"] is False
     for result in results[1:]:

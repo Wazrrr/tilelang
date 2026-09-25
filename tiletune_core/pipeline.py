@@ -74,17 +74,18 @@ def _estimate_ampere(pipeline, times, n, profile, concurrent_ctas):
     copies = pipeline["producer_buffers"]
     copy_ids = {copy["operation"] for copy in copies}
     rate = profile["global_bytes_per_cycle"] / concurrent_ctas
+    read_rate = profile.get("global_read_bytes_per_cycle", profile["global_bytes_per_cycle"]) / concurrent_ctas
     cost = {}
     for phase, cycles in zip(phases, times):
         work = phase["external_work"]
         if phase["inside_loop"] and phase["operation"] in copy_ids:
             cost[phase["operation"]] = cycles
         else:
-            cost[phase["operation"]] = cycles + (work["read_bytes"] + work["write_bytes"]) / rate
+            cost[phase["operation"]] = cycles + work["read_bytes"] / read_rate + work["write_bytes"] / rate
             cost[phase["operation"]] += work["read_groups"] * profile["copy_latency_cycles"]
     outside = sum(cost[p["operation"]] for p in phases if not p["inside_loop"])
     consumer = sum(cost[p["operation"]] for p in phases if p["inside_loop"] and p["operation"] not in copy_ids)
-    service = sum(copy["bytes"] for copy in copies) / rate
+    service = sum(copy["bytes"] for copy in copies) / read_rate
     plan = pipeline["ampere_schedule"]
     if pipeline["num_stages"]:
         if pipeline["producer_schedule_unknown"]:

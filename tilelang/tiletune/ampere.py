@@ -35,7 +35,8 @@ def prepare_analysis(func, col, target, pass_configs):
     """
     from .config import ANALYSIS_VERSION
 
-    key = (ANALYSIS_VERSION, StructuralKey(func), str(Target(target)), context_key(pass_configs))
+    metadata = tuple(tuple(col.input_values.get(func.buffer_map.get(param), ())) for param in func.params)
+    key = (ANALYSIS_VERSION, StructuralKey(func), str(Target(target)), context_key(pass_configs), metadata)
     cached = _PREPARATION_CACHE.get(key)
     if cached is not None:
         plan, plans, layouts, error = cached
@@ -214,18 +215,20 @@ def external_work(op):
     return dict(read_bytes=sum(reads), write_bytes=sum(writes), read_groups=len(reads))
 
 
-def operand_registers(col, target):
+def operand_registers(col, pressure, pass_configs):
     """MMA lowering allocates temporary operand fragments for shared operands."""
-    from .compute import consumer_threads
+    from .compute import compute_participants, consumer_threads
     from tilelang.cuda.op.gemm.gemm_mma import GemmMMA
 
     result = {}
     for op in col.operations:
         if not hasattr(op.metadata, "cRegion"):
             continue
+        if (compute_participants(op, pressure, pass_configs) or {}).get("instruction") != "cuda.mma":
+            continue
         threads = consumer_threads(op)
         try:
-            emitter = GemmMMA(op.metadata)._make_mma_emitter(Target(target), threads)
+            emitter = GemmMMA(op.metadata)._make_mma_emitter(Target({"kind": "cuda", "arch": pressure["target_arch"]}), threads)
             registers = 0
             for buffer, slots in (
                 (op.metadata.a, emitter.warp_rows * emitter.local_size_a),

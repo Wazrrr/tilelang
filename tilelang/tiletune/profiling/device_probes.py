@@ -80,7 +80,7 @@ def primitive(kind, iterations, blocks, threads=128):
 
 
 ASYNC_CLOCKS = r"""
-template <int Kind>
+template <int Kind, bool Streaming = false>
 __device__ __noinline__ float TileTuneAsyncClocks(const float* input, int tid) {
   __shared__ __align__(16) float storage[4096];
   unsigned long long elapsed = 0;
@@ -93,7 +93,7 @@ __device__ __noinline__ float TileTuneAsyncClocks(const float* input, int tid) {
       int index = tid * 4 + j * 512;
       unsigned address = unsigned(__cvta_generic_to_shared(storage + index));
       asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
-                   :: "r"(address), "l"(input + index) : "memory");
+                   :: "r"(address), "l"(input + index + (Streaming ? iteration * 512 : 0)) : "memory");
     }
     asm volatile("cp.async.commit_group;" ::: "memory");
     unsigned long long issued = clock64();
@@ -118,6 +118,19 @@ def async_copy_clocks():
             tx = T.get_thread_binding()
             Out[tx, 0] = T.call_extern("float32", "TileTuneAsyncClocks<0>", T.address_of(A[0]), tx)
             Out[tx, 1] = T.call_extern("float32", "TileTuneAsyncClocks<1>", T.address_of(A[0]), tx)
+
+    return main
+
+
+def async_copy_streaming_clocks():
+    """Read each 2 KB tile once; the caller flushes L2 before each invocation."""
+
+    @T.prim_func
+    def main(A: T.Tensor((65536,), "float32"), Out: T.Tensor((128,), "float32")):
+        with T.Kernel(1, threads=128):
+            T.import_source(ASYNC_CLOCKS)
+            tx = T.get_thread_binding()
+            Out[tx] = T.call_extern("float32", "TileTuneAsyncClocks<1, true>", T.address_of(A[0]), tx)
 
     return main
 

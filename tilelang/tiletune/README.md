@@ -29,7 +29,7 @@ package; native operator metadata continues to come from the compiler.
 | `occupancy.py`, `warp_specialization.py` | Residency/waves and producer/consumer policy prediction |
 | `compute.py` | Operation work, reduction ownership, and primitive service cycles |
 | `schedule.py`, `pipeline.py`, `ranking.py` | Buffer recurrence, CTA dispatch, pipeline timing, and ranking |
-| `families/` | GEMM/attention recognition, loop/operand roles, labels, and policy choices |
+| `families/` | GEMM/attention/KDA recognition, loop/operand roles, labels, and policy choices |
 | `profiling/` | Fixed primitive kernels, reusable device measurements, and profile validation |
 | `runtime.py`, `trace.py` | Autotuner integration, rejection enforcement, and intermediate snapshots |
 
@@ -198,6 +198,46 @@ ceilings. FP8 output conversion requires its matching measured rate; FP16
 arithmetic rates cannot substitute for it. These probes require native FP8
 hardware. Analysis version 25 invalidates cached rankings from before the
 conversion accounting and compiler-verified fragment ownership changes.
+Analysis version 26 additionally charges logical shared-memory reads/writes for
+scalar consumers, internal copies and epilogues. Global input copies retain the
+producer transfer service. Scalar shared counts precede compiler predication,
+broadcast reuse and bank effects; they are service estimates, not transaction
+counts from generated instructions.
+
+Analysis version 27 recognizes KDA chunk output's shared-query gating loop and
+its final, once-only A/V GEMM. Hopper's pure-TMA producer policy includes these
+gate consumers and retains each input buffer until its last consumer. Device
+profile version 8 measures both WGMMA and MMA on Hopper: small tiles, including
+the 48-row KDA case, can select MMA. `gemm_instruction_rates` carries alternate
+measured matrix rates with the same operand/accumulator dtypes; each phase uses
+its compiler-selected instruction. Older profiles remain readable, but missing
+instruction rates leave affected configurations unscored. Regenerate Hopper
+profiles to obtain the additional measurements.
+
+Analysis version 31 treats global-memory bandwidth as a chip-wide resource,
+shared by the CTAs actually present in a wave. Uniform grids recompute the
+partially filled final wave instead of charging for empty resident slots.
+Arithmetic, shared-memory and instruction-issue limits remain local to each SM.
+The region analyzer also handles tails on multiple launch axes with bounded
+partitions, preserving CUDA launch order and exact logical byte counts.
+Data-dependent or oversized partitions remain explicitly unresolved.
+
+Device profile version 9 adds `async_copy_streaming_latency_cycles` on Ampere.
+The fixed probe visits 128 distinct 2 KB tiles after flushing L2 before each
+invocation. Streaming profiles use this cold readiness measurement; cached
+profiles retain the cached-copy measurement. Version 8 profiles remain readable
+with their original copy latency.
+
+Analysis version 32 models operand reuse among resident CTAs for a single
+affine dense-matrix loop on Ampere. It extracts operand tiles and launch axes
+from the IR, including row/column rasterization, and estimates the largest
+unique operand set among launch-order cohorts. Buffered tiles must fit the
+measured L2 capacity. Read service is bounded by both measured cached bandwidth
+and DRAM bandwidth for unique bytes; output writes retain DRAM service. Reports
+record the cohort, working set, traffic fraction and effective read rate.
+This estimate assumes resident CTAs traverse the loop together and credits no
+reuse across waves. Non-affine or multi-region graphs keep per-CTA traffic.
+Transaction efficiency and compiler scratch-register allocation remain unmodeled.
 
 Follow `buffer_id` across regions, GEMM operands and live sets, and follow
 `operation`/`index` through dependencies, phase work and phase timing. Bounds and

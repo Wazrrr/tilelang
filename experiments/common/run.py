@@ -130,7 +130,7 @@ def validate_result(result, request):
             raise ValueError("completed worker result requires correctness and actual device observations")
         if request["settings"]["method"] == "xgboost" and result.get("model_sha256") != request["settings"]["xgb_model_sha256"]:
             raise ValueError("worker result used a different XGBoost model")
-        if request["settings"]["method"] in ("xgboost", "top_k", "random"):
+        if request["settings"]["method"] in ("xgboost", "top_k", "random", "carver"):
             selection = result.get("selection") or {}
             selected = selection.get("selected_indices")
             k = request["settings"]["top_k"]
@@ -176,9 +176,9 @@ def run_external(request, device, output, *, monitor=False):
     started = time.perf_counter()
     command = [*device.worker, str(request_path.resolve()), str(result_path.resolve())]
     if monitor:
-        from experiments.utils.monitor import run_monitored, snapshot, visible_gpus
+        from experiments.utils.monitor import run_monitored, select_cuda_gpu
 
-        gpus = visible_gpus(snapshot())[:1]
+        gpus = [select_cuda_gpu(device)]
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpus[0]["uuid"])
         run_monitored(command, output, gpus, cwd=device.worker_cwd, env=env, timeout=request["settings"]["case_timeout"])
     else:
@@ -349,6 +349,7 @@ def run_native(request, output):
             ranking_metric=settings["metric"],
             top_k=settings["top_k"] if settings["method"] == "top_k" else None,
             performance_model=performance_model,
+            input_values=case.input_values or None,
             device_limits=limits,
             report_path=str(output / "tiletune.json"),
             trace_path=str(output / "trace.log") if settings["trace"] else None,
@@ -430,6 +431,7 @@ def run_native(request, output):
             from .smoke import run_smoke
 
             inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(settings["seed"]))
+            case.check_input_values(inputs)
             return dict(
                 result,
                 **run_smoke(
@@ -458,6 +460,7 @@ def run_native(request, output):
 
     generator = torch.Generator(device="cuda").manual_seed(settings["seed"])
     inputs = case.inputs("cuda", generator)
+    case.check_input_values(inputs)
     expected = case.reference(*inputs)
     if xgb_report is not None:
         from .execution import run_selected

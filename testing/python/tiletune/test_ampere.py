@@ -223,10 +223,10 @@ def test_unsupported_operations_cannot_receive_zero_cost(kind):
 
 @pytest.mark.parametrize("stage", [0, 1, 2, 3, 4])
 def test_kda_example_pipeline_preserves_gate_work_and_value_tails(stage):
-    from experiments.kda.cases import cases
+    from experiments.common.spec import Workload
     from experiments.kda.kernel import make_case
 
-    case = make_case(cases(True)[0])
+    case = make_case(Workload("tail_regression", "kda_chunk_o", dict(batch=1, heads=4, sequence=1024, dim=64, value_dim=64, chunk_size=64)))
     func = case.build(block_DK=32, block_DV=48, num_stages=stage, threads=128)
     before = func.script()
     result = analyze(func)

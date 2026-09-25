@@ -68,7 +68,7 @@ def buffer_transition(copies, consumers, depth, bandwidth, latency, barrier):
     return tuple(tuple(row) for row in updated)
 
 
-def estimate_grid_cycles(distribution, timing_for_iterations, slots, uniform_waves):
+def estimate_grid_cycles(distribution, timing_for_iterations, slots, uniform_waves, *, tail_cycles=None):
     """Work-conserving dispatch estimate with exact IR work counts.
 
     For very large nonuniform grids, report a work-plus-tail approximation instead
@@ -86,6 +86,9 @@ def estimate_grid_cycles(distribution, timing_for_iterations, slots, uniform_wav
     maximum, minimum = max(costs.values()), min(costs.values())
     if len(costs) == 1:
         cycles, method = maximum * uniform_waves, "uniform CTA waves"
+        if tail_cycles is not None:
+            cycles = maximum * (distribution["grid_blocks"] // slots) + tail_cycles
+            method = "uniform CTA waves with partial final wave contention"
     elif distribution["grid_blocks"] <= 262144:
         available = [0.0] * slots
         for _ in range(repetitions):

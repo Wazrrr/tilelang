@@ -1,18 +1,19 @@
 """Recognize the actual operation graph and select its analysis policies.
 
-Attention is checked first, then single-GEMM kernels, then generic operations.
+Attention is checked first, then KDA, single-GEMM kernels and generic operations.
 An explicitly requested family must still match the graph; it is not a template.
 """
 
 from .attention import AttentionSpecialization
 from .base import KernelSpecialization
 from .gemm import GemmSpecialization
+from .kda import KDAChunkOutputSpecialization
 
-__all__ = ["AttentionSpecialization", "GemmSpecialization", "KernelSpecialization", "select_specialization"]
+__all__ = ["AttentionSpecialization", "GemmSpecialization", "KDAChunkOutputSpecialization", "KernelSpecialization", "select_specialization"]
 
 
 def select_specialization(col, requested="auto"):
-    for implementation in (AttentionSpecialization, GemmSpecialization):
+    for implementation in (AttentionSpecialization, KDAChunkOutputSpecialization, GemmSpecialization):
         result = implementation.match(col)
         if result is not None and requested in ("auto", result.name):
             return result

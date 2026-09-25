@@ -33,6 +33,7 @@ def estimate_region_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
     profile = pipeline["performance_model"]
     phases = {p["operation"]: p for p in pipeline["phases"]}
     rate = profile.get("global_bytes_per_cycle")
+    read_rate = profile.get("global_read_bytes_per_cycle", rate)
     if not rate or any(profile.get(k) is None for k in ("copy_latency_cycles", "barrier_cycles")):
         return None
 
@@ -45,7 +46,7 @@ def estimate_region_cycles(pipeline, concurrent_ctas=1, *, iterations=None):
                 raise UnresolvedRegion("unsupported_collective", "incomplete phase service profile")
             work = node["external_work"]
             if node["operation"] not in producer_ids:
-                cycles += (work["read_bytes"] + work["write_bytes"]) * concurrent_ctas / rate
+                cycles += (work["read_bytes"] / read_rate + work["write_bytes"] / rate) * concurrent_ctas
                 cycles += work["read_groups"] * profile["copy_latency_cycles"]
             result[node["operation"]] = cycles
         return result

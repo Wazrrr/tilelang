@@ -10,7 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from experiments.families import FAMILIES, family_module
+from experiments.families import DEFAULT_OPS, FAMILIES, family_module
 from tiletune_core.contracts import digest
 from experiments.common.run import make_request, run_case
 from experiments.utils.io import write_json
@@ -18,16 +18,16 @@ from experiments.common.spec import Device, TARGETS, configuration_space
 from experiments.utils.subsets import pairwise_subset
 from experiments.common.spaces import PRESETS
 
-CORE_OPS = ("gemm", "attention", "kda_chunk_o", "gemm_fp8")
+CORE_OPS = DEFAULT_OPS
 CORE_FAMILIES = tuple(FAMILIES[op] for op in CORE_OPS)
 CORE_TARGETS = ("ampere", "hopper", "blackwell", "mi355x", "ascend910b")
 BUDGETS = {
-    "smoke": dict(cases=4, configurations=16, seeds=[123], compare=False),
-    "development": dict(cases=20, configurations=256, seeds=[123], compare=True),
-    "final": dict(cases=20, configurations=None, seeds=[123, 456, 789], compare=True),
+    "smoke": dict(cases=5, configurations=16, seeds=[123], compare=False),
+    "development": dict(cases=25, configurations=256, seeds=[123], compare=True),
+    "final": dict(cases=25, configurations=None, seeds=[123, 456, 789], compare=True),
     # A complete expanded-pool benchmark can precede the development gates.
     # It uses the final shapes/protocol without claiming final acceptance.
-    "full": dict(cases=20, configurations=None, seeds=[123, 456, 789], compare=True),
+    "full": dict(cases=25, configurations=None, seeds=[123, 456, 789], compare=True),
 }
 DEVICE_PATTERNS = dict(ampere="A100", hopper="H200", blackwell="B200|GB200", mi355x="MI355X", ascend910b="910B|A2")
 
@@ -74,6 +74,11 @@ def study_plan(suite, devices=None, *, families=None, config_space=None):
     if config_space:
         splits = {split: [replace(w, config_space=config_space) for w in cases] for split, cases in splits.items()}
     all_cases = [w for values in splits.values() for w in values]
+    from experiments.xgboost.data import canonical_workload
+
+    identities = [digest(canonical_workload(w)) for w in all_cases]
+    if len(set(identities)) != len(identities):
+        raise ValueError("training, validation and test workloads must have distinct mathematical shapes")
     planned, audits, availability = [], {}, {}
     for device in devices:
         subsets, audit = {}, {}
@@ -240,17 +245,6 @@ def main(argv=None, *, family=None):
     settings = {k: getattr(args, k) for k in ("workers", "warmup", "rep", "timeout", "case_timeout")}
     if any(v <= 0 for v in settings.values()):
         parser.error("execution budgets must be positive")
-    if not args.freeze:
-        import os
-        from experiments.utils.monitor import snapshot, idle_gpus
-
-        if "CUDA_VISIBLE_DEVICES" not in os.environ and any(d.target["kind"] == "cuda" and not d.worker for d in devices):
-            import re
-
-            available = [g for g in idle_gpus(snapshot()) if any(re.search(d.expected_device_pattern or ".*", g["name"]) for d in devices)]
-            if not available:
-                parser.error("no matching idle CUDA GPU; retry when one is available")
-            os.environ["CUDA_VISIBLE_DEVICES"] = available[0]["uuid"]
     output = args.output.resolve()
     freeze(plan, output, settings)
     if args.freeze:

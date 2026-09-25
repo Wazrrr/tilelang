@@ -1,10 +1,63 @@
 """Logical global-memory traffic from actual external tiles and loop visits."""
 
 from math import prod
-from tvm.arith import Analyzer
+from tvm.arith import Analyzer, detect_linear_equation
 from .src.structural_key import StructuralKey
-from .src.ir_utils import _int, _domains, loop_visits
+from .src.ir_utils import _int, _domains, dense_gemms, in_loop, loop_visits
 from .src.regions import _bound, _clip_global
+
+
+def operand_reuse_geometry(col, buffer_facts, loop, depth):
+    """Resolve disjoint affine operand tiles in a single dense matrix loop.
+
+    Nominal (unclipped) tile sizes conservatively include boundary padding.
+    Other graphs keep the existing per-CTA traffic model.
+    """
+    if loop is None or _int(loop.extent) is None or depth is None or len(dense_gemms(col)) != 1:
+        return None
+    axes = [col.block_domains[tag] for tag in sorted(col.block_domains)]
+    grid = [_int(domain.extent) for _, domain in axes]
+    if not axes or any(size is None or size <= 0 for size in grid):
+        return None
+    if any(_int(domain.min) != 0 for _, domain in axes):
+        return None
+    variables = [var for var, _ in axes]
+    tiles = []
+    for op in col.operations:
+        for region in op.reads:
+            if region.buffer.scope() != "global":
+                continue
+            if op.kind != "copy" or op.predicates or not in_loop(op, loop):
+                return None
+            if any(kind != "4" and not var.same_as(loop.loop_var) for var, _, kind in op.loops):
+                return None
+            dependencies = set()
+            shape = []
+            for interval in region.ranges:
+                extent = _int(interval.extent)
+                coefficients = detect_linear_equation(interval.min, variables)
+                if extent is None or extent <= 0 or not coefficients:
+                    return None
+                strides = [_int(value) for value in coefficients[:-1]]
+                if any(value is None for value in strides):
+                    return None
+                used = [axis for axis, value in enumerate(strides) if value]
+                if len(used) > 1 or any(abs(strides[axis]) < extent for axis in used):
+                    return None
+                dependencies.update(used)
+                shape.append(extent)
+            dtype = buffer_facts[region.buffer].dtype
+            tiles.append(dict(operation=op.index, bytes=(prod(shape) * dtype.bits * dtype.lanes + 7) // 8, axes=sorted(dependencies)))
+    if not tiles:
+        return None
+    swizzle = None
+    if col.threadblock_swizzle is not None:
+        args = col.threadblock_swizzle.args
+        pattern, panel = str(args[0].value), _int(args[1])
+        if pattern not in ("rasterization2DRow", "rasterization2DColumn") or not panel or len(grid) < 2:
+            return None
+        swizzle = dict(pattern=pattern, panel=panel)
+    return dict(grid=grid, tiles=tiles, buffer_depth=depth, swizzle=swizzle)
 
 
 def analyze_global_memory(col, propagated, buffer_facts, *, loop, actual_accesses=False):

@@ -6,20 +6,20 @@ and the runner interface. There are no local TileLang kernels or legacy runners.
 
 A has shape (M,K), B has shape (N,K), and the kernel computes C=A@B.T using FP32
 accumulation and the example's shared-memory output. All named-suite workloads
-use FP16 and explicitly record `transpose_b=True`. BF16 is also supported.
+use BF16 and explicitly record `transpose_b=True`. FP16 is also supported.
 B preparation is outside kernel timing. Batched, NN/TN, fused-epilogue and FP8
 requests are unsupported by this experiment.
 
 ## One configuration set
 
-[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 2,304 configurations:
-exactly eight times the example's 288 configurations. Tile sizes are sampled more
+[`spaces.py`](spaces.py) defines the only pool, `expanded`, with 576 configurations:
+exactly twice the example's 288 configurations. `block_K` is sampled more
 finely; the other parameters keep the example's ranges.
 
 | Parameter | Values |
 | --- | --- |
-| `block_M` | 32, 64, 96, 128, 192, 256 |
-| `block_N` | 32, 64, 96, 128, 192, 256 |
+| `block_M` | 64, 128, 256 |
+| `block_N` | 64, 128, 256 |
 | `block_K` | 16, 32, 48, 64 |
 | `num_stages` | 0, 1, 2, 3 |
 | `thread_num` | 128, 256 |
@@ -34,7 +34,7 @@ select recorded indices from this pool. Explicit CUDA/HIP configs must also be
 members of it.
 
 The pool is identical across target devices. All declared candidates are
-attempted; compilation and correctness failures are recorded. The 2,304 count
+attempted; compilation and correctness failures are recorded. The 576 count
 does not assert that every candidate compiles or yields distinct device code.
 
 ## Files and cases
@@ -51,7 +51,7 @@ does not assert that every candidate compiles or yields distinct device code.
 | --- | --- |
 | Training A | 32,4096,4096 |
 | Training B | 512,14336,4096 |
-| Validation | 2048,4096,4096 |
+| Validation | 1536,4096,4096 |
 | Development decode | 64,4096,4096 |
 | Development prefill | 512,4096,4096 |
 | Development FFN down | 512,4096,14336 |
@@ -96,7 +96,7 @@ measurements validate it. Foreign GPU processes invalidate an affected shard,
 which is retried. Monitoring polls every second and cannot exclude shorter
 interference.
 
-Space version 4 identifies this pool. Old measured records are archived under
+Space version 6 identifies this pool. Old measured records are archived under
 `experiments/results/gemm-pre-single-pool-20260916/heuristics/`; their timings
 belong to their original programs and pools. New results include source/build
 hashes, raw outcomes, device observations and elapsed time.
@@ -117,7 +117,7 @@ python -m experiments.gemm.tiletune.run --suite full --device hopper \
 ```
 
 System runs support baseline, pipeline, grouped, multi_gpu and combined modes
-on all five final FP16 cases. New TileTune output directories reuse verified baseline
+on all five final BF16 cases. New TileTune output directories reuse verified baseline
 bundles while the kernels, pools and measurement environment remain compatible.
 Baseline XGBoost uses a fixed seed independently of TileTune repeats. Carver uses `MatmulTemplate` on CUDA; its graph assumptions are recorded in the ranking. See the [workflow guide](../README.md)
 for GPU monitoring, baseline identity, artifact paths and arbitrary-K comparisons.

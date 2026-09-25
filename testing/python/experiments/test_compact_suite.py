@@ -13,15 +13,22 @@ from experiments.suite import BUDGETS, CORE_TARGETS, core_cases, study_plan
 
 
 def test_smoke_uses_same_cases_and_three_fixed_budgets():
-    assert len(core_cases("smoke")) == 4
-    assert {w.op for w in core_cases("smoke")} == {"gemm", "attention", "kda_chunk_o", "gemm_fp8"}
+    assert len(core_cases("smoke")) == 5
+    assert {w.op for w in core_cases("smoke")} == {
+        "gemm",
+        "attention",
+        "kda_chunk_intra_token_parallel",
+        "gemm_fp8",
+        "grouped_gemm",
+    }
     assert all(w in core_cases("development") for w in core_cases("smoke"))
-    assert len(core_cases("final")) == len(core_cases("development")) == 20
+    assert len(core_cases("final")) == len(core_cases("development")) == 25
     assert all(sum(w.op == op for w in core_cases("final")) == 5 for op in {w.op for w in core_cases("final")})
-    assert {w.dtype for w in core_cases("final")} == {"float16", "float8_e4m3fn"}
+    assert {w.dtype for w in core_cases("final")} == {"bfloat16", "float8_e4m3fn"}
     for w in core_cases("final"):
-        if w.op == "kda_chunk_o":
+        if w.op == "kda_chunk_intra_token_parallel":
             assert w.parameters["sequence"] % w.parameters["chunk_size"] == 0
+            assert w.parameters["chunk_size"] % w.parameters["sub_chunk_size"] == 0
     assert BUDGETS["final"]["seeds"] == [123, 456, 789]
     assert core_cases("full") == core_cases("final")
     assert BUDGETS["full"]["configurations"] is None
@@ -32,10 +39,10 @@ def test_smoke_uses_same_cases_and_three_fixed_budgets():
 def test_final_cases_use_five_common_serving_shapes_per_family():
     by_op = {
         op: [w for w in core_cases("final") if w.op == op]
-        for op in ("gemm", "gemm_fp8", "attention", "kda_chunk_o")
+        for op in ("gemm", "gemm_fp8", "attention", "kda_chunk_intra_token_parallel")
     }
     dense_shapes = [
-        (128, 4096, 4096),
+        (256, 4096, 4096),
         (1024, 4096, 4096),
         (1024, 4096, 14336),
         (4096, 4096, 4096),
@@ -43,26 +50,25 @@ def test_final_cases_use_five_common_serving_shapes_per_family():
     ]
     for op in ("gemm", "gemm_fp8"):
         assert [(w.parameters["m"], w.parameters["n"], w.parameters["k"]) for w in by_op[op]] == dense_shapes
-    assert [(w.parameters["sequence"], w.parameters["causal"]) for w in by_op["attention"]] == [
-        (512, True),
-        (2048, True),
-        (4096, False),
-        (4096, True),
-        (8192, True),
+    assert [
+        (w.parameters["batch"], w.parameters["heads"], w.parameters["sequence"], w.parameters["dim"], w.parameters["causal"])
+        for w in by_op["attention"]
+    ] == [
+        (1, 32, 512, 64, True),
+        (2, 16, 2048, 64, True),
+        (1, 32, 4096, 128, False),
+        (1, 32, 4096, 128, True),
+        (1, 16, 8192, 128, True),
     ]
-    assert all((w.parameters["heads"], w.parameters["dim"]) == (32, 128) for w in by_op["attention"])
-    assert [(w.parameters["batch"], w.parameters["sequence"]) for w in by_op["kda_chunk_o"]] == [
-        (1, 2048),
-        (1, 4096),
-        (1, 8192),
-        (2, 4096),
-        (1, 16384),
+    kda = by_op["kda_chunk_intra_token_parallel"]
+    assert [(w.parameters["batch"], w.parameters["heads"], w.parameters["sequence"]) for w in kda] == [
+        (1, 32, 2048),
+        (1, 64, 4096),
+        (1, 32, 8192),
+        (2, 32, 4096),
+        (1, 64, 16384),
     ]
-    assert all(
-        (w.parameters["heads"], w.parameters["dim"], w.parameters["value_dim"], w.parameters["chunk_size"])
-        == (64, 128, 128, 64)
-        for w in by_op["kda_chunk_o"]
-    )
+    assert all((w.parameters["dim"], w.parameters["chunk_size"], w.parameters["sub_chunk_size"]) == (128, 64, 16) for w in kda)
 
 
 def test_pairwise_is_deterministic_and_preserves_indices():
@@ -106,7 +112,7 @@ def test_no_cube_grid_is_invented_and_no_device_is_removed():
     d = Device("ascend910b", TARGETS["ascend910b"])
     plan = study_plan("smoke", [d])
     assert len(plan["devices"]) == 1
-    assert len(plan["splits"]["test"]) == 4
+    assert len(plan["splits"]["test"]) == 5
     assert "ascend910b" in plan["unavailable"]
     assert plan["subsets"]["ascend910b"] == {}
 
@@ -132,7 +138,7 @@ def test_planning_has_no_compiler_runtime_imports():
     root = str(Path(__file__).resolve().parents[3])
     code = (
         f"import sys; sys.path.insert(0, {root!r}); from experiments.suite import core_cases; "
-        "assert len(core_cases('final')) == 20; "
+        "assert len(core_cases('final')) == 25; "
         "assert not any(k.split('.')[0] in ('tilelang', 'tvm', 'torch') for k in sys.modules)"
     )
     subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)

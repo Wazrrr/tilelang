@@ -1,7 +1,7 @@
 """Physical allocation and user policy decisions on resolved register facts."""
 
 
-def analyze_register_policy(pressure, config, device_limits=None, *, spill_allowance=0):
+def analyze_register_policy(pressure, config, device_limits=None, *, spill_allowance=0, shared_memory_bytes_estimate=None):
     """Resolve physical capacity, then family demand policy, then rejection.
 
     The family supplies only its soft allowance. Every family obeys the same
@@ -28,6 +28,14 @@ def analyze_register_policy(pressure, config, device_limits=None, *, spill_allow
     block_thread_limit = limits.get("max_threads_per_block")
     if launch_threads is not None and block_thread_limit is not None and launch_threads > block_thread_limit:
         physical_reasons.append(f"launch threads {launch_threads} exceed device block limit {block_thread_limit}")
+    # Shared memory is estimated rather than measured, so an oversized arena
+    # only deprioritizes the block. It never refuses to elaborate it.
+    shared_block_limit = limits.get("shared_memory_per_block")
+    capacity_reasons = []
+    if shared_memory_bytes_estimate is not None and shared_block_limit is not None and shared_memory_bytes_estimate > shared_block_limit:
+        capacity_reasons.append(
+            f"estimated shared memory {shared_memory_bytes_estimate} exceeds device block limit {shared_block_limit}"
+        )
     if reservation is not None and sm_registers is not None and reservation > sm_registers:
         physical_reasons.append(f"policy CTA reservation {reservation} exceeds SM register capacity {sm_registers}")
     if known and hardware_cap is not None and max(ws["producer_register_request"], ws["consumer_register_request"]) > hardware_cap:
@@ -98,18 +106,19 @@ def analyze_register_policy(pressure, config, device_limits=None, *, spill_allow
         "register_demand": demand,
         "decision": {
             "keep": not reasons or config.mode == "report_only",
-            "would_reject": bool(reasons),
+            "would_reject": bool(reasons) or bool(capacity_reasons),
             "classification": "resource_violation"
-            if physical_reasons
+            if physical_reasons or capacity_reasons
             else "policy_rejection"
             if policy_reasons
             else "allocation_uncertainty"
             if uncertainty
             else "permitted",
             "physical_reasons": physical_reasons,
+            "capacity_reasons": capacity_reasons,
             "policy_reasons": policy_reasons,
             "uncertainty_reasons": uncertainty,
-            "status": "reject" if reasons else "unknown",
+            "status": "reject" if reasons or capacity_reasons else "unknown",
             "reasons": reasons,
         },
     }

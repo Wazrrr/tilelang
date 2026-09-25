@@ -9,7 +9,6 @@ def workload_template(workload, configs=None, *, arch=None):
         FP8MatmulTemplate,
         FlashAttentionTemplate,
         GroupedMatmulTemplate,
-        KDAChunkTemplate,
         MatmulTemplate,
     )
 
@@ -70,19 +69,6 @@ def workload_template(workload, configs=None, *, arch=None):
             accum_dtype="float32",
             **common,
         )
-    if workload.op == "kda_chunk_o":
-        return KDAChunkTemplate(
-            batch_size=p["batch"],
-            num_heads=p["heads"],
-            sequence=p["sequence"],
-            key_dim=p["dim"],
-            value_dim=p["value_dim"],
-            chunk_size=p["chunk_size"],
-            in_dtype=workload.dtype,
-            out_dtype=workload.dtype,
-            accum_dtype="float32",
-            **common,
-        )
     raise ValueError(f"No Carver template for experiment operation {workload.op!r}")
 
 
@@ -104,7 +90,7 @@ def _rank_records(configs, top_k, *, arch, template, evaluate):
             )
         )
     ranking = rank_records(records)
-    selected = select_top_k(ranking, top_k)
+    selected = select_top_k(ranking, top_k, include_ties=False)
     for record in records:
         record["selected"] = record["index"] in selected
         if record["status"] == "analyzed" and not record["selected"]:
@@ -112,7 +98,7 @@ def _rank_records(configs, top_k, *, arch, template, evaluate):
     return dict(
         model="legacy_carver_common_grid",
         model_target=str(arch.target),
-        template=type(template).__name__,
+        template=type(template).__name__ if template is not None else None,
         formula="(traffic_bytes_per_cta + 1) * num_waves",
         ranking=ranking,
         configs=records,
@@ -167,6 +153,8 @@ def _full_row_gemm_supported(m, n, threads):
 
 
 def attention_rank(workload, device, configs, top_k):
+    from tilelang.carver.roller.policy.common import coalesced_tensor_shape
+
     p, element_bytes = workload.parameters, 2
     batch, heads, sequence, dim = (p[key] for key in ("batch", "heads", "sequence", "dim"))
     arch = _architecture(device.target)
@@ -174,28 +162,102 @@ def attention_rank(workload, device, configs, top_k):
     # adapter evaluates the online tiled recurrence without materializing its
     # full score matrix.
     template = workload_template(workload, configs, arch=arch)
+    shape = [batch, sequence, heads, dim]
+
+    def transfer(rows, direction):
+        return coalesced_tensor_shape([1, rows, 1, dim], shape, arch.transaction_size[direction] // element_bytes) * element_bytes
 
     def evaluate(c):
         bm, bn, depth = c["block_M"], c["block_N"], max(1, c["num_stages"])
         grid = batch * heads * math.ceil(sequence / bm)
         iterations = math.ceil(sequence / bn)
-        if p.get("causal", False):
-            # Exact total visits across query CTAs. The maximum CTA remains the
-            # service-time bound used for waves.
-            visits = sum(min(iterations, math.ceil((block + 1) * bm / bn)) for block in range(math.ceil(sequence / bm)))
-            average_iterations = visits / math.ceil(sequence / bm)
-        else:
-            average_iterations = iterations
-        traffic = element_bytes * (2 * bm * dim + average_iterations * 2 * bn * dim)
+        query_blocks = math.ceil(sequence / bm)
+        visits = [
+            math.ceil(min((block + 1) * bm, sequence) / bn) if p.get("causal", False) else iterations for block in range(query_blocks)
+        ]
+        average_iterations = sum(visits) / query_blocks
+        once = (
+            sum(transfer(min(bm, sequence - block * bm), direction) for block in range(query_blocks) for direction in (0, 1)) / query_blocks
+        )
+        key_value = 0.0
+        for count in visits:
+            full, tail = divmod(min(count * bn, sequence), bn)
+            key_value += 2 * (full * transfer(bn, 1) + transfer(tail, 1)) / query_blocks
+        traffic = once + key_value
         shared = element_bytes * (2 * bm * dim + 2 * bn * dim * depth)
         register_words = math.ceil((bm * bn * 6 + bm * dim * 4 + bm * 5 * 4) / 4)
+        valid, blocks, waves = _occupancy(arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"])
+        valid = valid and _full_row_gemm_supported(bm, bn, c["threads"]) and _full_row_gemm_supported(bm, dim, c["threads"])
+        return dict(
+            valid=valid,
+            traffic_bytes_per_cta=traffic,
+            shared_bytes=shared,
+            register_words=register_words,
+            grid_blocks=grid,
+            blocks_per_sm=blocks,
+            waves=waves,
+            loop_iterations=average_iterations,
+            once_bytes=once,
+            key_value_bytes=key_value,
+            query_blocks=query_blocks,
+            traffic_basis="mean per-CTA BSHD transfers, clipped tails and Carver transaction sizes",
+        )
+
+    return _rank_records(configs, top_k, arch=arch, template=template, evaluate=evaluate)
+
+
+def kda_intra_rank(workload, device, configs, top_k):
+    """Carver traffic/wave model for the token-parallel KDA intra kernel.
+
+    The kernel issues no tensor-core MMA, so this adapter scores the kernel's
+    own CTA domain and memory ledger instead of a tensorized GEMM. Each
+    ``(token, head-block)`` CTA reads its Q/K/gate/beta row once, then streams
+    K/gate for every causal predecessor token inside the chunk to form the
+    gated ``Aqk = Q K^T`` and ``Akk = (beta K) K^T`` coefficient tiles.
+    """
+    from tilelang.carver.roller.policy.common import coalesced_tensor_shape
+
+    p = workload.parameters
+    batch, heads, sequence, dim = (p[key] for key in ("batch", "heads", "sequence", "dim"))
+    chunk, sub_chunk = p["chunk_size"], p["sub_chunk_size"]
+    arch = _architecture(device.target)
+    in_bytes, gate_bytes, out_bytes = 2, 4, 2
+    shape = [batch, sequence, heads, dim]
+
+    def transfer(rows, columns, direction, element_bytes):
+        transaction = arch.transaction_size[direction] // element_bytes
+        return coalesced_tensor_shape([1, 1, rows, columns], shape, transaction) * element_bytes
+
+    # Mean causal predecessors visited per token inside one sub-chunk.
+    average_iterations = (1 + sub_chunk) / 2
+
+    def evaluate(c):
+        block_h, block_dk, depth = c["block_H"], c["block_DK"], max(1, c["num_stages"])
+        head_blocks = math.ceil(heads / block_h)
+        grid = batch * sequence * head_blocks
+        tiles = dim // block_dk
+        streamed = average_iterations * tiles * (
+            transfer(block_h, block_dk, 0, in_bytes) + transfer(block_h, block_dk, 0, gate_bytes)
+        )
+        traffic = (
+            transfer(block_h, dim, 0, in_bytes)  # Q
+            + transfer(block_h, dim, 0, in_bytes)  # K
+            + transfer(block_h, dim, 0, gate_bytes)  # gate
+            + block_h * in_bytes  # beta
+            + streamed
+            + transfer(block_h, chunk, 1, out_bytes)  # Aqk
+            + transfer(block_h, sub_chunk, 1, out_bytes)  # Akk
+        )
+        shared = (
+            block_h * dim * (2 * in_bytes + gate_bytes)
+            + block_h * in_bytes
+            + depth * block_h * block_dk * (in_bytes + gate_bytes)
+            + block_h * chunk * out_bytes
+            + block_h * sub_chunk * out_bytes
+        )
+        register_words = math.ceil(3 * block_h * block_dk + 2 * block_h)
         valid, blocks, waves = _occupancy(
             arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"]
-        )
-        valid = (
-            valid
-            and _full_row_gemm_supported(bm, bn, c["threads"])
-            and _full_row_gemm_supported(bm, dim, c["threads"])
         )
         return dict(
             valid=valid,
@@ -206,39 +268,12 @@ def attention_rank(workload, device, configs, top_k):
             blocks_per_sm=blocks,
             waves=waves,
             loop_iterations=average_iterations,
+            traffic_basis="mean per-CTA gated QK/KK causal transfers with Carver transaction sizes",
         )
 
-    return _rank_records(configs, top_k, arch=arch, template=template, evaluate=evaluate)
-
-
-def kda_rank(workload, device, configs, top_k):
-    p = workload.parameters
-    batch, heads, sequence, dk, dv, chunk = (p[key] for key in ("batch", "heads", "sequence", "dim", "value_dim", "chunk_size"))
-    element_bytes = 2
-    arch = _architecture(device.target)
-    template = workload_template(workload, configs, arch=arch)
-
-    def evaluate(c):
-        bdk, bdv, depth = c["block_DK"], c["block_DV"], max(1, c["num_stages"])
-        grid = batch * heads * (sequence // chunk) * math.ceil(dv / bdv)
-        iterations = math.ceil(dk / bdk)
-        repeated = chunk * bdk * (2 * element_bytes + 4) + bdk * bdv * element_bytes
-        once = (chunk * bdv + chunk * chunk + chunk * bdv) * element_bytes
-        traffic = iterations * repeated + once
-        shared = depth * repeated + once
-        register_words = chunk * bdv
-        valid, blocks, waves = _occupancy(
-            arch, grid_blocks=grid, shared_bytes=shared, register_words=register_words, threads=c["threads"]
-        )
-        return dict(
-            valid=valid,
-            traffic_bytes_per_cta=traffic,
-            shared_bytes=shared,
-            register_words=register_words,
-            grid_blocks=grid,
-            blocks_per_sm=blocks,
-            waves=waves,
-            loop_iterations=iterations,
-        )
-
-    return _rank_records(configs, top_k, arch=arch, template=template, evaluate=evaluate)
+    report = _rank_records(configs, top_k, arch=arch, template=None, evaluate=evaluate)
+    report["template"] = "kda_intra_token_parallel"
+    report["assumptions"].append(
+        "KDA issues no tensor-core MMA: the score uses its CTA domain and gated QK/KK memory ledger, not a tensorized GEMM."
+    )
+    return report

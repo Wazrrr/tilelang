@@ -54,7 +54,7 @@ def split_workloads(workloads, scales):
         for w in workloads:
             for factor in factors:
                 p = dict(w.parameters)
-                keys = ("m", "n", "k") if w.op in ("gemm", "gemm_fp8") else ("sequence",)
+                keys = ("m", "n", "k") if w.op in ("gemm", "gemm_fp8") else ("n", "k") if w.op == "grouped_gemm" else ("sequence",)
                 for key in keys:
                     multiple = p.get("chunk_size", 32) if key == "sequence" else 32
                     p[key] = max(multiple, int(p[key] * factor / multiple) * multiple)
@@ -108,6 +108,7 @@ def remeasure(request, methods, output, repeats):
     case, settings = make_case(workload), request["settings"]
     torch.backends.cuda.matmul.allow_tf32 = False
     inputs = case.inputs("cuda", torch.Generator(device="cuda").manual_seed(settings["seed"]))
+    case.check_input_values(inputs)
     expected = case.reference(*inputs)
     expected = expected if isinstance(expected, list | tuple) else [expected]
     kernels, samples = {}, {}
@@ -358,7 +359,11 @@ def main(argv=None):
         if (output / "result.json").exists():
             if json.loads((output / "request.json").read_text()) != request:
                 raise ValueError(f"resume request mismatch: {output}")
-            return json.loads((output / "result.json").read_text())
+            saved = json.loads((output / "result.json").read_text())
+            monitor = output / "monitor.json"
+            rejected = monitor.exists() and json.loads(monitor.read_text())["status"] in ("contended", "timeout", "worker_failed")
+            if not rejected:
+                return saved
         if args.phase == "oracle" and (method != "brute_force" or sampling is not None):
             raise ValueError(f"oracle phase requires completed collection/selection: {output}")
         if output.exists():
@@ -421,9 +426,6 @@ def main(argv=None):
                     result = run(w, device, "brute_force", output, sampling=sample)
                     if result["status"] == "completed":
                         collected[w.op][split].append(output)
-            from experiments.xgboost.data import read_runs
-            from experiments.xgboost.model import train
-
             for op, paths in collected.items():
                 model = base / "models" / (label + "-" + op + ".json")
                 if not paths["train"] or not paths["validation"]:
@@ -432,16 +434,20 @@ def main(argv=None):
                     if not model.exists():
                         if args.phase == "oracle":
                             raise ValueError(f"oracle phase requires a frozen model: {model}")
-                        train(
-                            read_runs(paths["train"]),
-                            read_runs(paths["validation"]),
-                            model,
-                            sample_fraction=args.xgb_sample_fraction,
-                            sampling_policy=policy,
-                            seed=args.seed,
-                            workers=args.workers,
-                            **xgb_training,
-                        )
+                        command = [
+                            sys.executable, "-m", "experiments.xgboost", "train",
+                            "--train-runs", *map(str, paths["train"]),
+                            "--validation-runs", *map(str, paths["validation"]),
+                            "--output", str(model),
+                            "--sample-fraction", str(args.xgb_sample_fraction),
+                            "--sampling-policy", policy,
+                            "--seed", str(args.seed), "--workers", str(args.workers),
+                        ]
+                        for key, value in xgb_training.items():
+                            command.extend(("--" + key.replace("_", "-"), str(value)))
+                        # Some XGBoost builds initialize CUDA even for CPU
+                        # training. Keep that context out of the coordinator.
+                        subprocess.run(command, check=True, env=dict(os.environ, CUDA_VISIBLE_DEVICES=""))
                     models[label, op] = model
                 except Exception as error:
                     if args.phase == "oracle":

@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass, replace
 
-ANALYSIS_VERSION = 25
+ANALYSIS_VERSION = 33
 
 
 @dataclass(frozen=True)
@@ -18,16 +18,30 @@ class TileTuneConfig:
     report_path: str | None = None
     ranking: bool = True
     top_k: int | None = None  # Analyze the full grid, then compile at most this many scored candidates.
+    strict_top_k: bool = False  # Keep only complete score groups within top_k.
+    alpha: float | None = None  # Strict pool fraction; mutually exclusive with top_k.
     exploration_fraction: float = 0.0  # Opt-in unknown-cost attempts; pure ranking remains the default.
     exploration_seed: int = 123
     device_limits: dict | None = None
     specialization: str = "auto"
-    ranking_metric: str = "pipeline_time"
+    ranking_metric: str = "memory"
+    memory_diagnostics: bool = False  # Opt into dependencies, liveness and storage reports in memory mode.
     performance_model: dict | None = None
+    # Read-only integer vectors keyed by PrimFunc argument index. Execution
+    # must verify these values against the actual input tensors.
+    input_values: dict | None = None
     trace_path: str | None = None  # Append intermediate analysis snapshots for manual review.
     facts_path: str | None = None  # Optional portable compiler-fact artifact.
 
     def __post_init__(self):
+        if self.input_values is not None and (
+            not isinstance(self.input_values, dict)
+            or any(
+                not str(k).isdigit() or not isinstance(v, list | tuple) or not v or any(type(x) is not int for x in v)
+                for k, v in self.input_values.items()
+            )
+        ):
+            raise ValueError("input_values maps parameter indices to nonempty integer vectors")
         if self.facts_path is not None and (not isinstance(self.facts_path, str) or not self.facts_path.strip()):
             raise ValueError("facts_path must be a nonempty string or None")
         if (
@@ -42,21 +56,43 @@ class TileTuneConfig:
             raise ValueError("exploration requires top_k")
         if self.trace_path is not None and (not isinstance(self.trace_path, str) or not self.trace_path.strip()):
             raise ValueError("trace_path must be a nonempty string or None")
-        if self.specialization not in ("auto", "generic", "gemm", "attention"):
-            raise ValueError("specialization must be auto, generic, gemm, or attention")
-        if self.ranking_metric not in ("traffic_waves", "pipeline_time"):
-            raise ValueError("ranking_metric must be traffic_waves or pipeline_time")
+        if self.specialization not in ("auto", "generic", "gemm", "attention", "kda_chunk_o"):
+            raise ValueError("specialization must be auto, generic, gemm, attention, or kda_chunk_o")
+        if self.ranking_metric not in ("memory", "traffic_waves", "pipeline_time"):
+            raise ValueError("ranking_metric must be memory, traffic_waves or pipeline_time")
+        if not isinstance(self.memory_diagnostics, bool):
+            raise ValueError("memory_diagnostics must be a bool")
         if self.performance_model is not None:
             from .profiling.profile_schema import validate_performance_model
 
             validate_performance_model(self.performance_model)
         if not isinstance(self.ranking, bool):
             raise ValueError("ranking must be a bool")
+        if self.alpha is not None:
+            import math
+
+            if (
+                isinstance(self.alpha, bool)
+                or not isinstance(self.alpha, int | float)
+                or not math.isfinite(self.alpha)
+                or not 0 < self.alpha <= 1
+            ):
+                raise ValueError("alpha must be finite and in (0, 1]")
+            if self.top_k is not None:
+                raise ValueError("alpha and top_k are mutually exclusive")
+            if not self.ranking:
+                raise ValueError("alpha requires ranking=True")
+            if self.exploration_fraction:
+                raise ValueError("alpha does not support exploration")
         if self.top_k is not None:
             if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k <= 0:
                 raise ValueError("top_k must be a positive integer or None")
             if not self.ranking:
                 raise ValueError("top_k requires ranking=True")
+        if not isinstance(self.strict_top_k, bool):
+            raise ValueError("strict_top_k must be a bool")
+        if self.strict_top_k and self.top_k is None and self.alpha is None:
+            raise ValueError("strict_top_k requires top_k or alpha")
         if self.device_limits is not None:
             from .src.device import DEVICE_LIMIT_FIELDS
 
@@ -69,6 +105,10 @@ class TileTuneConfig:
         spill_budget = self.attention_spill_budget_registers_per_thread
         if isinstance(spill_budget, bool) or not isinstance(spill_budget, int) or spill_budget < 0:
             raise ValueError("attention_spill_budget_registers_per_thread must be a nonnegative integer")
+        if self.ranking_metric == "memory" and (self.specialization not in ("auto", "generic") or spill_budget):
+            raise ValueError(
+                "memory ranking is kernel-family independent; family specialization and attention spill allowances are unsupported"
+            )
         for name in ("register_cap", "max_spill_bytes", "max_local_bytes"):
             value = getattr(self, name)
             if value is None:

@@ -6,8 +6,14 @@ from tilelang.tiletune import analyze_prim_func, propagate_inputs
 
 
 def gemm(trans_a=False, trans_b=False, explicit=False, stages=0, extent=4, input_dtype="float16", acc_dtype="float32", threads=128):
+    reduction_extent = max(128, extent * 32)
+
     @T.prim_func
-    def main(A: T.Tensor((128, 128), input_dtype), B: T.Tensor((128, 128), input_dtype), C: T.Tensor((64, 64), acc_dtype)):
+    def main(
+        A: T.Tensor((128, reduction_extent), input_dtype),
+        B: T.Tensor((reduction_extent, 128), input_dtype),
+        C: T.Tensor((64, 64), acc_dtype),
+    ):
         with T.Kernel(1, threads=threads):
             a = T.alloc_shared((32, 32), input_dtype)
             b = T.alloc_shared((32, 32), input_dtype)

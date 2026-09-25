@@ -6,7 +6,7 @@ Follow the organization in [gemm/](gemm/README.md) and
 The [experiment README](README.md) describes the current execution protocol;
 [utils/README.md](utils/README.md) describes shared helpers.
 
-The current final matrix has four families and eight cases: six FP16 and two FP8. Preserve existing
+The current final matrix has five families and twenty-five cases: twenty FP16 and five FP8. Preserve existing
 cases, pools, and recorded results unless the task explicitly changes them.
 Softmax and supplementary vector families are retired. FP8 GEMM uses the shared
 protocol and its authoritative native example; it is unavailable on Ampere.
@@ -58,7 +58,7 @@ alternative local kernels, or compatibility wrappers for removed paths.
 
 For orientation, GEMM uses `example_gemm_advanced_autotune.py` with A=(M,K),
 B=(N,K), `transpose_B=True`, and the shared-memory epilogue. Attention uses
-`example_mha_fwd_bshd.py`. KDA uses `examples/kda/chunk_o.py`; FP8 GEMM uses
+`example_mha_fwd_bshd.py`. KDA uses `examples/kda/chunk_intra_token_parallel.py`; FP8 GEMM uses
 `examples/gemm_fp8/example_tilelang_gemm_fp8.py`. These details are part of the kernel
 contract, not tuning-method choices.
 
@@ -66,7 +66,7 @@ contract, not tuning-method choices.
 
 - `cases(holdout=False)` supplies development workloads; `cases(holdout=True)`
   supplies final workloads with stable logical names. Existing core families have
-  two cases in each split. Record shape, layout, and semantic options in
+  five cases in each development/final split. Record shape, layout, and semantic options in
   `Workload.parameters`, and dtype in `Workload.dtype`; do not encode alternative
   implementations in the config grid.
 - `training_cases()` supplies two training workloads and one validation workload
@@ -88,8 +88,8 @@ contract, not tuning-method choices.
   Smoke/development and explicit config requests select original pool indices;
   they do not define a new pool. All tuning methods use the same ordered pool.
 
-Current counts per case are GEMM 2,304 (288 × 8), attention 320, KDA 720 (90 × 8),
-and FP8 GEMM 2,304 (288 × 8). Counts describe declared candidates, not guaranteed compilable
+Current counts per case are GEMM 576, attention 480, KDA 234,
+FP8 GEMM 2,304 (288 × 8), and grouped GEMM 576. Counts describe declared candidates, not guaranteed compilable
 or distinct generated kernels. An intentional pool change needs new identities
 and results; review `common/spaces.py::SPACE_VERSION` and frozen manifests.
 
@@ -107,7 +107,7 @@ Check all integration points; adding a folder alone is insufficient:
 | `xgboost/data.py::make_context` | Include the authoritative example in learned-model source identity too. |
 | `manifests/`, `common/acceptance.py`, relevant tests | Keep frozen workloads and acceptance scope consistent with the intended matrix. |
 
-`common/acceptance.py` currently recognizes eight cases across four operations
+`common/acceptance.py` currently recognizes twenty-five cases across five operations
 as the complete family matrix. If the task expands that matrix, update this
 assumption, manifests, tests, and documentation together. Do not silently relabel
 an expanded or partial study as the old complete final study.
@@ -139,8 +139,11 @@ reuse it. Preserve saved baseline costs instead of charging collection again.
 Follow the existing fixed baseline seed and XGBoost training/validation protocol;
 do not train on final oracle labels or resample baselines for each TileTune repeat.
 
-The reusable collection workflow currently runs on local CUDA. Carver uses MatmulTemplate for FP16/BF16/FP8 GEMM, FlashAttentionTemplate for
-attention, and KDAChunkOutputTemplate for KDA. Preserve its traffic-times-waves
+The reusable collection workflow currently runs on local CUDA. Carver uses
+MatmulTemplate for FP16/BF16 GEMM, FP8MatmulTemplate for FP8 GEMM,
+GroupedMatmulTemplate for grouped GEMM, and FlashAttentionTemplate for
+attention; KDA uses a bespoke intra-chunk traffic/wave adapter because the intra
+kernel issues no matrix instruction. Preserve its traffic-times-waves
 priority and document the graph-to-schedule mapping. Record unavailable hardware
 explicitly; do not substitute another model and label it Carver. Planning another
 backend does not establish that it runs. The offline result comparator itself

@@ -28,7 +28,7 @@ def test_training_collection_samples_before_measurement_and_preserves_original_i
     workload = default_workloads()[0]
     configs = configurations(workload, device)
     sample = training_sample(workload, device, fraction=0.1, seed=123)
-    assert len(configs) == 2304 and len(sample["config_indices"]) == 231
+    assert len(configs) == 576 and len(sample["config_indices"]) == 58
     assert sample["xgb_sampling"]["pool_configs"] == configs
     assert sample["config_indices"] == sample["xgb_sampling"]["selected_indices"]
     subset = [91, 40, 18, 72, 3, 5]
@@ -100,8 +100,9 @@ def test_carver_unsupported_semantics_are_explicit_and_exhaustive_has_no_gate():
     device = Device("ampere", TARGETS["ampere"])
     workloads = {w.name: w for w in default_workloads()}
     assert carver_support_reason(workloads["gemm_square"], device) is None
-    for name in ("attention_noncausal", "kda_chunk_regular"):
-        assert carver_support_reason(workloads[name], device) is None
+    assert carver_support_reason(workloads["attention_noncausal"], device) is None
+    assert carver_support_reason(workloads["grouped_gemm_aligned"], device) is None
+    assert carver_support_reason(workloads["kda_intra_regular"], device) is None
     assert "FP8" in carver_support_reason(workloads["gemm_fp8_square"], device)
     for parameters in (dict(batch=2), dict(epilogue="bias_relu"), dict(transpose_b=False)):
         w = workloads["gemm_square"]

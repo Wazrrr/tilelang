@@ -74,6 +74,23 @@ _RESERVED_CONFIG_KEYS = frozenset({"pass_configs"})
 # Internal key used to pass per-config pass_configs through config_arg dicts
 _PASS_CONFIGS_KEY = "__pass_configs__"
 
+# Number of consecutive benchmark timeouts before the tuner gives up. A single
+# timeout can be a genuinely slow configuration, but back-to-back timeouts
+# indicate the CUDA device/context is wedged (e.g. by a hung kernel that the
+# daemon timeout thread cannot cancel). In that state every remaining
+# configuration would also time out and waste the full timeout budget.
+_MAX_CONSECUTIVE_BENCHMARK_TIMEOUTS = 2
+
+
+def _resolve_max_consecutive_benchmark_timeouts() -> int:
+    raw = os.environ.get("TILELANG_AUTO_TUNING_MAX_CONSECUTIVE_TIMEOUTS")
+    if raw is None:
+        return _MAX_CONSECUTIVE_BENCHMARK_TIMEOUTS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _MAX_CONSECUTIVE_BENCHMARK_TIMEOUTS
+
 
 class TimeoutException(Exception):
     pass
@@ -1528,7 +1545,7 @@ class AutoTuner:
                 return program
 
         compile_indices = list(range(len(config_args)))
-        if self.tiletune_session is not None and self.tiletune_args.top_k is not None:
+        if self.tiletune_session is not None and self.tiletune_session.requested_k is not None:
             items = [
                 (idx, kwargs, self._merge_pass_configs_into_compile_args(kwargs.get(_PASS_CONFIGS_KEY)).pass_configs)
                 for idx, kwargs in enumerate(config_args)
@@ -1577,6 +1594,8 @@ class AutoTuner:
         benchmark_threads: list[threading.Thread] = []
         benchmark_expected_results = 0
         benchmark_processed_results = 0
+        consecutive_benchmark_timeouts = 0
+        max_consecutive_benchmark_timeouts = _resolve_max_consecutive_benchmark_timeouts()
 
         if use_pipeline:
             benchmark_start_event.set()
@@ -1603,7 +1622,7 @@ class AutoTuner:
             benchmark_expected_results += 1
 
         def _process_benchmark_result(result_item, progress_bar):
-            nonlocal benchmark_processed_results, ref_latency
+            nonlocal benchmark_processed_results, ref_latency, consecutive_benchmark_timeouts
             idx, config, jit_kernel, latency, worker_ref_latency, status, error_text = result_item
             benchmark_processed_results += 1
             progress_bar.update(1)
@@ -1613,8 +1632,18 @@ class AutoTuner:
                 self.tiletune_session.benchmark_result(idx, status_text, latency, error_text)
 
             if status == "timeout":
+                consecutive_benchmark_timeouts += 1
                 logger.warning(f"A timeout occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
+                if consecutive_benchmark_timeouts >= max_consecutive_benchmark_timeouts:
+                    raise RuntimeError(
+                        f"Aborting auto-tuning after {consecutive_benchmark_timeouts} consecutive benchmark timeouts: "
+                        "the CUDA device/context is likely wedged by a hung kernel, so remaining configurations "
+                        "would keep timing out. Inspect the last timed-out config and consider reducing the "
+                        "config space or fixing the kernel. Set TILELANG_AUTO_TUNING_MAX_CONSECUTIVE_TIMEOUTS "
+                        "to a larger value to tolerate more consecutive timeouts before aborting."
+                    )
                 return
+            consecutive_benchmark_timeouts = 0
             if status == "error":
                 logger.warning(f"An error occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
                 if error_text:

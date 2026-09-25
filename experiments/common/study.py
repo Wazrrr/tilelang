@@ -103,7 +103,9 @@ def execute(plan, output, settings, *, baseline_root, baseline_seed=123):
                 )
                 request = make_request(w, device, options)
                 result = _existing_or_run(request, case / "tiletune")
-                if result["status"] == "failed":
+                from experiments.utils.baseline_store import exhausted_selection
+
+                if result["status"] == "failed" and not exhausted_selection(case / "tiletune", "tiletune"):
                     raise RuntimeError(f"TileTune worker failed: {case}: {result}")
                 methods = dict(read(baseline_case / "methods.json"), tiletune=result)
                 reports = {}

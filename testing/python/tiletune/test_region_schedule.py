@@ -23,6 +23,33 @@ def test_two_pass_softmax_counts_each_masked_access(rows, columns):
     assert len([n for n in pipeline["region_schedule"]["variants"][0] if "runs" in n]) == 2
 
 
+def test_two_grid_axes_with_tails_preserve_launch_order_and_exact_bytes():
+    @T.prim_func
+    def kernel(X: T.Tensor((47, 53), "float32"), Y: T.Tensor((47, 53), "float32")):
+        with T.Kernel(2, 2, threads=128) as (bx, by):
+            tile = T.alloc_fragment((32, 32), "float32")
+            T.copy(X[by * 32, bx * 32], tile)
+            T.copy(tile, Y[by * 32, bx * 32])
+
+    before = kernel.script()
+    result = analyze(kernel)
+    assert kernel.script() == before
+    pipeline = result["modules"]["pipeline_overlap"]
+    assert not pipeline["unknown"], pipeline["diagnostics"]
+    distribution = pipeline["cta_work"]
+    per_cta = [
+        pipeline["region_work"][group["iterations"]]
+        for _ in range(distribution["repetitions"])
+        for group in distribution["groups"]
+        for _ in range(group["count"])
+    ]
+    expected = [32 * 32 * 4, 32 * 21 * 4, 15 * 32 * 4, 15 * 21 * 4]
+    assert [work["read_bytes"] for work in per_cta] == expected
+    assert [work["write_bytes"] for work in per_cta] == expected
+    assert sum(expected) == 47 * 53 * 4
+    assert result["tile_cost"]["score"] is not None
+
+
 def test_causal_prefix_then_guarded_tail():
     @T.prim_func
     def kernel(X: T.Tensor((7, 13), "float32"), Y: T.Tensor((7,), "float32")):

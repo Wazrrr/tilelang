@@ -13,7 +13,7 @@ def schedule_cycles(plan, copies, phase_cycles, iterations, profile, concurrent_
 
     if iterations == 0:
         return 0.0
-    bandwidth = profile["global_bytes_per_cycle"] / concurrent_ctas
+    bandwidth = profile.get("global_read_bytes_per_cycle", profile["global_bytes_per_cycle"]) / concurrent_ctas
     issue_rate = profile.get("async_copy_issue_bytes_per_cycle")
     latency = profile.get("async_copy_latency_cycles")
     if not issue_rate or latency is None:

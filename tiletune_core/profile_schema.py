@@ -10,6 +10,7 @@ from math import isfinite
 RATE_FIELDS = {
     "async_copy_issue_bytes_per_cycle",
     "global_bytes_per_cycle",
+    "l2_bytes_per_cycle",
     "shared_bytes_per_cycle",
     "gemm_flops_per_cycle",
     "wgmma_flops_per_cycle_per_warpgroup",
@@ -30,6 +31,7 @@ RATE_FIELDS = {
     "reduction_shuffle_max_float16_per_cycle",
 }
 LATENCY_FIELDS = {"copy_latency_cycles", "barrier_cycles", "async_copy_latency_cycles"}
+CAPACITY_FIELDS = {"l2_cache_bytes"}
 CONSUMER_RATE_FIELDS = {
     "elementwise_ops_per_cycle",
     "exp_ops_per_cycle",
@@ -57,9 +59,26 @@ def reduction_rate_field(reduction, profile, primitive):
 
 
 def validate_performance_model(profile):
-    if not isinstance(profile, dict) or set(profile) - RATE_FIELDS - LATENCY_FIELDS - PROFILE_METADATA_FIELDS - {"consumer_rates"}:
+    if not isinstance(profile, dict) or set(profile) - RATE_FIELDS - LATENCY_FIELDS - CAPACITY_FIELDS - PROFILE_METADATA_FIELDS - {
+        "consumer_rates",
+        "gemm_instruction_rates",
+    }:
         raise ValueError("performance_model contains unsupported fields")
     for key, value in profile.items():
+        if key == "gemm_instruction_rates":
+            if not isinstance(value, dict) or not value or "gemm_signature" not in profile:
+                raise ValueError("gemm_instruction_rates requires instruction rows and a dtype signature")
+            for instruction, rates in value.items():
+                if not isinstance(instruction, str) or not instruction:
+                    raise ValueError("gemm_instruction_rates requires instruction names")
+                if (
+                    not isinstance(rates, dict)
+                    or "gemm_flops_per_cycle" not in rates
+                    or set(rates) - {"gemm_flops_per_cycle", "wgmma_flops_per_cycle_per_warpgroup"}
+                ):
+                    raise ValueError("gemm_instruction_rates requires measured matrix rates")
+                validate_performance_model(rates)
+            continue
         if key == "consumer_rates":
             if not isinstance(value, dict) or not value:
                 raise ValueError("consumer_rates requires measured thread-count rows")
@@ -88,6 +107,6 @@ def validate_performance_model(profile):
             or not isinstance(value, float | int)
             or not isfinite(value)
             or value < 0
-            or (key in RATE_FIELDS and value == 0)
+            or (key in RATE_FIELDS | CAPACITY_FIELDS and value == 0)
         ):
             raise ValueError("performance_model requires finite positive rates and nonnegative latencies")

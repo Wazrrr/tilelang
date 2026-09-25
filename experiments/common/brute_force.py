@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from experiments.utils.monitor import snapshot, foreign_processes, stop_worker
+from experiments.utils.monitor import snapshot, exclusive_foreign_processes, stop_worker, visible_gpus, matches_cuda_device
 from .run import make_request, validate_result
 from experiments.utils.io import write_json
 from .spec import configuration_space, load_manifest, support_reason
@@ -195,7 +195,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="hopper")
-    parser.add_argument("--workloads", nargs="+", help="Final workload names to measure; default: all eight cases")
+    parser.add_argument("--workloads", nargs="+", help="Final workload names to measure; default: all twenty-five cases")
     parser.add_argument("--gpus", nargs="+", type=int)
     parser.add_argument("--shard-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
@@ -223,11 +223,7 @@ def main():
     unavailable = {w.name: dict(status="unsupported", reason=reason) for w in requested if (reason := support_reason(w, device))}
     workloads = [w for w in requested if w.name not in unavailable]
     initial = snapshot()
-    gpus = [
-        g
-        for g in initial["gpus"]
-        if (args.gpus is None or int(g["index"]) in args.gpus) and re.search(device.expected_device_pattern, g["name"])
-    ]
+    gpus = [g for g in visible_gpus(initial) if (args.gpus is None or int(g["index"]) in args.gpus) and matches_cuda_device(g, device)]
     if not gpus:
         parser.error("no matching GPUs")
     spaces = {w.name: configuration_space(w, device) for w in workloads}
@@ -244,6 +240,10 @@ def main():
         case_timeout=1800,
         seed=123,
     )
+    # Compiler workers are a shared budget: one workload is processed at a
+    # time, so divide the total across the GPUs that run that workload's shards
+    # concurrently (e.g. 64 total / 4 GPUs = 16 per shard worker).
+    per_shard_workers = max(1, args.workers // len(gpus))
     plan = dict(
         version=1,
         workloads=[w.to_dict() for w in requested],
@@ -278,13 +278,14 @@ def main():
                 if row["index"] in records[w.name]:
                     raise ValueError("duplicate accepted configuration")
                 records[w.name][row["index"]] = row
-    # Round-robin workloads, then dynamically share their remaining shards.
-    for offset in range(0, max((len(s["configs"]) for s in spaces.values()), default=0), args.shard_size):
-        for w in workloads:
+    # One workload at a time; within a workload, shards stream to idle GPUs.
+    for w in workloads:
+        for offset in range(0, len(spaces[w.name]["configs"]), args.shard_size):
             indices = [i for i in range(offset, min(offset + args.shard_size, len(spaces[w.name]["configs"]))) if i not in records[w.name]]
             if indices:
                 pending.append(dict(workload=w, indices=indices, kind="sweep"))
     clean = {g["uuid"]: 0 for g in gpus}
+    nvml_pid = {}
     validating = set()
     last_progress = 0
 
@@ -306,7 +307,17 @@ def main():
                 for gpu in gpus:
                     uuid = gpu["uuid"]
                     task = active.get(uuid)
-                    foreign = foreign_processes(observed, uuid, task["process"].pid if task else None)
+                    if task:
+                        # Ownership is by exclusive launch: the GPU was empty
+                        # before the worker started, so a single stable NVML
+                        # compute PID is the worker. NVML can report host PIDs
+                        # that do not resolve in this container, so os.getpgid
+                        # must not be used here.
+                        foreign, owned_pid = exclusive_foreign_processes(observed, uuid, nvml_pid.get(uuid))
+                        nvml_pid[uuid] = owned_pid
+                    else:
+                        foreign = [p for p in observed["processes"] if p["gpu_uuid"] == uuid]
+                        nvml_pid.pop(uuid, None)
                     gpu_now = next(g for g in observed["gpus"] if g["uuid"] == uuid)
                     clean[uuid] = clean[uuid] + 1 if not foreign and (task or float(gpu_now["utilization.gpu"]) <= 5) else 0
                     if task:
@@ -319,6 +330,7 @@ def main():
                         task["log"].close()
                         del active[uuid]
                         clean[uuid] = 0
+                        nvml_pid.pop(uuid, None)
                         w = job["workload"]
                         audit = dict(
                             started_at=task["started_at"],
@@ -398,7 +410,7 @@ def main():
                         directory = root / w.name / ("attempt-" + str(time.time_ns()))
                         directory.mkdir()
                         request_settings = (
-                            dict(settings, config_indices=job["indices"])
+                            dict(settings, workers=per_shard_workers, config_indices=job["indices"])
                             if job["kind"] == "sweep"
                             else dict(
                                 settings,

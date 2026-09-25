@@ -98,6 +98,38 @@ def test_old_device_profile_requires_new_primitive_measurements(tmp_path):
         load_device_profile(path, input_dtype="float16")
 
 
+@pytest.mark.parametrize("version,cold_latency", [(8, None), (9, 700)])
+@pytest.mark.parametrize("l2_capacity", [None, 40 * 1024 * 1024])
+def test_copy_latency_follows_memory_regime_without_invalidating_archived_profiles(tmp_path, version, cold_latency, l2_capacity):
+    rates = dict(PROFILE, dram_bytes_per_cycle=12, async_copy_latency_cycles=300)
+    if cold_latency is not None:
+        rates["async_copy_streaming_latency_cycles"] = cold_latency
+    signature = device_profile._signature("float16", "float32", "cuda.mma")
+    path = tmp_path / "profile.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                identity=dict(profile_version=version, target_arch="sm_80", **(dict(l2_cache_bytes=l2_capacity) if l2_capacity else {})),
+                common=dict(rates=rates, clock_mhz=1400),
+                gemm_models={json.dumps(signature, sort_keys=True): dict(rates={})},
+            )
+        )
+    )
+    cached = load_device_profile(path, input_dtype="float16", memory_regime="cached")
+    streaming = load_device_profile(path, input_dtype="float16", memory_regime="streaming")
+    assert cached["async_copy_latency_cycles"] == 300
+    assert streaming["async_copy_latency_cycles"] == (cold_latency or 300)
+    assert streaming["global_bytes_per_cycle"] == 12
+    assert "l2_bytes_per_cycle" not in cached
+    if l2_capacity:
+        assert streaming["l2_bytes_per_cycle"] == cached["global_bytes_per_cycle"]
+        assert streaming["l2_cache_bytes"] == l2_capacity
+    else:
+        assert "l2_bytes_per_cycle" not in streaming
+    TileTuneConfig(performance_model=cached)
+    TileTuneConfig(performance_model=streaming)
+
+
 def test_cached_profile_requires_no_gpu_or_benchmark(tmp_path, monkeypatch):
     path = tmp_path / "device.json"
     identity = dict(profile_version=device_profile.PROFILE_VERSION, target_arch="sm_90a", device_name="test")
@@ -105,6 +137,8 @@ def test_cached_profile_requires_no_gpu_or_benchmark(tmp_path, monkeypatch):
     data = dict(
         identity=identity, common=dict(rates=PROFILE, clock_mhz=1800), gemm_models={json.dumps(signature, sort_keys=True): dict(rates={})}
     )
+    mma_signature = device_profile._signature("float8_e4m3fn", "float32", "cuda.mma")
+    data["gemm_models"][json.dumps(mma_signature, sort_keys=True)] = dict(rates=dict(gemm_flops_per_cycle=512))
     path.write_text(json.dumps(data))
     monkeypatch.setattr(device_profile, "_identity", lambda: identity)
 
@@ -114,6 +148,7 @@ def test_cached_profile_requires_no_gpu_or_benchmark(tmp_path, monkeypatch):
     monkeypatch.setattr(device_profile, "_measure_common", forbidden)
     monkeypatch.setattr(device_profile, "_measure_gemm", forbidden)
     loaded = load_device_profile(path, input_dtype="float8_e4m3fn")
+    assert loaded["gemm_instruction_rates"] == {"cuda.mma": dict(gemm_flops_per_cycle=512)}
     assert profile_device(input_dtype="float8_e4m3fn", cache_path=path) == loaded
     monkeypatch.setattr(device_profile, "_identity", forbidden)
     assert load_device_profile(path, input_dtype="float8_e4m3fn") == loaded
@@ -135,7 +170,7 @@ def test_missing_dtype_only_measures_dtype_primitives(tmp_path, monkeypatch):
         return dict(rates=dict(PROFILE, dram_bytes_per_cycle=12), clock_mhz=1800)
 
     def gemm(_identity, clock, dtype, accum_dtype):
-        gemm_calls.append(dtype)
+        gemm_calls.append((dtype, _identity["matrix_instruction"]))
         return dict(rates=dict(gemm_flops_per_cycle=4096 if dtype == "float8_e4m3fn" else 2048))
 
     monkeypatch.setattr(device_profile, "_measure_common", common)
@@ -143,7 +178,7 @@ def test_missing_dtype_only_measures_dtype_primitives(tmp_path, monkeypatch):
     for dtype in ("float8_e4m3fn", "float16", "float8_e4m3fn"):
         profile_device(input_dtype=dtype, cache_path=path)
     assert len(common_calls) == 1
-    assert gemm_calls == ["float8_e4m3fn", "float16"]
+    assert gemm_calls == [(dtype, instruction) for dtype in ("float8_e4m3fn", "float16") for instruction in ("cuda.wgmma", "cuda.mma")]
     streaming = load_device_profile(path, input_dtype="float16", memory_regime="streaming")
     assert streaming["global_bytes_per_cycle"] == 12
     assert streaming["memory_regime"] == "streaming"

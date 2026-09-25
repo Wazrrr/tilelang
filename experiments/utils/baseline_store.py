@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -18,8 +19,9 @@ ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = {
     "gemm": "examples/gemm/example_gemm_advanced_autotune.py",
     "flash_attention": "examples/flash_attention/example_mha_fwd_bshd.py",
-    "kda": "examples/kda/chunk_o.py",
+    "kda": "examples/kda/chunk_intra_token_parallel.py",
     "gemm_fp8": "examples/gemm_fp8/example_tilelang_gemm_fp8.py",
+    "grouped_gemm": "examples/grouped_gemm/example_grouped_gemm_fwd.py",
 }
 
 
@@ -77,7 +79,11 @@ print(json.dumps(identity))
     # Pool subsets can exceed the OS limit for a single argv value. Runtime
     # observation needs only target identity, never thousands of config IDs.
     description = dict(name=device.name, target=device.target)
-    return json.loads(subprocess.check_output([sys.executable, "-c", code, json.dumps(description)], text=True))
+    from experiments.utils.monitor import select_cuda_gpu
+
+    gpu = select_cuda_gpu(device)
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu["uuid"])
+    return json.loads(subprocess.check_output([sys.executable, "-c", code, json.dumps(description)], text=True, env=env))
 
 
 def _runtime_identity(device):
@@ -203,13 +209,13 @@ def collect_bundle(root, identity, measurement, device, settings, *, run=subproc
             verify_bundle(path, identity)
             return path, True
         if path.exists():
-            import time
-
-            path.rename(path.with_name(path.name + f".incomplete.{time.time_ns()}"))
-        path.mkdir()
-        write_json(path / "identity.json", identity)
-        write_json(path / "measurement.json", measurement)
-        write_json(path / "splits.json", dict(version=1, devices=[device.to_dict()], splits=identity["splits"]))
+            if json.loads((path / "identity.json").read_text()) != identity:
+                raise ValueError("incomplete baseline identity differs")
+        else:
+            path.mkdir()
+            write_json(path / "identity.json", identity)
+            write_json(path / "measurement.json", measurement)
+            write_json(path / "splits.json", dict(version=1, devices=[device.to_dict()], splits=identity["splits"]))
         command = [
             sys.executable,
             "-m",
@@ -237,7 +243,15 @@ def collect_bundle(root, identity, measurement, device, settings, *, run=subproc
         ]
         for name, value in settings.items():
             command.extend(("--" + name.replace("_", "-"), str(value)))
-        run(command, check=True)
+        if (path / "collection").exists():
+            command.append("--resume")
+        try:
+            run(command, check=True)
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 1:
+                raise
+            # Exhausting a fixed shortlist is a recorded experimental outcome.
+            # Validate all artifacts below before accepting such a collection.
         cases = path / "collection" / device.name / "test"
         for w in identity["splits"]["test"]:
             case = cases / w["name"]
@@ -246,14 +260,46 @@ def collect_bundle(root, identity, measurement, device, settings, *, run=subproc
                 raise ValueError("baseline oracle pool is incomplete")
             for method in ("carver", "xgboost"):
                 result = json.loads((case / method / "result.json").read_text())
-                if result["status"] not in ("completed", "unsupported"):
+                exhausted = exhausted_selection(case / method, method)
+                if result["status"] not in ("completed", "unsupported", "model_unavailable") and not exhausted:
                     raise ValueError(f"baseline {method} failed for {w['name']}: {result}")
-                if result["status"] == "unsupported" and method != "carver":
+                if result["status"] != "completed" and method != "carver" and not exhausted:
                     raise ValueError("XGBoost baseline is required")
                 if result["status"] == "completed" and len(json.loads((case / method / (method + ".json")).read_text())["ranking"]) != len(
                     oracle["records"]
                 ):
                     raise ValueError(f"incomplete {method} ranking")
+                if result["status"] == "model_unavailable":
+                    report = json.loads((case / method / (method + ".json")).read_text())
+                    expected = identity["pools"][w["name"]]
+                    if (
+                        report["selection"]["selected_indices"]
+                        or [row["config"] for row in report["configs"]] != expected
+                        or any(row["status"] != "model_rejected" for row in report["configs"])
+                        or sorted(row["index"] for row in report["ranking"]) != list(range(len(expected)))
+                        or any(row["score"] is not None or row["tier"] == "eligible" for row in report["ranking"])
+                    ):
+                        raise ValueError("unavailable Carver baseline must record rejection of the complete pool")
         artifacts = hash_files(path.rglob("*.json"), path)
         write_json(path / "complete.json", dict(version=1, identity=identity, artifacts=artifacts))
         return path, False
+
+
+def exhausted_selection(path, method):
+    """Distinguish a completely measured failed shortlist from an aborted run."""
+    from experiments.utils.results import TERMINAL
+
+    result = json.loads((path / "result.json").read_text())
+    if result["status"] != "failed" or not (path / (method + ".json")).exists():
+        return False
+    report = json.loads((path / (method + ".json")).read_text())
+    selected = report.get("selection", {}).get("selected_indices", [])
+    rows = [r for r in report["configs"] if r["index"] in selected]
+    return (
+        bool(selected)
+        and len(selected) == len(set(selected)) == len(rows)
+        and sorted(r["index"] for r in report["ranking"]) == list(range(len(report["configs"])))
+        and all(r["status"] in TERMINAL - {"benchmarked", "worker_failed"} for r in rows)
+        and (path / "monitor.json").exists()
+        and json.loads((path / "monitor.json").read_text())["status"] == "uncontended"
+    )

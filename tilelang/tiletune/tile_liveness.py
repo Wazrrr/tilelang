@@ -8,6 +8,14 @@ estimate informs demand and ranking, but cannot establish a rejection proof.
 from math import prod
 
 
+def launch_threads(col):
+    """Resolve launch size without computing live tile intervals."""
+    from .src.ir_utils import _int
+
+    dims = [_int(v) for k, v in col.threads.items() if k.startswith("threadIdx.")]
+    return prod(dims) if dims and all(dims) else None
+
+
 def _streamed_cast_storage(op, col, facts, active, threads):
     """A last-use, same-owner narrowing copy can retire source words as it casts.
 

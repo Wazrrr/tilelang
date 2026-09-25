@@ -25,19 +25,54 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
             sms = waves["device_limits"]["sm_count"]
             grid = waves["grid_blocks"]
             active = min(resident, (grid + sms - 1) // sms)
-            timing = estimate_pipeline_cycles(pipeline, concurrent_ctas=active)
+
+            def wave_timing(blocks, concurrent, iterations=None):
+                # Profiles normalize chip memory throughput by SM count.
+                # Memory bandwidth is shared by the active CTAs; arithmetic,
+                # shared memory and instruction issue remain local to each SM.
+                profile = pipeline.get("performance_model")
+                effective = pipeline
+                slots = sms * concurrent
+                reuse = None
+                if profile and profile.get("global_bytes_per_cycle"):
+                    from .operand_reuse import operand_read_service
+
+                    profile = dict(profile)
+                    reuse = operand_read_service(pipeline.get("operand_reuse"), profile, min(blocks, slots))
+                    if reuse:
+                        profile["global_read_bytes_per_cycle"] = reuse["read_bytes_per_cycle"]
+                    if blocks < slots:
+                        for field in ("global_bytes_per_cycle", "global_read_bytes_per_cycle"):
+                            if field in profile:
+                                profile[field] *= slots / blocks
+                    effective = {**pipeline, "performance_model": profile}
+                timing = estimate_pipeline_cycles(effective, concurrent_ctas=concurrent, iterations=iterations)
+                if timing is not None and reuse is not None:
+                    timing["operand_reuse"] = reuse
+                return timing
+
+            timing = wave_timing(grid, active)
             if timing is not None:
                 scale = (config.performance_model or {}).get("latency_scale", 1)
+                distribution = pipeline.get("cta_work", {})
+                tail = grid % (sms * active)
+                tail_timing = None
+                if tail and distribution.get("precision") == "exact" and len({g["iterations"] for g in distribution["groups"]}) == 1:
+                    iterations = distribution["groups"][0]["iterations"]
+                    tail_timing = wave_timing(tail, (tail + sms - 1) // sms, iterations)
                 grid_timing = estimate_grid_cycles(
-                    pipeline.get("cta_work", {}),
-                    lambda n: estimate_pipeline_cycles(pipeline, concurrent_ctas=active, iterations=n),
+                    distribution,
+                    lambda n: wave_timing(grid, active, n),
                     sms * active,
                     waves["num_waves_estimate"],
+                    tail_cycles=tail_timing["cycles"] if tail_timing is not None else None,
                 )
                 if grid_timing is None:
                     result["unknown"].append("unresolved CTA work distribution")
                     return result
                 result.update(score=grid_timing["cycles"] * scale, wave_timing=timing, grid_timing=grid_timing, latency_scale=scale)
+                if tail_timing is not None:
+                    result["tail_wave_timing"] = tail_timing
                 if grid_timing["method"] != "uniform CTA waves":
                     result["formula"] = "estimated_grid_cycles_from_CTA_work_distribution"
                 clock = (config.performance_model or {}).get("reference_clock_mhz")
@@ -56,15 +91,42 @@ def apply_ranking_metric(tile_cost, waves, pipeline, config, specialization, reg
     return result
 
 
-def select_top_k(ranking, k):
-    """Select at most k finite, eligible scores; ties retain original grid order."""
+def alpha_budget(pool_size, alpha):
+    """Strict fraction of the original pool, including failed/unknown candidates."""
+    import math
+
+    if type(pool_size) is not int or pool_size <= 0:
+        raise ValueError("pool_size must be a positive integer")
+    if isinstance(alpha, bool) or not isinstance(alpha, int | float) or not math.isfinite(alpha) or not 0 < alpha <= 1:
+        raise ValueError("alpha must be finite and in (0, 1]")
+    budget = math.floor(pool_size * alpha)
+    if budget == 0:
+        raise ValueError("alpha selects no candidates from the supplied pool")
+    return budget
+
+
+def select_top_k(ranking, k, *, include_ties=True, strict_budget=False):
+    """Keep the first k eligible candidates and their complete boundary tie.
+
+    Equal primary scores are inseparable by default. Fixed-budget historical
+    baselines can explicitly request ``include_ties=False``.
+    A strict budget excludes the complete crossing group instead of expanding it.
+    """
     import math
 
     if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
         raise ValueError("top_k must be a positive integer")
-    return [
-        entry["index"] for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])
-    ][:k]
+    if not isinstance(strict_budget, bool):
+        raise ValueError("strict_budget must be a bool")
+    if strict_budget and not include_ties:
+        raise ValueError("strict_budget requires include_ties=True")
+    eligible = [entry for entry in ranking if entry["tier"] == "eligible" and entry["score"] is not None and math.isfinite(entry["score"])]
+    if strict_budget:
+        return [entry["index"] for entry in eligible if entry["tie_last_rank"] <= k]
+    if not include_ties or len(eligible) <= k:
+        return [entry["index"] for entry in eligible[:k]]
+    boundary = eligible[k - 1]["score"]
+    return [entry["index"] for position, entry in enumerate(eligible) if position < k or entry["score"] == boundary]
 
 
 def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
@@ -110,8 +172,25 @@ def select_with_exploration(ranking, records, k, *, fraction=0.2, seed=123):
     return selected + explored, explored
 
 
+def assign_tail_ranks(entries):
+    """Annotate an ordered report with positions and primary-score tie ranges."""
+    groups = {}
+    for position, entry in enumerate(entries, 1):
+        entry["position"] = position
+        groups.setdefault((entry["tier"], entry["score"]), []).append(position)
+    for entry in entries:
+        positions = groups[entry["tier"], entry["score"]]
+        entry.update(rank=positions[-1], tie_first_rank=positions[0], tie_last_rank=positions[-1])
+    return entries
+
+
 def rank_records(records):
-    """Return all original indices in score order, without reading measurements."""
+    """Order candidates and assign equal primary scores their group's tail rank.
+
+    Secondary keys only order the report within a tie. They cannot make an
+    equal-score candidate appear safer to prune. ``position`` records that
+    deterministic order separately from the conservative predicted ``rank``.
+    """
     import math
 
     if len({r["index"] for r in records}) != len(records):
@@ -131,18 +210,24 @@ def rank_records(records):
         if score is not None and (type(score) not in (float, int) or not math.isfinite(score)):
             score = None
         tier = "pressure_rejected" if decision.get("would_reject") else "unknown" if score is None else "eligible"
-        entries.append({"index": record["index"], "tier": tier, "score": score})
+        entry = {"index": record["index"], "tier": tier, "score": score}
+        cost = record.get("tile_cost") or {}
+        if cost.get("ranking_metric") == "memory":
+            secondary = cost.get("tie_break_score")
+            if score is not None and (type(secondary) not in (int, float) or not math.isfinite(secondary) or secondary < 0):
+                raise ValueError("memory ranking requires a finite nonnegative tie_break_score")
+            entry["tie_break_score"] = secondary
+        entries.append(entry)
     order = {"eligible": 0, "unknown": 1, "pressure_rejected": 2}
-    entries.sort(key=lambda e: (order[e["tier"]], e["score"] if e["score"] is not None else float("inf"), e["index"]))
-    for i, entry in enumerate(entries):
-        entry["rank"] = i + 1
-    groups = {}
-    for entry in entries:
-        groups.setdefault((entry["tier"], entry["score"]), []).append(entry["rank"])
-    for entry in entries:
-        ranks = groups[entry["tier"], entry["score"]]
-        entry.update(tie_first_rank=min(ranks), tie_last_rank=max(ranks))
-    return entries
+    entries.sort(
+        key=lambda e: (
+            order[e["tier"]],
+            e["score"] if e["score"] is not None else float("inf"),
+            e.get("tie_break_score") or 0,
+            e["index"],
+        )
+    )
+    return assign_tail_ranks(entries)
 
 
 def combine_tile_cost(memory, waves):

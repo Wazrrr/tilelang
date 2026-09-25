@@ -83,10 +83,14 @@ def run_selected(case, configs, original_indices, target, inputs, expected, sett
         else None
     )
     error, winner = None, None
+    empty_carver = report_name == "carver" and not selected
     try:
-        if not supplied:
+        if empty_carver:
+            error = "Carver rejected every supplied configuration; no fallback selection"
+        elif not supplied:
             raise RuntimeError("Auto-tuning failed: all selected candidates failed elaboration")
-        winner = tuner.run(warmup=settings["warmup"], rep=settings["rep"], timeout=settings["timeout"], early_stop=False)
+        else:
+            winner = tuner.run(warmup=settings["warmup"], rep=settings["rep"], timeout=settings["timeout"], early_stop=False)
     except RuntimeError as failure:
         if not str(failure).startswith("Auto-tuning failed:"):
             raise
@@ -106,7 +110,7 @@ def run_selected(case, configs, original_indices, target, inputs, expected, sett
     write_json(output / "outcomes.json", report["configs"])
     write_json(output / "compilation-census.json", compilation_census(report["configs"]))
     result = dict(
-        status="completed" if winner is not None else "failed",
+        status="completed" if winner is not None else "model_unavailable" if empty_carver else "failed",
         reason=error,
         metric=report["metric"],
         score_units=report["score_units"],

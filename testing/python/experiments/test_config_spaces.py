@@ -38,9 +38,9 @@ def test_expanded_retains_attention_example_launches():
 
 
 def test_expanded_retains_native_kda_example_grid():
-    from examples.kda.chunk_o import get_configs
+    from examples.kda.chunk_intra_token_parallel import get_configs
 
-    w = next(w for w in default_workloads() if w.op == "kda_chunk_o")
+    w = next(w for w in default_workloads() if w.op == "kda_chunk_intra_token_parallel")
     pool = configurations(w, Device("ampere", TARGETS["ampere"]))
     for c in get_configs():
         assert c in pool
@@ -93,7 +93,7 @@ from dataclasses import replace
 from experiments.common.spec import *
 w = default_workloads()[0]
 assert w.config_space == 'expanded'
-assert len(configurations(w, Device('ampere', TARGETS['ampere']))) == 2304
+assert len(configurations(w, Device('ampere', TARGETS['ampere']))) == 576
 assert not {'torch','tilelang','xgboost','numpy'} & sys.modules.keys()
 """
     subprocess.run([sys.executable, "-c", code], check=True)
