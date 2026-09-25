@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from tiletune_core import AnalysisReport, KernelFacts, backend_model, evaluate
+from tiletune_core import AnalysisReport, KernelFacts, backend_model, classify_bound, evaluate
 from tiletune_core.budget import AttemptLedger
 from tiletune_core.ranking import rank_records, select_top_k
 
@@ -37,6 +37,12 @@ def fixture(backend="ascend910b"):
         max_resident=1,
     )
     return facts, model
+
+
+def test_bound_classifier_is_exported():
+    assert classify_bound(1024, 4, 200) == "compute"
+    assert classify_bound(100, 4, 200) == "memory"
+    assert classify_bound(None, 4, 200) is None
 
 
 @pytest.mark.parametrize("backend", ["ascend910b", "cdna4"])

@@ -103,6 +103,27 @@ The completed memory report combines global traffic and shared storage under
 the existing `modules.memory_traffic` key. Existing `waves`, register-policy,
 pipeline, ranking, and trace fields retain their meanings.
 
+### Bound-aware memory ranking
+
+`ranking_metric="bound_aware"` is a lightweight extension of the pure `memory`
+ordering for compute-bound kernels. It computes a coarse roofline split from IR
+facts only: dynamic tensor-core FLOPs (`operation_work` multiplied by the
+collected loop visits) over distinct global tensor bytes, compared with the
+architecture's reference ridge point (`engine.BOUND_RIDGE_FLOPS_PER_BYTE`). When
+the kernel is compute-bound, each candidate's primary byte-wave term is
+multiplied by a piecewise-constant resident-warp penalty,
+`ceil(8 / active_warps_per_sm)`, using only the shared-memory and thread limits
+already collected. The bound-aware key is the three-level lexicographic key
+`(U_eff, -D, E)` — effective adjusted byte-waves, then deeper pipeline
+buffering, then fewer logical accesses. It drops the separate launch-wave
+digit of the pure key `(U, W, -D, E)` because `U` already multiplies by the
+wave count. No primitive profile, pipeline recurrence, register allocation
+model, or family policy is added. Memory-bound kernels get the neutral penalty
+`U_eff = U`, and an unknown target or kernel falls back to the pure memory
+ordering. The split, ridge point, occupancy facts, penalty, and key shape
+(`launch_waves_component`) are reported under `modules.bound` and
+`modules.ranking`; `ranking_metric="memory"` remains the neutral pure ordering.
+
 ## Register and timing contracts
 
 `register_pressure.py` describes allocations and establishes an accumulator

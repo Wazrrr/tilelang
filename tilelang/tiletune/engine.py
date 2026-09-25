@@ -127,18 +127,16 @@ def run_modules(context, pressure):
         if context.config.ranking_metric == "bound_aware":
             bound = analyze_compute_intensity(context.collector, context.buffer_facts, memory["grid_blocks"])
             ridge = BOUND_RIDGE_FLOPS_PER_BYTE.get((pressure.get("target_model") or {}).get("architecture"))
-            bound["bound"] = (
-                classify_bound(bound["compute_work"], bound["unique_global_bytes"], ridge) if ridge is not None else None
-            )
+            bound["bound"] = classify_bound(bound["compute_work"], bound["unique_global_bytes"], ridge) if ridge is not None else None
             bound["ridge_flops_per_byte"] = ridge
             if bound["bound"] == "compute":
-                occupancy = resident_warps_estimate(
+                occupancy_facts = resident_warps_estimate(
                     context.collector, (shared or {}).get("shared_memory_bytes_estimate"), context.device_limits
                 )
-                active = (occupancy or {}).get("active_warps_per_sm_estimate") or 0
+                active = (occupancy_facts or {}).get("active_warps_per_sm_estimate") or 0
                 if active > 0:
                     occupancy_penalty = max(1, -(-BOUND_TARGET_ACTIVE_WARPS // active))
-                bound["occupancy"] = occupancy
+                bound["occupancy"] = occupancy_facts
             bound["occupancy_penalty"] = occupancy_penalty
             modules["bound"] = bound
             trace.record("bound", lambda: bound)
@@ -148,6 +146,9 @@ def run_modules(context, pressure):
             (context.device_limits or {}).get("sm_count"),
             memory["pipeline_depth"],
             occupancy_penalty=occupancy_penalty,
+            # The bound-aware key is (U_eff, -D, E): U already multiplies by
+            # the launch wave count, so signing waves twice is redundant.
+            include_launch_waves=context.config.ranking_metric != "bound_aware",
         )
         # An opaque operation may hide memory effects not present in the ledger.
         if memory["unknown"]:
@@ -278,7 +279,7 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
             },
         )
         trace.record("prim_func", lambda: func.script())
-        diagnostics = config.ranking_metric != "memory" or config.memory_diagnostics
+        diagnostics = config.ranking_metric not in ("memory", "bound_aware") or config.memory_diagnostics
         col = _Collector(func, input_values=config.input_values, collect_dependencies=diagnostics, memory_only=not diagnostics)
         if col.memory_only and col.input_values and col.unknown:
             # Simplification can remove an unreachable opaque access or prove

@@ -22,17 +22,24 @@ def _adjusted_byte_waves(byte_waves, grid_blocks, accesses_per_cta, sm_count):
     return _ceil_div(byte_waves * (denominator + shortfall), denominator)
 
 
-def _encode_memory_order(adjusted_byte_waves, waves, pipeline_depth, access_waves):
-    """Exactly encode the lexicographic key ``(U, waves, E, -D)``.
+def _encode_memory_order(adjusted_byte_waves, waves, pipeline_depth, access_waves, include_launch_waves=True):
+    """Exactly encode a lexicographic memory-order key.
+
+    ``include_launch_waves=True`` encodes the four-level key
+    ``(U, waves, -D, E)``. ``False`` encodes the three-level key ``(U, -D, E)``:
+    the launch-wave count is dropped because ``U`` already multiplies by it, so
+    the bound-aware ordering does not charge the same wave count twice.
 
     For every nonempty access ledger ``0 <= E <= B <= U``, and when bytes are
-    nonempty ``waves <= U``. A variable base of ``U + 1`` therefore covers both
-    middle components without an arbitrary upper bound, while pipeline depth
+    nonempty ``waves <= U``. A variable base of ``U + 1`` therefore covers the
+    access component without an arbitrary upper bound, while pipeline depth
     keeps the fixed radix.
     """
     base = adjusted_byte_waves + 1
     depth_inv = PIPELINE_DEPTH_COUNT - pipeline_depth
-    return ((adjusted_byte_waves * base + waves) * base + access_waves) * PIPELINE_DEPTH_RADIX + depth_inv
+    if include_launch_waves:
+        return ((adjusted_byte_waves * base + waves) * PIPELINE_DEPTH_RADIX + depth_inv) * base + access_waves
+    return (adjusted_byte_waves * PIPELINE_DEPTH_RADIX + depth_inv) * base + access_waves
 
 
 def classify_bound(compute_work, unique_bytes, ridge_flops_per_byte):
@@ -58,14 +65,15 @@ def classify_bound(compute_work, unique_bytes, ridge_flops_per_byte):
     return "compute" if intensity >= ridge_flops_per_byte else "memory"
 
 
-def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1, occupancy_penalty=1):
-    """Rank by adjusted byte-waves, launch waves, access-waves, then depth.
+def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1, occupancy_penalty=1, include_launch_waves=True):
+    """Rank by adjusted byte-waves, then depth and access-waves.
 
-    The first component ``U`` is the h200-new adjusted byte-wave term. The
-    second component prefers fewer launch waves inside an equal ``U`` group.
-    The third component prefers fewer logical memory requests, and the fourth
-    prefers deeper pipeline buffering. These are ordinal preferences, not
-    fitted service-time costs.
+    The primary component ``U`` is the h200-new adjusted byte-wave term. With
+    ``include_launch_waves=True`` the next component is the launch-wave count,
+    followed by deeper buffering and then fewer logical memory requests; with
+    ``include_launch_waves=False`` the launch-wave component is dropped and the
+    key is ``(U, -D, E)``. These are ordinal preferences, not fitted
+    service-time costs.
 
     ``occupancy_penalty`` optionally multiplies the primary byte-wave term. It
     is a coarse, piecewise-constant service penalty for configurations whose
@@ -75,6 +83,8 @@ def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1, occupancy_pe
     """
     if type(occupancy_penalty) is not int or occupancy_penalty < 1:
         raise ValueError("occupancy_penalty must be a positive integer")
+    if not isinstance(include_launch_waves, bool):
+        raise ValueError("include_launch_waves must be a bool")
     unknown = []
     for name, value in (("grid_blocks", grid_blocks), ("sm_count", sm_count)):
         if value is None:
@@ -114,7 +124,7 @@ def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1, occupancy_pe
     # Such kernels have no global-memory work to order by wave count.
     encoded_waves = waves if byte_work > 0 else 0
     score = (
-        _encode_memory_order(effective_byte_waves, encoded_waves, pipeline_depth, event_waves)
+        _encode_memory_order(effective_byte_waves, encoded_waves, pipeline_depth, event_waves, include_launch_waves)
         if effective_byte_waves is not None and event_waves is not None
         else None
     )
@@ -125,8 +135,12 @@ def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1, occupancy_pe
         "tie_break_score": event_waves,
         "units": "lexicographic memory-order units",
         "formula": (
-            "((effective_byte_waves * (effective_byte_waves + 1) + waves) * "
-            "(effective_byte_waves + 1) + access_waves) * 65536 + (65535 - pipeline_depth); "
+            "((effective_byte_waves * (effective_byte_waves + 1) + waves) * 65536 + "
+            "(65535 - pipeline_depth)) * (effective_byte_waves + 1) + access_waves; "
+            "effective_byte_waves = adjusted_byte_waves * occupancy_penalty"
+            if include_launch_waves
+            else "(effective_byte_waves * 65536 + (65535 - pipeline_depth)) * "
+            "(effective_byte_waves + 1) + access_waves; "
             "effective_byte_waves = adjusted_byte_waves * occupancy_penalty"
         ),
         "tie_break_formula": "logical_memory_accesses_per_cta * ceil(grid_blocks / sm_count)",
@@ -134,6 +148,7 @@ def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1, occupancy_pe
         "logical_byte_waves": byte_waves,
         "adjusted_logical_byte_waves": effective_byte_waves,
         "occupancy_penalty": occupancy_penalty,
+        "launch_waves_component": include_launch_waves,
         "logical_memory_accesses_per_cta": events if not unknown else None,
         "logical_memory_access_waves": event_waves,
         "single_cta_waves": waves,
@@ -147,13 +162,19 @@ def score_memory(accesses, grid_blocks, sm_count, pipeline_depth=1, occupancy_pe
             "single-CTA waves account for grid size without predicting physical residency",
             "three SM waves are an E2-fitted ordinal launch target, not a physical occupancy threshold",
             "per-CTA logical access count dampens the launch-underfill penalty applied to byte-waves",
-            "fewer launch waves order equal adjusted byte-waves; fewer access-waves order equal adjusted byte-waves and waves",
-            "deeper buffering orders otherwise equal candidates",
-            "exact integer encoding of (adjusted byte-waves, waves, access-waves, -pipeline depth); equal tuples share one tail rank",
+            "fewer launch waves order equal adjusted byte-waves; deeper buffering orders equal adjusted byte-waves and waves",
+            "fewer access-waves order otherwise equal candidates",
+            "exact integer encoding of (adjusted byte-waves, waves, -pipeline depth, access-waves) or (adjusted byte-waves, -pipeline depth, access-waves); equal tuples share one tail rank",
             "occupancy_penalty scales only the primary byte-wave term; it never removes or rejects a candidate",
-        ] + ([] if occupancy_penalty == 1 else [
-            "a coarse resident-warp service penalty ordered the configured schedule; it is not a measured latency",
-        ]) + [
+        ]
+        + (
+            []
+            if occupancy_penalty == 1
+            else [
+                "a coarse resident-warp service penalty ordered the configured schedule; it is not a measured latency",
+            ]
+        )
+        + [
             "storage and scheduling uncertainty do not exclude a resolved memory score",
         ],
     }

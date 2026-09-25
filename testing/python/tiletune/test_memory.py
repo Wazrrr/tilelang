@@ -6,7 +6,7 @@ import pytest
 import tilelang.language as T
 
 from tilelang.tiletune import analyze_prim_func, TileTuneConfig
-from tiletune_core.memory import score_memory
+from tiletune_core.memory import classify_bound, score_memory
 from tiletune_core.ranking import rank_records, select_top_k
 from test_analysis import gemm
 from test_cost import LIMITS
@@ -135,6 +135,102 @@ def test_missing_memory_effects_and_device_inputs_remain_unknown():
     result = analyze_prim_func(gemm(), dict(ranking_metric="memory"), target=TARGET)
     assert result["tile_cost"]["score"] is None
     assert "unresolved sm_count" in result["tile_cost"]["unknown"]
+
+
+def test_bound_aware_metric_stays_lightweight(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("bound-aware memory mode invoked a timing/occupancy/specialization model")
+
+    monkeypatch.setattr("tilelang.tiletune.pipeline.analyze_pipeline", forbidden)
+    monkeypatch.setattr("tilelang.tiletune.occupancy.analyze_waves", forbidden)
+    monkeypatch.setattr("tilelang.tiletune.engine.predict_warp_specialization", forbidden)
+    monkeypatch.setattr("tilelang.tiletune.engine.select_specialization", forbidden)
+    monkeypatch.setattr("tilelang.tiletune.families.base.KernelSpecialization.__init__", forbidden)
+    result = analyze_prim_func(
+        gemm(stages=2),
+        {"ranking_metric": "bound_aware"},
+        target={"kind": "cuda", "arch": "sm_80"},
+        device_limits=LIMITS,
+    )
+    assert result["modules"]["bound"]["precision"] == "estimate"
+    assert result["modules"]["pipeline_overlap"]["precision"] == "disabled"
+    assert result["modules"]["waves"]["precision"] == "disabled"
+
+
+def test_bound_aware_key_drops_the_duplicate_launch_wave_component():
+    access = [dict(operation=0, bytes=64, visits=4)]
+    with_waves = score_memory(access, 132, 132)
+    without_waves = score_memory(access, 132, 132, include_launch_waves=False)
+    assert with_waves["launch_waves_component"] is True
+    assert without_waves["launch_waves_component"] is False
+    # The three-level key is exactly (U, -depth, access-waves).
+    base = without_waves["adjusted_logical_byte_waves"] + 1
+    depth_inv = 65535 - without_waves["pipeline_depth"]
+    expected = (without_waves["adjusted_logical_byte_waves"] * 65536 + depth_inv) * base
+    expected += without_waves["logical_memory_access_waves"]
+    assert without_waves["score"] == expected
+    assert without_waves["score"] != with_waves["score"]
+
+
+def test_bound_classifier_uses_the_ridge_point():
+    assert classify_bound(4096, 8, 200) == "compute"
+    assert classify_bound(400, 8, 200) == "memory"
+    assert classify_bound(0, 8, 200) == "memory"
+    assert classify_bound(None, 8, 200) is None
+    assert classify_bound(4096, None, 200) is None
+    assert classify_bound(4096, 0, 200) is None
+    with pytest.raises(ValueError):
+        classify_bound(-1, 8, 200)
+    with pytest.raises(ValueError):
+        classify_bound(4096, 8, 0)
+
+
+def test_occupancy_penalty_scales_only_byte_waves():
+    access = [dict(operation=0, bytes=64, visits=4)]
+    neutral = score_memory(access, 132, 132)
+    penalized = score_memory(access, 132, 132, occupancy_penalty=4)
+    assert penalized["score"] > neutral["score"]
+    assert penalized["tie_break_score"] == neutral["tie_break_score"]
+    assert penalized["occupancy_penalty"] == 4
+    assert penalized["adjusted_logical_byte_waves"] == 4 * neutral["adjusted_logical_byte_waves"]
+    with pytest.raises(ValueError, match="occupancy_penalty"):
+        score_memory(access, 132, 132, occupancy_penalty=0)
+
+
+def test_bound_aware_metric_reports_and_applies_the_roofline_split():
+    ampere = {"kind": "cuda", "arch": "sm_80"}
+    result = analyze_prim_func(
+        gemm(stages=2), {"ranking_metric": "bound_aware", "memory_diagnostics": True}, target=ampere, device_limits=LIMITS
+    )
+    bound = result["modules"]["bound"]
+    assert bound["bound"] in ("compute", "memory")
+    assert bound["ridge_flops_per_byte"] == 200.0
+    assert result["tile_cost"]["ranking_metric"] == "bound_aware"
+    memory = result["modules"]["memory_traffic"]
+    assert result["modules"]["ranking"]["launch_waves_component"] is False
+    expected = score_memory(
+        memory["accesses"],
+        memory["grid_blocks"],
+        LIMITS["sm_count"],
+        memory["pipeline_depth"],
+        occupancy_penalty=bound["occupancy_penalty"],
+        include_launch_waves=False,
+    )
+    assert result["tile_cost"]["score"] == expected["score"]
+
+
+def test_bound_aware_keeps_a_pure_copy_on_memory_order():
+    @T.prim_func
+    def kernel(A: T.Tensor((4096,), "float16"), B: T.Tensor((4096,), "float16")):
+        with T.Kernel(1, threads=128):
+            tile = T.alloc_shared((96,), "float16")
+            for k in T.Pipelined(T.ceildiv(4096, 96), num_stages=2):
+                T.copy(A[k * 96], tile)
+                T.copy(tile, B[k * 96])
+
+    result = analyze_prim_func(kernel, {"ranking_metric": "bound_aware"}, target={"kind": "cuda", "arch": "sm_80"}, device_limits=LIMITS)
+    assert result["modules"]["bound"]["bound"] == "memory"
+    assert result["modules"]["bound"]["occupancy_penalty"] == 1
 
 
 def test_wave_rounding_memory_ties_and_measurement_independence():
