@@ -18,6 +18,15 @@ from .trace import AnalysisTrace, collector_snapshot, propagation_snapshot
 from .families import select_specialization
 
 
+# Datasheet roofline split (dense tensor-core FLOPs per byte) used only to pick
+# which lightweight analysis applies. These are reference peaks, not fitted or
+# measured service rates; an unknown architecture stays on pure memory order.
+BOUND_RIDGE_FLOPS_PER_BYTE = {"ampere": 200.0}
+# Resident warps per SM at which latency hiding is assumed saturated. Below it
+# the configured schedule is charged a coarse, piecewise-constant penalty.
+BOUND_TARGET_ACTIVE_WARPS = 8
+
+
 @dataclass
 class AnalysisContext:
     func: object
@@ -36,7 +45,7 @@ def run_modules(context, pressure):
     from .ranking import apply_ranking_metric
 
     trace = context.trace
-    memory_mode = context.config.ranking_metric == "memory"
+    memory_mode = context.config.ranking_metric in ("memory", "bound_aware")
     diagnostics = not memory_mode or context.config.memory_diagnostics
     if memory_mode:
         specialization = None
@@ -105,8 +114,8 @@ def run_modules(context, pressure):
     tile_cost = {"score": None, "precision": "disabled"}
     modules.update({name: {"precision": "disabled"} for name in ("memory_traffic", "waves", "pipeline_overlap", "ranking")})
     if context.config.ranking and memory_mode:
-        from .memory import analyze_memory_accesses
-        from tiletune_core.memory import score_memory
+        from .memory import analyze_compute_intensity, analyze_memory_accesses, resident_warps_estimate
+        from tiletune_core.memory import classify_bound, score_memory
 
         memory = analyze_memory_accesses(context.collector, context.buffer_facts)
         if not diagnostics:
@@ -114,8 +123,31 @@ def run_modules(context, pressure):
                 shared_memory_bytes_estimate=shared["shared_memory_bytes_estimate"],
                 shared_storage_plan=dict(precision="disabled", reason="enable memory_diagnostics for shared tile lifetimes"),
             )
+        occupancy_penalty = 1
+        if context.config.ranking_metric == "bound_aware":
+            bound = analyze_compute_intensity(context.collector, context.buffer_facts, memory["grid_blocks"])
+            ridge = BOUND_RIDGE_FLOPS_PER_BYTE.get((pressure.get("target_model") or {}).get("architecture"))
+            bound["bound"] = (
+                classify_bound(bound["compute_work"], bound["unique_global_bytes"], ridge) if ridge is not None else None
+            )
+            bound["ridge_flops_per_byte"] = ridge
+            if bound["bound"] == "compute":
+                occupancy = resident_warps_estimate(
+                    context.collector, (shared or {}).get("shared_memory_bytes_estimate"), context.device_limits
+                )
+                active = (occupancy or {}).get("active_warps_per_sm_estimate") or 0
+                if active > 0:
+                    occupancy_penalty = max(1, -(-BOUND_TARGET_ACTIVE_WARPS // active))
+                bound["occupancy"] = occupancy
+            bound["occupancy_penalty"] = occupancy_penalty
+            modules["bound"] = bound
+            trace.record("bound", lambda: bound)
         ranking = score_memory(
-            memory["accesses"], memory["grid_blocks"], (context.device_limits or {}).get("sm_count"), memory["pipeline_depth"]
+            memory["accesses"],
+            memory["grid_blocks"],
+            (context.device_limits or {}).get("sm_count"),
+            memory["pipeline_depth"],
+            occupancy_penalty=occupancy_penalty,
         )
         # An opaque operation may hide memory effects not present in the ledger.
         if memory["unknown"]:
@@ -128,7 +160,7 @@ def run_modules(context, pressure):
             tie_break_score=ranking["tie_break_score"],
             logical_byte_waves=ranking["logical_byte_waves"],
             score_formula=ranking["formula"],
-            ranking_metric="memory",
+            ranking_metric=context.config.ranking_metric,
             precision=ranking["precision"],
         )
         tile_cost["unknown"] = ranking["unknown"]
@@ -140,7 +172,10 @@ def run_modules(context, pressure):
             import json
             from pathlib import Path
 
-            facts = dict(version=3, backend="memory.v3", **memory, sm_count=(context.device_limits or {}).get("sm_count"))
+            backend = "memory.v3" if context.config.ranking_metric == "memory" else "bound_aware.v1"
+            facts = dict(version=3, backend=backend, **memory, sm_count=(context.device_limits or {}).get("sm_count"))
+            if context.config.ranking_metric == "bound_aware":
+                facts["bound"] = modules.get("bound")
             path = Path(context.config.facts_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(facts, indent=2, allow_nan=False) + "\n")
