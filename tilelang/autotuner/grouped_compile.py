@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import contextlib
 import time
+import threading
 from dataclasses import replace
 import json
-from typing import Any
+from typing import Any, Literal
 from collections.abc import Callable
 
 from tilelang import tvm
@@ -38,6 +39,8 @@ from tilelang.utils.autotune_timing import timed_autotune_stage
 from tilelang.utils.pass_timing import build_pass_instruments, report_pass_timing_on_exit
 
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
+GroupedCompileRuntimeSetup = Literal["eager", "lazy"]
+GROUPED_COMPILE_RUNTIME_SETUPS = {"eager", "lazy"}
 
 
 def compile_grouped_unit_tvm_ffi(
@@ -46,6 +49,7 @@ def compile_grouped_unit_tvm_ffi(
     elaborate_func: Callable[..., PrimFunc],
     filter_config: AutotuneFilterConfig | None = None,
     tiletune_session=None,
+    runtime_setup: GroupedCompileRuntimeSetup = "eager",
     _prepared_programs=None,
 ) -> list[CompileUnitResult]:
     """Compile one grouped unit for CUDA+tvm_ffi backend.
@@ -54,11 +58,17 @@ def compile_grouped_unit_tvm_ffi(
     1. Elaborate each config into a PrimFunc.
     2. Lower each PrimFunc into host/device IR modules.
     3. Merge all device IR into one IRModule and compile device code once.
-    4. Merge kept host IR, build one host runtime module, and import the shared device module.
-    5. Construct per-config JITKernel objects that dispatch to named entries in the shared executable.
+    4. Merge kept host IR and build one shared host executable.
+    5. Optionally set up that executable eagerly; otherwise first use does it lazily.
+    6. Construct per-config JITKernel objects that dispatch through the shared executable.
     Shared build failures bisect unfinished configs down to singleton builds,
     reusing lowered IR and preserving per-config rejections without replacement.
     """
+
+    if runtime_setup not in GROUPED_COMPILE_RUNTIME_SETUPS:
+        raise ValueError(
+            f"runtime_setup must be one of {sorted(GROUPED_COMPILE_RUNTIME_SETUPS)}, got {runtime_setup!r}"
+        )
 
     if _prepared_programs is None:
         # Function attributes are available only after elaboration. Split groups
@@ -105,6 +115,7 @@ def compile_grouped_unit_tvm_ffi(
                     elaborate_func,
                     filter_config=filter_config,
                     tiletune_session=tiletune_session,
+                    runtime_setup=runtime_setup,
                     _prepared_programs=programs,
                 )
             )
@@ -416,12 +427,14 @@ def compile_grouped_unit_tvm_ffi(
                 grouped_host_rt_mod.import_module(grouped_device_rt_mod)
 
             shared_executable = tvm.runtime.Executable(grouped_host_rt_mod)
-            with timed_autotune_stage(
-                "grouped.executable_jit",
-                group_size=runtime_group_size,
-                configs=runtime_grouped_config_indices,
-            ):
-                shared_executable.jit()
+            shared_executable_lock = threading.Lock()
+            if runtime_setup == "eager":
+                with timed_autotune_stage(
+                    "grouped.executable_jit",
+                    group_size=runtime_group_size,
+                    configs=runtime_grouped_config_indices,
+                ):
+                    shared_executable.jit()
 
             for item in runtime_items:
                 idx = item["idx"]
@@ -453,6 +466,7 @@ def compile_grouped_unit_tvm_ffi(
                             device_kernel_source=artifact.kernel_source,
                             entry_name=kernel_symbol,
                             executable=shared_executable,
+                            executable_lock=shared_executable_lock,
                             verbose=compile_args.verbose,
                             pass_configs=pass_configs,
                         )

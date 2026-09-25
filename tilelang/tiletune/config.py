@@ -18,6 +18,9 @@ class TileTuneConfig:
     # Physical occupancy and post-compile limits remain strict and independent.
     attention_spill_budget_registers_per_thread: int = 0
     report_path: str | None = None
+    # Disable all pre-lowering analysis for compiler-resource-only experiments.
+    # The post-compile policy still observes exact compiler resource counters.
+    pre_lowering_analysis: bool = True
     ranking: bool = True
     top_k: int | None = None  # Select this many scored candidates, expanding to retain a complete boundary tie.
     strict_top_k: bool = False  # Keep only complete score groups within top_k.
@@ -70,12 +73,16 @@ class TileTuneConfig:
             raise ValueError("ranking_metric must be memory, traffic_waves or pipeline_time")
         if not isinstance(self.memory_diagnostics, bool):
             raise ValueError("memory_diagnostics must be a bool")
+        if not isinstance(self.pre_lowering_analysis, bool):
+            raise ValueError("pre_lowering_analysis must be a bool")
+        if not isinstance(self.ranking, bool):
+            raise ValueError("ranking must be a bool")
+        if not self.pre_lowering_analysis and self.ranking:
+            raise ValueError("ranking requires pre_lowering_analysis=True")
         if self.performance_model is not None:
             from .profiling.profile_schema import validate_performance_model
 
             validate_performance_model(self.performance_model)
-        if not isinstance(self.ranking, bool):
-            raise ValueError("ranking must be a bool")
         if self.alpha is not None:
             import math
 

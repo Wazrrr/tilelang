@@ -186,6 +186,9 @@ class TileTuneSession:
         except Exception as error:
             record.update(status="elaboration_failed", error=str(error))
             raise
+        if not self.config.pre_lowering_analysis:
+            record["status"] = "elaborated"
+            return program
         with self.stage(idx, "analysis"):
             try:
                 result = analyze_prim_func(
@@ -320,14 +323,18 @@ class TileTuneSession:
         ranking = self.ranking if self.ranking is not None else rank_records(self.records) if self.config.ranking else []
         for entry in ranking:
             self.records[entry["index"]]["ranking"] = entry
+        if not self.config.pre_lowering_analysis:
+            ranking_note = "Pre-lowering analysis and ranking disabled; all configs proceed to compilation and the compiler-resource policy."
+        elif self.selection is not None:
+            ranking_note = "All configs retained; scores use only pre-lowering analysis. Top-k selection is frozen before compilation."
+        else:
+            ranking_note = "All configs retained in the report; scores use only pre-lowering tile analysis. No top-K cutoff is applied."
         report = {
             "analysis_version": ANALYSIS_VERSION,
             "settings": self.config.to_cache_key_dict(),
             "device_limits": self.device_limits,
             "ranking": ranking,
-            "ranking_note": "All configs retained; scores use only pre-lowering analysis. Top-k selection is frozen before compilation."
-            if self.selection is not None
-            else "All configs retained in the report; scores use only pre-lowering tile analysis. No top-K cutoff is applied.",
+            "ranking_note": ranking_note,
             "selection": self.selection,
             "configs": self.records,
             "wall_time_ms": (time.perf_counter() - self.started) * 1000,

@@ -24,16 +24,25 @@ from experiments.utils.io import write_json
 
 MODES = {"E1": "baseline", "E2": "multi_gpu", "E3": "tiletune"}
 SETTINGS = dict(
-    workers=64,
+    # One compiler pool per workload, shared by all of that workload's GPUs.
+    # In E3 this is the total across the four benchmark GPUs, not 64 per GPU.
+    compiler_workers_total=64,
     warmup=10,
     rep=50,
     timeout=60,
     group_size=8,
     seed=123,
-    benchmark_backend="cupti",
+    benchmark_backend="event",
     cpu_contention_policy="observe",
 )
+EXPERIMENT_SETTINGS = {
+    "E1": dict(ranking_metric=None, alpha=None, post_compile_filter=False),
+    "E2": dict(ranking_metric=None, alpha=None, post_compile_filter=False),
+    "E3": dict(ranking_metric="memory", alpha=0.5, post_compile_filter=True),
+}
 RETRYABLE = {"contended", "host_contended", "monitor_gap"}
+COORDINATOR_SOURCE = "experiments/common/h200.py"
+ALLOCATION_REQUEST_KEYS = {"cpu_ids", "gpu_uuids", "parent_pid"}
 
 
 def read(path):
@@ -46,6 +55,45 @@ def digest(value):
 
 def file_hash(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def measurement_source_identity(identity):
+    """Exclude coordinator-only code while retaining measured-code identity."""
+    if not identity:
+        return identity
+    return dict(
+        identity,
+        sources={key: value for key, value in identity.get("sources", {}).items() if key != COORDINATOR_SOURCE},
+    )
+
+
+def workload_contract(request):
+    """Return the reusable measurement contract, independent of allocation."""
+    contract = {key: value for key, value in request.items() if key not in ALLOCATION_REQUEST_KEYS}
+    if "source_identity" in contract:
+        contract["source_identity"] = measurement_source_identity(contract["source_identity"])
+    return contract
+
+
+def resume_contract(identity):
+    """Return manifest fields that must remain fixed across allocations."""
+    return dict(
+        plan=identity.get("plan"),
+        source_identity=measurement_source_identity(identity.get("source_identity")),
+        python=identity.get("python"),
+        revision=identity.get("revision"),
+    )
+
+
+def allocation_history(manifest):
+    """Read v3 allocation history, migrating a v2 manifest in memory."""
+    if not manifest:
+        return []
+    if manifest.get("allocations"):
+        return list(manifest["allocations"])
+    if manifest.get("gpus") is not None and manifest.get("cpu_pools") is not None:
+        return [dict(gpus=manifest["gpus"], cpu_pools=manifest["cpu_pools"])]
+    return []
 
 
 def source_identity():
@@ -89,7 +137,7 @@ def study_plan(*, workloads=None, experiments=None, preflight=False):
                     indices=indices,
                     configs=[pool[i] for i in indices],
                     gpu_count=1 if experiment == "E1" else 4,
-                    settings=dict(SETTINGS, preflight=preflight),
+                    settings=dict(SETTINGS, **EXPERIMENT_SETTINGS[experiment], preflight=preflight),
                 )
             )
     return rows
@@ -131,7 +179,11 @@ def validate_attempt(output, request):
     summary = read(output / "summary.json")
     if summary.get("status") != "completed" or summary.get("config_count") != len(request["configs"]):
         raise ValueError("incomplete worker summary")
-    if summary.get("compiler_workers") != request["settings"]["workers"] or summary.get("benchmark_gpu_count") != request["gpu_count"]:
+    if (
+        summary.get("compiler_workers_total") != request["settings"]["compiler_workers_total"]
+        or summary.get("compiler_workers") != request["settings"]["compiler_workers_total"]
+        or summary.get("benchmark_gpu_count") != request["gpu_count"]
+    ):
         raise ValueError("worker did not use the frozen CPU/GPU counts")
     experiment = read(output / "experiment.json")
     if request.get("source_identity") and experiment.get("source_identity") != request["source_identity"]:
@@ -141,7 +193,9 @@ def validate_attempt(output, request):
     records = read(output / "outcomes.json")
     from experiments.utils.results import TERMINAL
 
-    allowed = TERMINAL | ({"not_selected"} if request["experiment"] == "E3" else set())
+    analytical = request["variant"] == "tiletune"
+    post_compile_only = request["settings"].get("post_compile_filter") is True and not analytical
+    allowed = TERMINAL | ({"not_selected"} if analytical else set())
     if request["settings"]["preflight"]:
         allowed |= {"preflight_omitted"}
     if len(records) != len(request["configs"]):
@@ -163,12 +217,19 @@ def validate_attempt(output, request):
         r["config"] == winner and r["status"] == "benchmarked" and r["latency_ms"] == summary.get("winner_latency_ms") for r in records
     ):
         raise ValueError("winner is absent from successful candidate measurements")
-    if request["experiment"] == "E3":
+    if analytical:
         report = read(output / "tiletune.json")
+        report_settings = report.get("settings", {})
         selection = report["selection"]
         selected = selection["selected_indices"]
         if (
-            selection.get("alpha") != 0.5
+            request["settings"].get("ranking_metric") != "memory"
+            or request["settings"].get("alpha") != 0.5
+            or request["settings"].get("post_compile_filter") is not True
+            or report_settings.get("ranking_metric") != "memory"
+            or report_settings.get("alpha") != 0.5
+            or (report_settings.get("post_compile_policy") or {}).get("mode") != "reject"
+            or selection.get("alpha") != 0.5
             or not selection.get("strict_budget")
             or selection.get("pool_size") != len(records)
             or len(selected) > len(records) // 2
@@ -176,6 +237,22 @@ def validate_attempt(output, request):
             or selection != read(output / "selection.json")
         ):
             raise ValueError("TileTune selection violates the frozen alpha contract")
+    elif post_compile_only:
+        report = read(output / "tiletune.json")
+        report_settings = report.get("settings", {})
+        if (
+            request["settings"].get("ranking_metric") is not None
+            or request["settings"].get("alpha") is not None
+            or report_settings.get("pre_lowering_analysis") is not False
+            or report_settings.get("ranking") is not False
+            or report_settings.get("alpha") is not None
+            or (report_settings.get("post_compile_policy") or {}).get("mode") != "reject"
+            or report.get("selection") is not None
+            or report.get("ranking") != []
+            or len(report.get("configs", [])) != len(records)
+            or any(record.get("pre_lowering") is not None for record in report.get("configs", []))
+        ):
+            raise ValueError("post-compile-only mode performed pre-lowering analysis or violated its compiler policy")
     return summary
 
 
@@ -184,13 +261,18 @@ def completed_attempt(case_dir, request):
     if not marker.exists():
         return None
     completion = read(marker)
-    if completion["request_id"] != digest(request):
-        raise ValueError("completed workload belongs to a different request")
     output = case_dir / completion["attempt"]
     for name, expected in completion["files"].items():
         if file_hash(output / name) != expected:
             raise ValueError(f"completed artifact changed: {output / name}")
-    validate_attempt(output, request)
+    saved_request = read(output / "request.json")
+    saved_identity = {key: value for key, value in saved_request.items() if key != "parent_pid"}
+    if completion["request_id"] != digest(saved_identity):
+        raise ValueError("completion marker does not match its saved request")
+    if workload_contract(saved_identity) != workload_contract(request):
+        raise ValueError("completed workload belongs to a different request")
+    # Validate the artifact against the allocation that actually measured it.
+    validate_attempt(output, saved_identity)
     return output
 
 
@@ -225,8 +307,8 @@ def _run_item(
             CUDA_VISIBLE_DEVICES=",".join(g["uuid"] for g in active_gpus),
             TILELANG_DISABLE_CACHE="1",
             TILELANG_AUTO_TUNING_DISABLE_CACHE="1",
-            TILELANG_AUTO_TUNING_CPU_COUNTS=str(request["settings"]["workers"]),
-            TILELANG_AUTO_TUNING_MAX_CPU_COUNT=str(request["settings"]["workers"]),
+            TILELANG_AUTO_TUNING_CPU_COUNTS=str(request["settings"]["compiler_workers_total"]),
+            TILELANG_AUTO_TUNING_MAX_CPU_COUNT=str(request["settings"]["compiler_workers_total"]),
             TILELANG_AUTOTUNE_TIMING_LOG=str(output / "timings.tsv"),
             TMPDIR=str(temporary),
             OMP_NUM_THREADS="1",
@@ -280,8 +362,10 @@ def _run_item(
             "compilation.json",
             "benchmarks.tsv",
         ]
-        if item["experiment"] == "E3":
-            files += ["tiletune.json", "selection.json"]
+        if item["settings"].get("post_compile_filter") is True:
+            files += ["tiletune.json"]
+        if item["variant"] == "tiletune":
+            files += ["selection.json"]
         write_json(output / "attempt.json", dict(status="completed", request_id=digest(request)))
         write_json(
             case_dir / "completed.json",
@@ -530,7 +614,9 @@ def main(argv=None):
                     plan=plan,
                     max_gpus=required_gpu_count,
                     scheduling="resource_driven",
-                    cpu_ids_per_workload=SETTINGS["workers"] + 8,
+                    compiler_workers_total=SETTINGS["compiler_workers_total"],
+                    compiler_worker_scope="one workload; shared across all benchmark GPUs",
+                    cpu_ids_per_workload=SETTINGS["compiler_workers_total"] + 8,
                     concurrency=concurrency,
                 ),
                 indent=2,
@@ -548,24 +634,39 @@ def main(argv=None):
     if args.resume and not (root / "manifest.json").exists():
         raise ValueError("resume requires an existing frozen manifest")
     frozen = read(root / "manifest.json") if args.resume else None
+    if frozen and frozen.get("version") not in (2, 3):
+        raise ValueError("unsupported manifest version")
+    allocations = allocation_history(frozen)
     observed = snapshot()
-    requested = args.gpus if args.gpus is not None else [int(g["index"]) for g in frozen["gpus"]] if frozen else None
+    requested = (
+        args.gpus
+        if args.gpus is not None
+        else [int(g["index"]) for g in allocations[-1]["gpus"]]
+        if allocations
+        else None
+    )
     gpus = select_gpus(observed, requested, count=required_gpu_count)
     identity = dict(
-        version=2,
+        version=3,
         plan=plan,
         gpus=gpus,
         source_identity=source_identity(),
         python=str(Path(sys.executable).resolve()),
         revision=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
     )
-    if frozen and any(frozen.get(key) != value for key, value in identity.items()):
-        raise ValueError("resume identity changed: workload, pool, code, settings, interpreter or GPUs differ")
+    if frozen and resume_contract(frozen) != resume_contract(identity):
+        raise ValueError("resume identity changed: workload, pool, measured code, settings, interpreter or revision differ")
     with measurement_lease(gpus) as leases, interruptible():
         affinity = set(os.sched_getaffinity(0))
-        cpu_ids_per_workload = SETTINGS["workers"] + 8
+        cpu_ids_per_workload = SETTINGS["compiler_workers_total"] + 8
         pool_count = min(len(gpus), len(affinity) // cpu_ids_per_workload)
-        cpu_pools = frozen["cpu_pools"] if frozen else select_cpu_pools(SETTINGS["workers"], pool_count)
+        previous = allocations[-1] if allocations else None
+        same_gpus = previous is not None and previous["gpus"] == gpus
+        cpu_pools = (
+            previous["cpu_pools"]
+            if same_gpus
+            else select_cpu_pools(SETTINGS["compiler_workers_total"], pool_count)
+        )
         assigned = set().union(*(set(pool) for pool in cpu_pools))
         if (
             not cpu_pools
@@ -573,10 +674,12 @@ def main(argv=None):
             or sum(map(len, cpu_pools)) != len(assigned)
             or not assigned <= affinity
         ):
-            raise RuntimeError("frozen CPU affinity is no longer available")
+            raise RuntimeError("selected CPU affinity is no longer available")
         root.mkdir(parents=True, exist_ok=args.resume)
-        if not frozen:
-            write_json(root / "manifest.json", dict(identity, cpu_pools=cpu_pools))
+        allocation = dict(gpus=gpus, cpu_pools=cpu_pools)
+        if not allocations or allocations[-1] != allocation:
+            allocations.append(allocation)
+        write_json(root / "manifest.json", dict(identity, cpu_pools=cpu_pools, allocations=allocations))
         # The coordinator and its monitor do not compete with compilation threads.
         spare = affinity - assigned
         if not spare:

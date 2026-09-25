@@ -22,6 +22,8 @@ from tqdm.auto import tqdm
 import logging
 import concurrent.futures
 import contextlib
+import math
+from numbers import Real
 import queue
 import torch
 import os
@@ -77,6 +79,13 @@ _PASS_CONFIGS_KEY = "__pass_configs__"
 
 class TimeoutException(Exception):
     pass
+
+
+def _require_positive_finite_latency(latency: object) -> float:
+    """Reject missing profiler activity instead of promoting it to a winner."""
+    if isinstance(latency, bool) or not isinstance(latency, Real) or not math.isfinite(float(latency)) or latency <= 0:
+        raise ValueError(f"benchmark returned invalid latency {latency!r}; expected a finite positive number")
+    return float(latency)
 
 
 def _timeout_handler(signum, frame):  # pragma: no cover - signal handler
@@ -871,6 +880,7 @@ class AutoTuner:
         config_args: list[ConfigArg],
         grouped_compile_active: bool,
         group_compile_size: int,
+        grouped_compile_runtime_setup: str,
         compile_func: Callable[..., tilelang.JITKernel],
         elaborate_func: Callable[..., PrimFunc],
         config_indices: list[int] | None = None,
@@ -925,6 +935,7 @@ class AutoTuner:
                         elaborate_func=get_elaborate_func(),
                         filter_config=self.filter_args if filter_active else None,
                         tiletune_session=self.tiletune_session,
+                        runtime_setup=grouped_compile_runtime_setup,
                     )
             compile_impl = get_compile_func()
             elaborate_impl = get_elaborate_func()
@@ -944,7 +955,11 @@ class AutoTuner:
                                 unit_results.append((idx, config_arg, jit_kernel, None))
                                 continue
                             results = compile_grouped_unit_tvm_ffi(
-                                [(idx, config_arg)], effective_args, elaborate_impl, tiletune_session=self.tiletune_session
+                                [(idx, config_arg)],
+                                effective_args,
+                                elaborate_impl,
+                                tiletune_session=self.tiletune_session,
+                                runtime_setup=grouped_compile_runtime_setup,
                             )
                             unit_results.extend(results)
                             continue
@@ -1227,6 +1242,7 @@ class AutoTuner:
                 benchmark_state.shared_best_latency[0] * early_stop_factor if benchmark_state.shared_best_latency is not None else None
             ),
         )
+        latency = _require_positive_finite_latency(latency)
 
         if ref_latency_cache is None and ref_prog is not None:
             ref_input_tensors_cache = ref_input_tensors_supply()
@@ -1318,6 +1334,7 @@ class AutoTuner:
         use_pipeline: bool = False,
         enable_grouped_compile: bool = False,
         group_compile_size: int = 2,
+        grouped_compile_runtime_setup: str = "eager",
         benchmark_devices: list[int] | None = None,
         benchmark_multi_gpu: bool = False,
         early_stop: bool = False,
@@ -1332,6 +1349,9 @@ class AutoTuner:
             use_pipeline: Whether to pipeline benchmarking with compilation.
             enable_grouped_compile: Whether to enable grouped compilation.
             group_compile_size: Number of configurations in one compile unit.
+            grouped_compile_runtime_setup: ``eager`` sets up the shared
+                executable during compilation; ``lazy`` defers the same setup
+                until the group's first benchmark invocation.
             benchmark_devices: CUDA device ordinals used for benchmark workers when benchmark_multi_gpu=True.
             benchmark_multi_gpu: Whether to benchmark configurations across multiple CUDA GPUs.
             early_stop: Whether to skip full benchmark when estimate exceeds best * early_stop_factor.
@@ -1363,6 +1383,11 @@ class AutoTuner:
 
         if early_stop and early_stop_factor < 1.0:
             raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
+        if grouped_compile_runtime_setup not in {"eager", "lazy"}:
+            raise ValueError(
+                "grouped_compile_runtime_setup must be 'eager' or 'lazy', "
+                f"got {grouped_compile_runtime_setup!r}"
+            )
 
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
@@ -1545,6 +1570,7 @@ class AutoTuner:
             config_args=config_args,
             grouped_compile_active=grouped_compile_active,
             group_compile_size=group_compile_size,
+            grouped_compile_runtime_setup=grouped_compile_runtime_setup,
             compile_func=compile_func,
             elaborate_func=elaborate_func,
             config_indices=compile_indices,

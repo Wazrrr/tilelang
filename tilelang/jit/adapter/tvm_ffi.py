@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 from collections.abc import Callable
+from _thread import LockType
 import sys
 import threading
 
@@ -83,6 +84,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         device_kernel_source: str | None = None,
         entry_name: str | None = None,
         executable: tvm.runtime.Executable | None = None,
+        executable_lock: LockType | None = None,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
@@ -119,7 +121,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.kernel_global_source = self.device_kernel_source
         self.executable = executable
         self._packed_func = None
-        self._executable_lock = threading.Lock()
+        self._executable_lock = executable_lock or threading.Lock()
 
         self._post_init()
 
@@ -164,7 +166,15 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         with self._executable_lock:
             packed_func = self._packed_func
             if packed_func is None:
-                packed_func = executable[self.entry_name]
+                # For a shared lazy executable, the first lookup also performs
+                # Executable.jit(). Keep that deferred setup visible in the
+                # benchmark trace instead of folding it into an opaque call.
+                with timed_autotune_stage(
+                    "tvm_ffi.packed_func_lookup",
+                    group_size=getattr(self, "_autotune_group_size", None),
+                    config_idx=getattr(self, "_autotune_config_idx", None),
+                ):
+                    packed_func = executable[self.entry_name]
                 self._packed_func = packed_func
             return packed_func
 

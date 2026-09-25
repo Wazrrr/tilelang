@@ -18,6 +18,7 @@ from experiments.families import FAMILIES, family_module
 VARIANTS = {
     "baseline": (False, False, False),
     "pipeline": (True, False, False),
+    "pipeline_grouped": (True, True, False),
     "grouped": (False, True, False),
     "multi_gpu": (False, False, True),
     "combined": (True, True, True),
@@ -27,6 +28,14 @@ OPS = {family: [op for op in FAMILIES if FAMILIES[op] == family] for family in d
 
 def variant_options(variant):
     return (True, True, True) if variant == "tiletune" else VARIANTS[variant]
+
+
+def compiler_worker_count(settings):
+    """Resolve one total compiler pool, independent of benchmark GPU count."""
+    count = settings.get("compiler_workers_total", settings.get("workers"))
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ValueError("compiler worker total must be a positive integer")
+    return count
 
 
 def system_plan(family, *, workloads=None, variants=None, indices=None):
@@ -70,6 +79,7 @@ def worker(request_path, output):
 
     w, settings = Workload(**request["workload"]), request["settings"]
     pipeline, grouped, multi_gpu = variant_options(request["variant"])
+    compiler_workers_total = compiler_worker_count(settings)
     benchmark_backend = settings.get("benchmark_backend", "event")
     if benchmark_backend not in ("event", "cupti", "cudagraph"):
         raise ValueError("unknown benchmark backend")
@@ -84,6 +94,8 @@ def worker(request_path, output):
     pool = family_module(w.op, "spaces").get_configs()
     indices, configs = select_configs(pool, request["indices"])
     analytical = request["variant"] == "tiletune"
+    post_compile_only = settings.get("post_compile_filter") is True and not analytical
+    uses_tiletune_report = analytical or post_compile_only
     if analytical and indices != list(range(len(pool))):
         raise ValueError("TileTune alpha requires the complete original pool")
     if request.get("configs", configs) != configs:
@@ -99,14 +111,15 @@ def worker(request_path, output):
     class ObservedTuner(AutoTuner):
         def _resolve_num_compile_workers(self):
             count = super()._resolve_num_compile_workers()
-            if count != settings["workers"]:
-                raise RuntimeError(f"requested {settings['workers']} compiler workers, resolved {count}")
+            if count != compiler_workers_total:
+                raise RuntimeError(f"requested {compiler_workers_total} total compiler workers, resolved {count}")
             return count
 
         def _prepare_compile_execution(self, *args, **kwargs):
             if self.tiletune_session is not None:
                 # Selection is final before any compilation; preserve it on interruption.
-                write_json(output / "selection.json", self.tiletune_session.selection)
+                if self.tiletune_session.selection is not None:
+                    write_json(output / "selection.json", self.tiletune_session.selection)
                 self.tiletune_session.finish()
             if settings.get("preflight"):
                 chosen = kwargs["config_indices"][:8]
@@ -153,16 +166,36 @@ def worker(request_path, output):
             )
             .set_benchmark_report_path(str(output / "benchmarks.tsv"))
         )
-    if analytical:
+    if uses_tiletune_report:
         from tilelang.tiletune import TileTuneConfig, query_device_limits
         from .resource_policy import h200_post_compile_policy
 
+        if analytical:
+            if (
+                settings.get("ranking_metric") != "memory"
+                or settings.get("alpha") != 0.5
+                or settings.get("post_compile_filter") is not True
+            ):
+                raise ValueError("E3 requires memory ranking, strict alpha=0.5, and the post-compile filter")
+            tiletune_settings = dict(
+                ranking=True,
+                pre_lowering_analysis=True,
+                ranking_metric="memory",
+                alpha=0.5,
+            )
+        else:
+            if settings.get("ranking_metric") is not None or settings.get("alpha") is not None:
+                raise ValueError("post-compile-only mode forbids pre-lowering ranking and selection")
+            tiletune_settings = dict(
+                ranking=False,
+                pre_lowering_analysis=False,
+                ranking_metric="memory",
+                alpha=None,
+            )
         tuner.set_tiletune_args(
             TileTuneConfig(
                 enabled=True,
                 mode="report_only",
-                ranking_metric="memory",
-                alpha=0.5,
                 memory_diagnostics=False,
                 input_values=case.input_values or None,
                 device_limits=query_device_limits(target),
@@ -170,6 +203,7 @@ def worker(request_path, output):
                 max_local_bytes=None,
                 post_compile_policy=h200_post_compile_policy(w, target),
                 report_path=str(output / "tiletune.json"),
+                **tiletune_settings,
             )
         )
     write_json(
@@ -187,6 +221,7 @@ def worker(request_path, output):
                 warmup_ms=settings["warmup"],
                 rep_ms=settings["rep"],
                 cache_flush_bytes=256 * 1024 * 1024,
+                grouped_compile_runtime_setup=settings.get("grouped_compile_runtime_setup", "eager"),
             ),
             cold_kernel_cache=True,
             cold_autotune_cache=True,
@@ -202,6 +237,7 @@ def worker(request_path, output):
             use_pipeline=pipeline,
             enable_grouped_compile=grouped,
             group_compile_size=settings["group_size"],
+            grouped_compile_runtime_setup=settings.get("grouped_compile_runtime_setup", "eager"),
             benchmark_multi_gpu=multi_gpu,
             benchmark_devices=devices,
         )
@@ -214,7 +250,7 @@ def worker(request_path, output):
 
     records = (
         tuner.tiletune_report["configs"]
-        if analytical
+        if uses_tiletune_report
         else [dict(index=i, config=config, **outcomes.get(i, dict(status="not_attempted"))) for i, config in enumerate(configs)]
     )
     with (output / "benchmarks.tsv").open() as stream:
@@ -241,10 +277,11 @@ def worker(request_path, output):
             workload=w.name,
             variant=request["variant"],
             tuning_seconds=duration,
-            compiler_workers=settings["workers"],
+            compiler_workers=compiler_workers_total,
+            compiler_workers_total=compiler_workers_total,
             benchmark_gpu_count=len(devices),
             candidate_statuses=dict(Counter(record["status"] for record in records)),
-            selection=tuner.tiletune_report["selection"] if analytical else None,
+            selection=tuner.tiletune_report["selection"] if uses_tiletune_report else None,
             config_count=len(configs),
             winner_config=result.config,
             winner_latency_ms=result.latency,
