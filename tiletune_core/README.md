@@ -8,6 +8,14 @@ occupancy. The adjustment uses a three-SM-wave launch target and per-CTA access
 count as a dampener. Equal triples share their group's tail rank. Default top-K
 selection retains the complete boundary group; `strict_budget=True` excludes a
 group crossing the budget.
+
+For `bound_aware` records, `rank_records` normalizes adjusted logical byte-waves
+and their occupancy-adjusted counterpart by their maxima over the complete
+resolved configuration pool. It ranks by `(max(normalized memory work,
+normalized occupancy work), access-waves, descending pipeline depth)`, using an
+exact integer encoding and reporting floating-point normalized values only for
+inspection. This pool-scoped operation is intentionally separate from the
+per-kernel analyzer.
 `alpha_budget(pool_size, alpha)` resolves a strict original-pool fraction with
 floor rounding, including failed and unknown candidates in the denominator.
 See the [memory-ranking study](../experiments/MEMORY_RANKING.md) for its fixed-pool

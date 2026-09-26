@@ -28,8 +28,8 @@ def _encode_memory_order(adjusted_byte_waves, pipeline_depth, access_waves):
 def classify_bound(compute_work, unique_bytes, ridge_flops_per_byte):
     """Classify arithmetic intensity against a positive roofline ridge point.
 
-    Unresolved work or bytes return ``None`` so callers can retain ordinary
-    memory ordering. This is a coarse split, not a calibrated service model.
+    This utility remains available for callers that explicitly want a roofline
+    label. The pool-normalized ``bound_aware`` ranking does not use it.
     """
     for name, value in (("compute_work", compute_work), ("unique_bytes", unique_bytes)):
         if value is None:

@@ -1,5 +1,6 @@
 """Conservative score ranks and selection that retains boundary ties."""
 
+from .memory import PIPELINE_DEPTH_COUNT
 from .pipeline import estimate_pipeline_cycles
 from .schedule import estimate_grid_cycles
 
@@ -149,6 +150,77 @@ def assign_tail_ranks(entries):
     return entries
 
 
+def _bound_aware_pool_scores(records):
+    """Combine memory and occupancy-adjusted byte-waves over one pool.
+
+    The primary normalized quantity is::
+
+        Q = max(U / max(U), O / max(O))
+
+    where ``U`` is adjusted logical byte-waves and ``O`` is ``U`` multiplied by
+    a coarse occupancy penalty. Selection then orders by ``(Q, E, -D)`` for
+    logical access-waves ``E`` and pipeline depth ``D``. The common-denominator
+    numerator and complete key are encoded exactly as integers; floating-point
+    values are for reporting only. Maxima include every resolved candidate in
+    the supplied pool; resource policy affects eligibility, not normalization.
+    """
+    components = {}
+    for record in records:
+        cost = record.get("tile_cost") or {}
+        if cost.get("ranking_metric") != "bound_aware":
+            continue
+        memory = cost.get("adjusted_logical_byte_waves")
+        occupancy = cost.get("occupancy_adjusted_logical_byte_waves")
+        accesses = cost.get("logical_memory_access_waves")
+        depth = cost.get("pipeline_depth")
+        if memory is None or occupancy is None or accesses is None or depth is None:
+            continue
+        if type(memory) is not int or memory < 0:
+            raise ValueError("bound_aware adjusted_logical_byte_waves must be a nonnegative integer or None")
+        if type(occupancy) is not int or occupancy < 0:
+            raise ValueError("bound_aware occupancy_adjusted_logical_byte_waves must be a nonnegative integer or None")
+        if type(accesses) is not int or accesses < 0:
+            raise ValueError("bound_aware logical_memory_access_waves must be a nonnegative integer or None")
+        if type(depth) is not int or not 0 < depth <= PIPELINE_DEPTH_COUNT:
+            raise ValueError("bound_aware pipeline_depth must be an integer in [1, 65535] or None")
+        components[record["index"]] = (memory, occupancy, accesses, depth)
+    if not components:
+        return {}
+
+    max_memory = max(memory for memory, _, _, _ in components.values())
+    max_occupancy = max(occupancy for _, occupancy, _, _ in components.values())
+    max_accesses = max(accesses for _, _, accesses, _ in components.values())
+    scores = {}
+    for index, (memory, occupancy, accesses, depth) in components.items():
+        if max_memory and max_occupancy:
+            numerator = max(memory * max_occupancy, occupancy * max_memory)
+            denominator = max_memory * max_occupancy
+        elif max_memory:
+            numerator, denominator = memory, max_memory
+        elif max_occupancy:
+            numerator, denominator = occupancy, max_occupancy
+        else:
+            numerator, denominator = 0, 1
+        # Since every candidate has the same primary denominator, its exact
+        # numerator can head an exact integer encoding of (Q, E, -D).
+        score = ((numerator * (max_accesses + 1) + accesses) * PIPELINE_DEPTH_COUNT) + (
+            PIPELINE_DEPTH_COUNT - depth
+        )
+        scores[index] = {
+            "score": score,
+            "combined_primary_numerator": numerator,
+            "combined_primary_denominator": denominator,
+            "normalized_score": numerator / denominator,
+            "adjusted_logical_byte_waves": memory,
+            "occupancy_adjusted_logical_byte_waves": occupancy,
+            "max_adjusted_logical_byte_waves": max_memory,
+            "max_occupancy_adjusted_logical_byte_waves": max_occupancy,
+            "normalized_memory_work": memory / max_memory if max_memory else 0.0,
+            "normalized_occupancy_work": occupancy / max_occupancy if max_occupancy else 0.0,
+        }
+    return scores
+
+
 def rank_records(records):
     """Order candidates and assign equal primary scores their group's tail rank.
 
@@ -160,23 +232,33 @@ def rank_records(records):
 
     if len({r["index"] for r in records}) != len(records):
         raise ValueError("ranking requires unique original indices")
-    metrics = {
-        (r.get("tile_cost") or {}).get("ranking_metric", "traffic_waves")
-        for r in records
-        if (r.get("tile_cost") or {}).get("score") is not None
-    }
+    metrics = set()
+    for record in records:
+        cost = record.get("tile_cost") or {}
+        metric = cost.get("ranking_metric")
+        if cost.get("score") is not None:
+            metrics.add(metric or "traffic_waves")
+        elif metric == "bound_aware" and (
+            cost.get("adjusted_logical_byte_waves") is not None
+            or cost.get("occupancy_adjusted_logical_byte_waves") is not None
+        ):
+            metrics.add(metric)
     if len(metrics) > 1:
         raise ValueError("cannot rank scores with different ranking metrics/units together")
+    bound_aware_scores = _bound_aware_pool_scores(records) if metrics == {"bound_aware"} else {}
     entries = []
     for record in records:
         pressure = record.get("pressure") or {}
         decision = record.get("pre_lowering") or pressure.get("decision") or {}
-        score = (record.get("tile_cost") or {}).get("score")
+        cost = record.get("tile_cost") or {}
+        combined = bound_aware_scores.get(record["index"])
+        score = combined["score"] if combined is not None else cost.get("score")
         if score is not None and (type(score) not in (float, int) or not math.isfinite(score)):
             score = None
         tier = "pressure_rejected" if decision.get("would_reject") else "unknown" if score is None else "eligible"
         entry = {"index": record["index"], "tier": tier, "score": score}
-        cost = record.get("tile_cost") or {}
+        if combined is not None:
+            entry.update(combined)
         if cost.get("ranking_metric") in ("memory", "bound_aware"):
             secondary = cost.get("tie_break_score")
             if score is not None and (type(secondary) not in (int, float) or not math.isfinite(secondary) or secondary < 0):

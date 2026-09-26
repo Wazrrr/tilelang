@@ -20,14 +20,23 @@ and depth after applying the fitted launch-underfill adjustment. The
 [H200 study](../../experiments/H200_UNIFIED_MEMORY.md) describes
 the score and its fixed-pool results.
 
-`ranking_metric="bound_aware"` keeps that lean path and the lexicographic
-memory key, but changes its primary term from `U` to `U * P`. A coarse roofline
-split uses a 200 FLOP/byte ridge on Ampere and Hopper. Memory-bound or unresolved
-schedules use `P = 1`; compute-bound schedules use
-`P = max(1, ceil(8 / active_warps_per_sm))`, where active warps are estimated
-from shared-memory, thread, and block limits. The full key is `(U * P, -D, E)`.
-This multiplier changes ordering only: it does not reject a configuration or
-act as a pre- or post-compile resource filter.
+`ranking_metric="bound_aware"` removes the compute-versus-memory classifier.
+Every candidate receives adjusted logical byte-waves `U`, an occupancy-adjusted
+copy `O = U * P`, logical access-waves `E`, and pipeline depth `D`, where
+`P = max(1, ceil(8 / active_warps_per_sm))`. After the complete configuration
+pool has been analyzed, TileTune ranks lexicographically by
+`(max(U / max_pool(U), O / max_pool(O)), E, -D)`.
+
+The implementation encodes the exact common-denominator numerator and both
+tie-breaks as an integer, so large values do not lose ordering through
+floating-point rounding. Pool maxima include every resolved configuration;
+resource policy changes eligibility, not normalization. Profile-free matrix
+FLOP-waves are also reported for experiments, but do not affect ranking: the
+equal-weight pure-compute replay retained only 48/50 H200 oracle checks. Neither
+ranking component rejects a configuration or acts as a pre- or post-compile
+resource filter. A standalone `analyze_prim_func` call reports the components
+and leaves the final `score` deferred because one kernel cannot determine pool
+maxima.
 
 Set `memory_diagnostics=True` to additionally construct reaching dependencies,
 report backward tile propagation, estimate live register tiles, and plan shared
@@ -58,14 +67,18 @@ tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5)
 tuner.set_tiletune_args(True, ranking_metric="memory", alpha=0.5, memory_diagnostics=True)
 ```
 
-Analysis version 39 adds the bound-aware `(U * P, -D, E)` ordering. Version 38
-introduced the `(U, -D, E)` memory ordering and invalidated cached scores from
-the previous formula. Version 37 added compiler-only resource policy to the
-cache identity.
+Analysis version 42 normalizes semantic byte-wave quantities rather than their
+ordinal encodings and changes the tie order to `(E, -D)`. Version 41 replaced
+the hard roofline split with pool-normalized memory and occupancy-adjusted
+components. Version 39 introduced the former classified
+`(U * P, -D, E)` ordering. Version 38 introduced the `(U, -D, E)` memory ordering
+and invalidated cached scores from the previous formula. Version 37 added
+compiler-only resource policy to the cache identity.
 Deferred metadata resolution was introduced in version 36. The diagnostic
 setting remains part of the cache identity.
-Portable memory facts use `memory.v3`, whose `dependencies` field may be `null`;
-the input schema is unchanged, while analysis version 38 controls the new score.
+Portable memory facts use `memory.v3`, whose `dependencies` field may be `null`.
+Bound-aware facts use `bound_aware.v3`; they contain per-candidate components,
+while the configuration-pool ranking supplies their normalization bases.
 
 ## Post-compile resource policy
 

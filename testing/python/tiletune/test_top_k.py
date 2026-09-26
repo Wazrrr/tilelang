@@ -54,6 +54,37 @@ def test_preparation_keeps_the_whole_boundary_tie(monkeypatch):
     assert session.selection["tie_policy"] == "include_boundary_score_group"
 
 
+def test_preparation_normalizes_bound_aware_components_across_the_pool(monkeypatch):
+    session = TileTuneSession(
+        TileTuneConfig(top_k=1, ranking_metric="bound_aware", max_spill_bytes=None, max_local_bytes=None),
+        [{"id": i} for i in range(3)],
+    )
+    components = [(10, 90), (50, 50), (100, 10)]
+
+    def analyze(program, *args, **kwargs):
+        memory, compute = components[program]
+        return dict(
+            tile_cost={
+                "ranking_metric": "bound_aware",
+                "score": None,
+                "adjusted_logical_byte_waves": memory,
+                "occupancy_adjusted_logical_byte_waves": compute,
+                "logical_memory_access_waves": program + 1,
+                "pipeline_depth": 1,
+                "tie_break_score": program + 1,
+            },
+            pressure={"decision": {"keep": True}},
+        )
+
+    monkeypatch.setattr("tilelang.tiletune.runtime.analyze_prim_func", analyze)
+    selected = session.prepare_top_k([(i, {"id": i}, {}) for i in range(3)], lambda id: id)
+
+    assert selected == [1]
+    assert session.ranking[0]["index"] == 1
+    assert session.ranking[0]["normalized_score"] == pytest.approx(5 / 9)
+    assert set(session.prepared_programs) == {1}
+
+
 @pytest.mark.parametrize("alpha", [0, -1, 1.1, True, float("inf"), float("nan")])
 def test_invalid_alpha(alpha):
     with pytest.raises(ValueError, match="alpha"):

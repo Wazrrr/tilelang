@@ -43,56 +43,6 @@ def cyclic_buffer_depth(col):
     return max([1, *depths])
 
 
-def analyze_compute_intensity(col, buffer_facts, grid_blocks):
-    """Count dynamic GEMM FLOPs and distinct global tensor bytes.
-
-    This supplies only the arithmetic-intensity side of a coarse roofline
-    split. Dynamic FLOPs multiply per-iteration matrix work by collected loop
-    visits. Unique bytes count full, distinct global tensors rather than the
-    repeated logical traffic used by the memory score.
-    """
-    from .compute import operation_work
-
-    unknown = []
-    seen = {}
-    for buffer in col.buffers:
-        if buffer.scope() != "global":
-            continue
-        identity = str(buffer.data)
-        if identity not in seen:
-            seen[identity] = buffer_facts[buffer].logical_bits
-    unique_bytes = 0
-    for identity, bits in seen.items():
-        if bits is None:
-            unknown.append(f"unresolved global tensor size for {identity}")
-        else:
-            unique_bytes += bits // 8
-
-    flops_per_cta = 0
-    for op in col.operations:
-        flops = operation_work(op, col).get("gemm_flops")
-        if flops is None:
-            unknown.append(f"unresolved matrix work for operation {op.index}")
-        elif flops:
-            flops_per_cta += flops * loop_visits(op.loops)["max"]
-    compute_work = flops_per_cta * grid_blocks if grid_blocks is not None else None
-    if grid_blocks is None:
-        unknown.append("unresolved grid size")
-    return {
-        "compute_work": compute_work if not unknown else None,
-        "unique_global_bytes": unique_bytes if not unknown else None,
-        "matrix_flops_per_cta": flops_per_cta,
-        "grid_blocks": grid_blocks,
-        "precision": "unknown" if unknown else "estimate",
-        "unknown": unknown,
-        "assumptions": [
-            "roofline split only; no instruction schedule, cache model or measured rate",
-            "dynamic matrix work multiplies per-iteration FLOPs by the collected loop visits",
-            "unique bytes count distinct global buffers, not repeated logical traffic",
-        ],
-    }
-
-
 def resident_warps_estimate(col, shared_bytes, device_limits):
     """Estimate active warps from shared-memory and thread/block limits.
 
@@ -180,4 +130,49 @@ def analyze_memory_accesses(col, buffer_facts):
         if col.dependencies_collected
         else None,
         "unknown": memory_unknowns(col),
+    }
+
+
+def analyze_matrix_compute(col, grid_blocks, sm_count):
+    """Count profile-free matrix FLOP work across sequential CTA waves.
+
+    Matrix multiply-adds have one common unit (two FLOPs), so they can be
+    combined without a device-rate model. Scalar, transcendental, reduction,
+    and shared-memory work remain separate service kinds and are deliberately
+    not assigned arbitrary FLOP weights here.
+    """
+    from .compute import operation_work
+
+    unknown = []
+    matrix_flops_per_cta = 0
+    for op in col.operations:
+        if not hasattr(op.metadata, "cRegion"):
+            continue
+        flops = operation_work(op, col)["gemm_flops"]
+        visits = loop_visits(op.loops)["max"]
+        if flops is None:
+            unknown.append(f"operation {op.index}: unresolved matrix FLOPs")
+        elif visits is None:
+            unknown.append(f"operation {op.index}: unresolved matrix loop visits")
+        else:
+            matrix_flops_per_cta += flops * visits
+
+    for name, value in (("grid_blocks", grid_blocks), ("sm_count", sm_count)):
+        if value is None:
+            unknown.append(f"unresolved {name}")
+        elif type(value) is not int or value <= 0:
+            raise ValueError(f"{name} must be a positive integer or None")
+    waves = (grid_blocks + sm_count - 1) // sm_count if grid_blocks is not None and sm_count is not None else None
+    matrix_flop_waves = matrix_flops_per_cta * waves if waves is not None and not unknown else None
+    return {
+        "matrix_flops_per_cta": matrix_flops_per_cta if not unknown else None,
+        "matrix_flop_waves": matrix_flop_waves,
+        "precision": "unknown" if unknown else "estimate",
+        "unknown": unknown,
+        "assumptions": [
+            "one matrix multiply-add counts as two logical FLOPs",
+            "per-CTA matrix work is multiplied by ceil(grid_blocks / sm_count)",
+            "no tensor-core rate, instruction shape, occupancy, or pipeline-overlap model",
+            "scalar, transcendental, reduction, and shared-memory work are excluded",
+        ],
     }

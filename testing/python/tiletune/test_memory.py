@@ -175,12 +175,7 @@ def test_three_wave_underfill_adjustment_is_access_damped():
     assert full_grid["launch_underfill_shortfall_blocks"] == 0
 
 
-def test_bound_classifier_and_occupancy_penalty_are_coarse_and_exact():
-    assert classify_bound(199, 1, 200.0) == "memory"
-    assert classify_bound(200, 1, 200.0) == "compute"
-    assert classify_bound(None, 1, 200.0) is None
-    assert classify_bound(1, 0, 200.0) is None
-
+def test_occupancy_penalty_is_coarse_and_exact():
     accesses = [dict(operation=0, bytes=100, visits=1)]
     baseline = score_memory(accesses, 396, 132)
     penalized = score_memory(accesses, 396, 132, occupancy_penalty=3)
@@ -193,18 +188,14 @@ def test_bound_classifier_and_occupancy_penalty_are_coarse_and_exact():
             score_memory(accesses, 396, 132, occupancy_penalty=invalid)
 
 
-def test_bound_aware_hopper_gate_penalizes_only_compute_bound_schedule(monkeypatch, tmp_path):
-    def compute_intensity(*_):
-        return {
-            "compute_work": 600,
-            "unique_global_bytes": 2,
-            "matrix_flops_per_cta": 600,
-            "grid_blocks": 1,
-            "precision": "estimate",
-            "unknown": [],
-            "assumptions": ["synthetic integration fixture"],
-        }
+def test_standalone_bound_classifier_remains_available_but_is_not_used_by_ranking():
+    assert classify_bound(199, 1, 200.0) == "memory"
+    assert classify_bound(200, 1, 200.0) == "compute"
+    assert classify_bound(None, 1, 200.0) is None
+    assert classify_bound(1, 0, 200.0) is None
 
+
+def test_bound_aware_defers_normalized_score_until_the_pool_is_known(monkeypatch, tmp_path):
     def occupancy(*_):
         return {
             "resident_blocks_per_sm_estimate": 1,
@@ -212,7 +203,6 @@ def test_bound_aware_hopper_gate_penalizes_only_compute_bound_schedule(monkeypat
             "active_warps_per_sm_estimate": 3,
         }
 
-    monkeypatch.setattr("tilelang.tiletune.memory.analyze_compute_intensity", compute_intensity)
     monkeypatch.setattr("tilelang.tiletune.memory.resident_warps_estimate", occupancy)
     path = tmp_path / "bound.json"
     result = analyze_prim_func(
@@ -224,27 +214,102 @@ def test_bound_aware_hopper_gate_penalizes_only_compute_bound_schedule(monkeypat
     bound = result["modules"]["bound"]
     facts = json.loads(path.read_text())
 
-    assert bound["bound"] == "compute"
-    assert bound["ridge_flops_per_byte"] == 200.0
+    assert bound["classifier"] == "not_used"
     assert bound["occupancy_penalty"] == 3
-    assert result["tile_cost"]["occupancy_penalty"] == 3
+    assert result["tile_cost"]["score"] is None
+    assert result["tile_cost"]["adjusted_logical_byte_waves"] > 0
+    assert result["tile_cost"]["occupancy_adjusted_logical_byte_waves"] == 3 * result["tile_cost"]["adjusted_logical_byte_waves"]
+    assert result["tile_cost"]["matrix_flops_per_cta"] > 0
+    assert result["tile_cost"]["matrix_flop_waves"] > 0
     assert result["tile_cost"]["ranking_metric"] == "bound_aware"
     assert result["specialization"]["name"] == "generic"
     assert result["modules"]["pipeline_overlap"]["precision"] == "disabled"
     assert result["modules"]["waves"]["precision"] == "disabled"
-    assert facts["backend"] == "bound_aware.v1"
-    assert facts["bound"]["occupancy_penalty"] == 3
+    assert facts["backend"] == "bound_aware.v3"
+    assert facts["bound"]["occupancy_work"] == result["tile_cost"]["occupancy_adjusted_logical_byte_waves"]
+    ranking = rank_records([dict(index=0, tile_cost=result["tile_cost"])])
+    assert ranking[0]["normalized_memory_work"] == ranking[0]["normalized_occupancy_work"] == 1.0
+    assert ranking[0]["normalized_score"] == 1.0
+    assert select_top_k(ranking, 1) == [0]
 
 
-def test_bound_aware_memory_bound_kernel_keeps_neutral_penalty(monkeypatch):
-    def forbidden(*_):
-        pytest.fail("memory-bound candidates must not run the occupancy gate")
-
-    monkeypatch.setattr("tilelang.tiletune.memory.resident_warps_estimate", forbidden)
+def test_bound_aware_does_not_classify_before_applying_occupancy(monkeypatch):
+    monkeypatch.setattr(
+        "tilelang.tiletune.memory.resident_warps_estimate",
+        lambda *_: {
+            "resident_blocks_per_sm_estimate": 1,
+            "warps_per_block": 2,
+            "active_warps_per_sm_estimate": 2,
+        },
+    )
     result = analyze_prim_func(gemm(), dict(ranking_metric="bound_aware"), target=TARGET, device_limits=LIMITS)
     bound = result["modules"]["bound"]
-    assert bound["bound"] == "memory"
-    assert bound["occupancy_penalty"] == result["tile_cost"]["occupancy_penalty"] == 1
+    assert bound["classifier"] == "not_used"
+    assert bound["occupancy_penalty"] == result["tile_cost"]["occupancy_penalty"] == 4
+
+
+def test_bound_aware_pool_normalization_uses_both_components_exactly():
+    records = [
+        dict(
+            index=index,
+            tile_cost=dict(
+                ranking_metric="bound_aware",
+                score=None,
+                adjusted_logical_byte_waves=memory,
+                occupancy_adjusted_logical_byte_waves=compute,
+                logical_memory_access_waves=index + 1,
+                pipeline_depth=8 if index == 0 else 100,
+                tie_break_score=index + 1,
+            ),
+        )
+        for index, memory, compute in ((0, 10, 90), (1, 50, 50), (2, 100, 10))
+    ]
+    ranking = rank_records(records)
+
+    assert [row["index"] for row in ranking] == [1, 0, 2]
+    assert [row["rank"] for row in ranking] == [1, 2, 3]
+    assert ranking[0]["max_adjusted_logical_byte_waves"] == 100
+    assert ranking[0]["max_occupancy_adjusted_logical_byte_waves"] == 90
+    assert ranking[0]["combined_primary_numerator"] == 5000
+    assert ranking[0]["combined_primary_denominator"] == 9000
+    assert ranking[0]["normalized_score"] == pytest.approx(5 / 9)
+    assert select_top_k(ranking, 2) == [1, 0]
+
+
+def test_bound_aware_normalization_base_includes_policy_rejected_candidates():
+    records = [
+        dict(
+            index=0,
+            tile_cost=dict(
+                ranking_metric="bound_aware",
+                score=None,
+                adjusted_logical_byte_waves=10,
+                occupancy_adjusted_logical_byte_waves=10,
+                logical_memory_access_waves=1,
+                pipeline_depth=1,
+                tie_break_score=0,
+            ),
+        ),
+        dict(
+            index=1,
+            tile_cost=dict(
+                ranking_metric="bound_aware",
+                score=None,
+                adjusted_logical_byte_waves=100,
+                occupancy_adjusted_logical_byte_waves=200,
+                logical_memory_access_waves=1,
+                pipeline_depth=1,
+                tie_break_score=0,
+            ),
+            pre_lowering={"would_reject": True},
+        ),
+    ]
+    ranking = rank_records(records)
+
+    assert ranking[0]["index"] == 0
+    assert ranking[0]["max_adjusted_logical_byte_waves"] == 100
+    assert ranking[0]["max_occupancy_adjusted_logical_byte_waves"] == 200
+    assert ranking[1]["tier"] == "pressure_rejected"
 
 
 def test_pipeline_depth_precedes_access_waves_at_equal_adjusted_bytes():

@@ -18,12 +18,8 @@ from .trace import AnalysisTrace, collector_snapshot, propagation_snapshot
 from .families import select_specialization
 
 
-# Datasheet roofline splits (dense tensor-core FLOPs per byte) used only to
-# select the lightweight schedule gate. The Hopper value is the coarse H200
-# ridge; an unknown architecture retains the unmodified memory ordering.
-BOUND_RIDGE_FLOPS_PER_BYTE = {"ampere": 200.0, "hopper": 200.0}
 # Resident warps per SM at which latency hiding is assumed saturated. Below it
-# a compute-bound schedule receives a coarse, piecewise-constant penalty.
+# the occupancy component receives a coarse, piecewise-constant penalty.
 BOUND_TARGET_ACTIVE_WARPS = 8
 
 
@@ -99,8 +95,8 @@ def run_modules(context, pressure):
     tile_cost = {"score": None, "precision": "disabled"}
     modules.update({name: {"precision": "disabled"} for name in ("memory_traffic", "waves", "pipeline_overlap", "ranking")})
     if context.config.ranking and memory_mode:
-        from .memory import analyze_compute_intensity, analyze_memory_accesses, resident_warps_estimate
-        from tiletune_core.memory import classify_bound, score_memory
+        from .memory import analyze_matrix_compute, analyze_memory_accesses, resident_warps_estimate
+        from tiletune_core.memory import score_memory
 
         memory = analyze_memory_accesses(context.collector, context.buffer_facts)
         shared = (
@@ -111,35 +107,71 @@ def run_modules(context, pressure):
                 shared_storage_plan=dict(precision="disabled", reason="enable memory_diagnostics for shared tile lifetimes"),
             )
         )
-        occupancy_penalty = 1
-        if context.config.ranking_metric == "bound_aware":
-            bound = analyze_compute_intensity(context.collector, context.buffer_facts, memory["grid_blocks"])
-            ridge = BOUND_RIDGE_FLOPS_PER_BYTE.get((pressure.get("target_model") or {}).get("architecture"))
-            bound["bound"] = classify_bound(bound["compute_work"], bound["unique_global_bytes"], ridge) if ridge is not None else None
-            bound["ridge_flops_per_byte"] = ridge
-            if bound["bound"] == "compute":
-                occupancy_estimate = resident_warps_estimate(
-                    context.collector, shared.get("shared_memory_bytes_estimate"), context.device_limits
-                )
-                active = (occupancy_estimate or {}).get("active_warps_per_sm_estimate") or 0
-                if active > 0:
-                    occupancy_penalty = max(1, -(-BOUND_TARGET_ACTIVE_WARPS // active))
-                bound["occupancy"] = occupancy_estimate
-            bound["occupancy_penalty"] = occupancy_penalty
-            modules["bound"] = bound
-            trace.record("bound", lambda: bound)
-        if not diagnostics and context.config.ranking_metric == "bound_aware":
-            shared = dict(
-                shared_memory_bytes_estimate=shared["shared_memory_bytes_estimate"],
-                shared_storage_plan=dict(precision="disabled", reason="enable memory_diagnostics for shared tile lifetimes"),
-            )
-        ranking = score_memory(
+        memory_ranking = score_memory(
             memory["accesses"],
             memory["grid_blocks"],
             (context.device_limits or {}).get("sm_count"),
             memory["pipeline_depth"],
-            occupancy_penalty=occupancy_penalty,
         )
+        if context.config.ranking_metric == "bound_aware":
+            matrix_compute = analyze_matrix_compute(
+                context.collector,
+                memory["grid_blocks"],
+                (context.device_limits or {}).get("sm_count"),
+            )
+            occupancy_estimate = resident_warps_estimate(
+                context.collector, shared.get("shared_memory_bytes_estimate"), context.device_limits
+            )
+            active = (occupancy_estimate or {}).get("active_warps_per_sm_estimate") or 0
+            occupancy_penalty = max(1, -(-BOUND_TARGET_ACTIVE_WARPS // active)) if active > 0 else 1
+            occupancy_work = memory_ranking["adjusted_logical_byte_waves"]
+            if occupancy_work is not None:
+                occupancy_work *= occupancy_penalty
+            if not diagnostics:
+                shared = dict(
+                    shared_memory_bytes_estimate=shared["shared_memory_bytes_estimate"],
+                    shared_storage_plan=dict(precision="disabled", reason="enable memory_diagnostics for shared tile lifetimes"),
+                )
+            ranking = {
+                **memory_ranking,
+                "metric": "bound_aware",
+                "score": None,
+                "occupancy_adjusted_logical_byte_waves": occupancy_work,
+                "occupancy_penalty": occupancy_penalty,
+                "matrix_flops_per_cta": matrix_compute["matrix_flops_per_cta"],
+                "matrix_flop_waves": matrix_compute["matrix_flop_waves"],
+                "formula": (
+                    "pool_exact_lexicographic(max(adjusted_logical_byte_waves / "
+                    "max_pool_adjusted_logical_byte_waves, occupancy_adjusted_logical_byte_waves / "
+                    "max_pool_occupancy_adjusted_logical_byte_waves), logical_memory_access_waves, -pipeline_depth)"
+                ),
+                "precision": "pool_deferred" if memory_ranking["score"] is not None else "unknown",
+            }
+            bound = {
+                "classifier": "not_used",
+                "memory_work": memory_ranking["adjusted_logical_byte_waves"],
+                "occupancy": occupancy_estimate,
+                "target_active_warps": BOUND_TARGET_ACTIVE_WARPS,
+                "occupancy_penalty": occupancy_penalty,
+                "occupancy_work": occupancy_work,
+                "matrix_flops_per_cta": matrix_compute["matrix_flops_per_cta"],
+                "matrix_flop_waves": matrix_compute["matrix_flop_waves"],
+                "normalization_scope": "complete configuration pool",
+                "precision": ranking["precision"],
+                "matrix_compute_precision": matrix_compute["precision"],
+                "matrix_compute_unknown": matrix_compute["unknown"],
+                "assumptions": [
+                    "no compute-versus-memory bound classification",
+                    "the second ranking component is adjusted byte-waves scaled by a coarse resident-warp penalty",
+                    "pool normalization and the final maximum are applied only after every candidate is analyzed",
+                    "matrix FLOP-waves are reported for experiments but do not affect this ranking",
+                ]
+                + matrix_compute["assumptions"],
+            }
+            modules["bound"] = bound
+            trace.record("bound", lambda: bound)
+        else:
+            ranking = memory_ranking
         # An opaque operation may hide memory effects not present in the ledger.
         if memory["unknown"]:
             ranking.update(score=None, tie_break_score=None, precision="unknown")
@@ -148,12 +180,15 @@ def run_modules(context, pressure):
             **memory,
             **shared,
             score=ranking["score"],
+            occupancy_adjusted_logical_byte_waves=ranking.get("occupancy_adjusted_logical_byte_waves"),
+            occupancy_penalty=ranking.get("occupancy_penalty"),
+            matrix_flops_per_cta=ranking.get("matrix_flops_per_cta"),
+            matrix_flop_waves=ranking.get("matrix_flop_waves"),
             tie_break_score=ranking["tie_break_score"],
             logical_byte_waves=ranking["logical_byte_waves"],
             adjusted_logical_byte_waves=ranking["adjusted_logical_byte_waves"],
             logical_memory_access_waves=ranking["logical_memory_access_waves"],
             launch_underfill_shortfall_blocks=ranking["launch_underfill_shortfall_blocks"],
-            occupancy_penalty=ranking["occupancy_penalty"],
             score_formula=ranking["formula"],
             ranking_metric=context.config.ranking_metric,
             precision=ranking["precision"],
@@ -167,7 +202,7 @@ def run_modules(context, pressure):
             import json
             from pathlib import Path
 
-            backend = "memory.v3" if context.config.ranking_metric == "memory" else "bound_aware.v1"
+            backend = "memory.v3" if context.config.ranking_metric == "memory" else "bound_aware.v3"
             facts = dict(version=3, backend=backend, **memory, sm_count=(context.device_limits or {}).get("sm_count"))
             if context.config.ranking_metric == "bound_aware":
                 facts["bound"] = modules["bound"]
