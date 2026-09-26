@@ -21,6 +21,7 @@ RATE_FIELDS = {
     "exp_ops_per_cycle",
     "rsqrt_ops_per_cycle",
     "reduction_ops_per_cycle",  # Legacy profile field; not used for mapped tile reductions.
+    "reduction_max_ops_per_cycle",
     "reduction_local_sum_per_cycle",
     "reduction_local_max_per_cycle",
     "reduction_shuffle_sum_per_cycle",

@@ -323,12 +323,33 @@ def study_plan(*, workloads=None, experiments=None, preflight=False):
     return rows
 
 
-def select_gpus(observation, requested=None, *, required=4):
+def select_gpus(observation, requested=None, *, required=4, gpu_model="B200"):
     from experiments.utils.monitor import visible_gpus
 
     if required not in (1, 4):
         raise ValueError("the study requires either one E1 GPU or four E2/E3 GPUs")
+    if gpu_model not in ("B200", "B300"):
+        raise ValueError("the study supports B200 or B300 GPUs")
     visible = visible_gpus(observation)
+    if gpu_model == "B300":
+        script = """
+import json
+import torch
+identities = []
+for device_index in range(torch.cuda.device_count()):
+    properties = torch.cuda.get_device_properties(device_index)
+    identities.append(dict(uuid="GPU-" + str(properties.uuid).removeprefix("GPU-"),
+                           name=properties.name, compute_cap=f"{properties.major}.{properties.minor}"))
+print(json.dumps(identities))
+"""
+        identities = json.loads(subprocess.check_output([sys.executable, "-c", script], text=True))
+        by_uuid = {identity["uuid"]: identity for identity in identities}
+        verified = []
+        for gpu in visible:
+            identity = by_uuid.get(gpu["uuid"])
+            if identity and "B300" in identity["name"] and identity["compute_cap"] == gpu["compute_cap"] == "10.3":
+                verified.append(dict(gpu, nvml_name=gpu["name"], name=identity["name"]))
+        visible = verified
     if requested is not None:
         if len(requested) != required or len(set(requested)) != required:
             raise ValueError(f"this experiment selection requires exactly {required} distinct GPU index/indices")
@@ -337,10 +358,10 @@ def select_gpus(observation, requested=None, *, required=4):
             raise ValueError("requested GPUs are not all visible")
         selected = [by_index[i] for i in requested]
     else:
-        selected = [g for g in visible if "B200" in g["name"]][:required]
-    if len(selected) != required or len({g["name"] for g in selected}) != 1 or any("B200" not in g["name"] for g in selected):
-        raise ValueError(f"{required} matching B200 GPU(s) are required")
-    return [{key: gpu[key] for key in ("index", "uuid", "name", "compute_cap")} for gpu in selected]
+        selected = [gpu for gpu in visible if gpu_model in gpu["name"]][:required]
+    if len(selected) != required or len({gpu["name"] for gpu in selected}) != 1 or any(gpu_model not in gpu["name"] for gpu in selected):
+        raise ValueError(f"{required} matching {gpu_model} GPU(s) are required")
+    return [{key: gpu[key] for key in ("index", "uuid", "name", "compute_cap", "nvml_name") if key in gpu} for gpu in selected]
 
 
 def validate_attempt(output, request):
@@ -878,6 +899,7 @@ def combine_study(root):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gpus", type=int, nargs="+")
+    parser.add_argument("--gpu-model", choices=("B200", "B300"), default="B200")
     parser.add_argument("--output", type=Path)
     resume = parser.add_mutually_exclusive_group()
     resume.add_argument("--resume", action="store_true")
@@ -971,7 +993,7 @@ def main(argv=None):
     frozen = read(root / "manifest.json") if resuming else None
     observed = snapshot()
     requested = args.gpus
-    gpus = select_gpus(observed, requested, required=required_gpus)
+    gpus = select_gpus(observed, requested, required=required_gpus, gpu_model=args.gpu_model)
     current_source_identity = source_identity()
     if args.reuse_from is not None and args.preflight:
         parser.error("--reuse-from cannot be used for a preflight-only run")

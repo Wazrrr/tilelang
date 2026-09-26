@@ -36,16 +36,17 @@ __device__ __noinline__ float TileTunePrimitive(int tid) {
         } else if constexpr (Kind == 2) {
           float input = x[j] * 0.01f - 1.0f;
           asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(x[j]) : "f"(input));
-        } else if constexpr (Kind == 3) {
+        } else if constexpr (Kind == 3 || Kind == 6) {
           float sum = x[j];
           #pragma unroll
           for (int delta = 16; delta; delta >>= 1) {
             float other;
             asm volatile("shfl.sync.bfly.b32 %0, %1, %2, 31, -1;"
                          : "=f"(other) : "f"(sum), "r"(delta));
-            sum += other;
+            if constexpr (Kind == 3) sum += other;
+            else asm volatile("max.f32 %0, %0, %1;" : "+f"(sum) : "f"(other));
           }
-          x[j] = sum * 0.03125f;
+          x[j] = Kind == 3 ? sum * 0.03125f : sum;
         } else if constexpr (Kind == 5) {
           asm volatile("rsqrt.approx.ftz.f32 %0, %0;" : "+f"(x[j]));
         }
@@ -62,7 +63,7 @@ __device__ __noinline__ float TileTunePrimitive(int tid) {
 
 
 def primitive(kind, iterations, blocks, threads=128):
-    if kind in (1, 3, 4) and threads != 128:
+    if kind in (1, 3, 4, 6) and threads != 128:
         raise ValueError("shared/collective legacy probes require 128 threads")
     name = f"TileTunePrimitive<{kind}, {iterations}>"
 

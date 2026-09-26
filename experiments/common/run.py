@@ -315,11 +315,11 @@ def run_native(request, output):
     analytical = settings["method"] in ("analyze", "exhaustive", "top_k", "smoke")
     performance_model = device.performance_model if analytical else None
     profile_identity = None
-    if device.profiles and analytical and settings["metric"] != "memory":
+    if device.profiles and analytical and settings["metric"] not in ("memory", "bound_aware", "rank_product"):
         from tilelang.tiletune import load_device_profile
 
         profile_path = device.profiles.get(workload.dtype)
-        if profile_path is None and settings["metric"] == "pipeline_time":
+        if profile_path is None and settings["metric"] in ("pipeline_time", "work_max", "work_rank_product"):
             reason = f"no primitive profile for dtype {workload.dtype}; supplied profile dtypes: {sorted(device.profiles)}"
             if settings["method"] == "top_k":
                 return dict(result, status="model_unavailable", reason=reason)
@@ -516,7 +516,11 @@ def run_native(request, output):
         correctness="passed",
         winner=chosen,
         metric=settings["metric"],
-        score_units="cycles" if settings["metric"] == "pipeline_time" else "byte-waves",
+        score_units=(
+            "squared candidate tail ranks" if settings["metric"] == "work_rank_product"
+            else "lexicographic memory-equivalent work units" if settings["metric"] == "work_max"
+            else "cycles" if settings["metric"] == "pipeline_time" else "byte-waves"
+        ),
         tuning_seconds=time.perf_counter() - started,
         configs=len(configs),
         selection=report["selection"],
@@ -615,7 +619,7 @@ def main():
         "--method", choices=["analyze", "exhaustive", "brute_force", "top_k", "carver", "xgboost", "random"], default="analyze"
     )
     parser.add_argument("--xgb-model", type=Path, help="Frozen model from python -m experiments.xgboost train")
-    parser.add_argument("--metric", choices=["memory", "traffic_waves", "pipeline_time"], default="memory")
+    parser.add_argument("--metric", choices=["memory", "bound_aware", "rank_product", "work_max", "work_rank_product", "traffic_waves", "pipeline_time"], default="memory")
     parser.add_argument("--exploration-fraction", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--alpha", type=float, help="Strict original-pool fraction; overrides --top-k for TileTune")

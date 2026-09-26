@@ -278,6 +278,7 @@ def _measure_common(identity):
         2: ("exp_ops_per_cycle", 128 * 8),
         3: ("reduction_ops_per_cycle", 4 * 8 * 31),
         5: ("rsqrt_ops_per_cycle", 128 * 8),
+        6: ("reduction_max_ops_per_cycle", 4 * 8 * 31),
     }
     for kind, (name, work) in counts.items():
         measurements = [_benchmark(probes.primitive(kind, n, blocks), [], [0]) for n in (256, 512)]

@@ -8,7 +8,7 @@ def model_target(target):
     Target = tvm.target.Target
 
     target = dict(Target(target).export())
-    if target.get("arch") in ("sm_90a", "sm_100a"):
+    if target.get("arch") in ("sm_90a", "sm_100a", "sm_103", "sm_103a"):
         target["arch"] = "sm_90"
     return Target(target)
 
@@ -57,7 +57,7 @@ def rank_configs(
         for stages in sorted({cfg["num_stages"] for cfg in configs})
     }
     target_arch = str(compile_target.attrs.get("arch", ""))
-    tcgen05_meta = tvm.get_global_func("tl.get_tcgen5_mma_meta") if target_arch.startswith("sm_100") else None
+    tcgen05_meta = tvm.get_global_func("tl.get_tcgen5_mma_meta") if target_arch.startswith(("sm_100", "sm_103")) else None
     records = []
     for index, config in enumerate(configs):
         policy = policies[config["num_stages"]]

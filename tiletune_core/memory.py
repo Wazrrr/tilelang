@@ -9,11 +9,42 @@ def _ceil_div(numerator, denominator):
     return (numerator + denominator - 1) // denominator
 
 
+def _memory_order(byte_waves, pipeline_depth, event_waves):
+    return (
+        PIPELINE_DEPTH_COUNT * byte_waves * (byte_waves + 1) // 2
+        + (PIPELINE_DEPTH_COUNT - pipeline_depth) * (byte_waves + 1)
+        + event_waves
+    )
+
+
 def _adjusted_byte_waves(byte_waves, grid_blocks, accesses_per_cta, sm_count):
     """Apply the three-SM-wave launch-underfill adjustment to byte waves."""
     shortfall = max(0, LAUNCH_TARGET_WAVES * sm_count - grid_blocks)
     denominator = grid_blocks + accesses_per_cta
     return _ceil_div(byte_waves * (denominator + shortfall), denominator)
+
+
+def score_rank_product(accesses, grid_blocks, sm_count, pipeline_depth=1):
+    """Prepare two memory views; their rank product requires a candidate pool."""
+    accesses = tuple(accesses)
+    memory = score_memory(accesses, grid_blocks, sm_count, pipeline_depth)
+    underfill = score_memory(accesses, grid_blocks, sm_count, pipeline_depth, launch_underfill=True)
+    return {
+        **underfill,
+        "metric": "rank_product",
+        "score": None,
+        "tie_break_score": None,
+        "score_scope": "candidate_pool",
+        "component_scores": {"memory": memory["score"], "underfill": underfill["score"]},
+        "units": "squared candidate tail ranks",
+        "formula": "tail_rank(memory) * tail_rank(underfill)",
+        "occupancy_gate_enabled": False,
+        "assumptions": underfill["assumptions"]
+        + [
+            "component tail ranks use the same eligible candidate pool",
+            "the fused score is computed by rank_records, never cached per kernel",
+        ],
+    }
 
 
 def classify_bound(compute_work, unique_bytes, ridge_flops_per_byte):
@@ -98,9 +129,7 @@ def score_memory(
     # possible (depth, event) pairs. Summing all preceding band widths and
     # adding the within-band offset exactly encodes (U_eff, -depth, events).
     order = (
-        PIPELINE_DEPTH_COUNT * effective_byte_waves * (effective_byte_waves + 1) // 2
-        + (PIPELINE_DEPTH_COUNT - pipeline_depth) * (effective_byte_waves + 1)
-        + event_waves
+        _memory_order(effective_byte_waves, pipeline_depth, event_waves)
         if effective_byte_waves is not None
         else None
     )

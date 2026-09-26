@@ -14,6 +14,7 @@ TARGETS = {
     "ampere": {"kind": "cuda", "arch": "sm_80"},
     "hopper": {"kind": "cuda", "arch": "sm_90a"},
     "blackwell": {"kind": "cuda", "arch": "sm_100a"},
+    "b300": {"kind": "cuda", "arch": "sm_103a"},
     "mi355x": {"kind": "hip", "mcpu": "gfx950", "thread_warp_size": 64},
     "ascend910b": {"kind": "ascendc", "arch": "Ascend910B"},
     "mi308": {"kind": "hip", "mcpu": "gfx942", "thread_warp_size": 64},

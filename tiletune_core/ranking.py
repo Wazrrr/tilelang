@@ -172,6 +172,56 @@ def assign_tail_ranks(entries):
     return entries
 
 
+def _rank_product_records(records, components=("memory", "underfill"), metric="rank_product"):
+    import math
+
+    resolved = {}
+    for record in records:
+        scores = (record.get("tile_cost") or {}).get("component_scores")
+        resolved[record["index"]] = (
+            scores
+            if isinstance(scores, dict)
+            and all(
+                type(scores.get(component)) in (int, float)
+                and math.isfinite(scores[component])
+                and scores[component] >= 0
+                for component in components
+            )
+            else {}
+        )
+    views = {}
+    for component in components:
+        component_records = [
+            {
+                **record,
+                "tile_cost": {
+                    "score": resolved[record["index"]].get(component),
+                    "ranking_metric": f"{metric}_{component}",
+                },
+            }
+            for record in records
+        ]
+        views[component] = {
+            entry["index"]: entry["tie_last_rank"]
+            for entry in rank_records(component_records)
+            if entry["tier"] == "eligible"
+        }
+    fused = []
+    for record in records:
+        index = record["index"]
+        score = (
+            math.prod(views[component][index] for component in components)
+            if all(index in views[component] for component in components)
+            else None
+        )
+        fused.append({**record, "tile_cost": {"score": score, "ranking_metric": f"{metric}_fused"}})
+    ranking = rank_records(fused)
+    for entry in ranking:
+        entry["score_scope"] = "candidate_pool"
+        entry["component_tail_ranks"] = {component: views[component].get(entry["index"]) for component in components}
+    return ranking
+
+
 def rank_records(records):
     """Order candidates and assign equal primary scores their group's tail rank.
 
@@ -187,9 +237,14 @@ def rank_records(records):
         (r.get("tile_cost") or {}).get("ranking_metric", "traffic_waves")
         for r in records
         if (r.get("tile_cost") or {}).get("score") is not None
+        or (r.get("tile_cost") or {}).get("ranking_metric") in ("rank_product", "work_rank_product")
     }
     if len(metrics) > 1:
         raise ValueError("cannot rank scores with different ranking metrics/units together")
+    if metrics == {"rank_product"}:
+        return _rank_product_records(records)
+    if metrics == {"work_rank_product"}:
+        return _rank_product_records(records, ("work_max", "underfill"), "work_rank_product")
     entries = []
     for record in records:
         pressure = record.get("pressure") or {}

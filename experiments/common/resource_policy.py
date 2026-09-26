@@ -23,13 +23,13 @@ def b200_resource_limits(op):
 
 
 def b200_post_compile_policy(workload, target):
-    """Return the calibrated reject-mode policy for a B200 workload.
+    """Return the B200 reject-mode policy, unchanged when transferred to B300.
 
     The operation comes from the frozen workload rather than the compiler
     filter's heuristic kernel classification.  This matters for the B200
     attention and FP8 kernels, whose legacy classifications are not reliable.
     """
-    if target.get("kind") != "cuda" or target.get("arch") not in ("sm_100", "sm_100a"):
+    if target.get("kind") != "cuda" or target.get("arch") not in ("sm_100", "sm_100a", "sm_103", "sm_103a"):
         return None
     spill, local = b200_resource_limits(workload.op)
     return dict(mode="reject", max_spill_bytes=spill, max_local_bytes=local)

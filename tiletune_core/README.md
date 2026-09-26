@@ -59,3 +59,57 @@ print(report.score, report.units)
 Compiler adapters must supply resolved facts using the versioned contract.
 Automatic fact export and exploration depend on support in the compiler runtime.
 `AttemptLedger` freezes attempts and retains failures without replacement.
+
+## Lightweight rank fusion
+
+`score_rank_product(accesses, grid_blocks, sm_count, pipeline_depth=1)` prepares
+the original memory and launch-underfill scores from a shared access ledger.
+Its `score` is intentionally `None`: the fused score depends on the candidate
+pool. Supply its `component_scores` in each record's `tile_cost`, with
+`ranking_metric="rank_product"`, to `rank_records`. The returned ranking entries
+contain `score = tail_rank(memory) * tail_rank(underfill)` and
+`component_tail_ranks`; the input records are not modified.
+
+Only candidates with both components resolved and no existing rejection or
+analysis failure participate in either view. Existing strict-budget selection
+keeps whole product-score groups and never fills a shortfall by splitting a
+boundary tie. No timing profile or compiler dependency is required.
+
+## Fixed-rate max fusion
+
+`score_work_max(accesses, compute, grid_blocks, sm_count, performance_model,
+pipeline_depth=1)` accepts lean logical compute facts and fixed per-SM rates.
+It sums compute service across matrix, scalar, exp, rsqrt and logical sum/max
+reductions, multiplies by `ceil(grid_blocks / sm_count)`, and takes the maximum
+with logical byte-waves divided by `global_bytes_per_cycle`. There is no
+candidate-pool normalization, bound classification, residency gate or fitting.
+
+For exact integer ranking, compute cycles are converted to memory-equivalent
+bytes using the fixed bandwidth and rounded upward by less than one byte.
+The score encodes `(max(byte_waves, compute_equivalent_bytes), -pipeline_depth,
+access_waves)`, retaining whole ties and the original strict-budget policy.
+Missing counts, nonzero-work rates, or mismatched matrix instruction/dtype
+signatures produce an unknown score rather than a memory-only fallback.
+`service_cycles` exposes both components; the encoded `score` is not a latency.
+TCGen05 requires its own dtype-matched rate. Logical max reductions require
+`reduction_max_ops_per_cycle`; sum reductions use `reduction_ops_per_cycle`.
+These are logical primitive rates, not physical lane/shuffle work counts.
+
+### Work-max/underfill rank product
+
+`score_work_rank_product` takes the same arguments as `score_work_max` and
+prepares two unchanged component scores: fixed-rate work-max and ungated
+memory underfill. Pass its `component_scores` with
+`ranking_metric="work_rank_product"` to `rank_records` to obtain:
+
+```text
+score = tail_rank(work_max) * tail_rank(underfill)
+```
+
+Both views use the same eligible pool. Equal component scores use the last
+rank of the whole tie group, and equal products remain tied. The fused score
+is recomputed per pool, not cached per kernel. Missing compute work or rates
+leave the candidate unknown in both views; there is no memory-only fallback.
+This opt-in heuristic does not change `work_max`, `rank_product`, eligibility,
+the original-pool budget, or boundary-tie handling. It adds no fitted rate,
+penalty coefficient, occupancy estimate, or compute/memory classification.

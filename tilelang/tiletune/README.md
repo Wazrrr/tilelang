@@ -140,10 +140,10 @@ propagate; the autotuner records `analysis_failed` and stops that candidate.
 
 Package-root exports, settings, signatures, reports, and trace checkpoints are
 stable for the existing timing metrics. Internal imports use the source map
-above; obsolete forwarding modules are removed. Analysis version 37 includes
-the B200 bound-aware ridge point while preserving the three-level memory order,
-native alpha, lean diagnostics, and declared metadata contract; device-profile
-version 4 is unchanged.
+above; obsolete forwarding modules are removed. Analysis version 39 disables
+the bound-aware occupancy gate while preserving launch-underfill ranking,
+B300 support, native alpha, lean diagnostics, and the declared metadata contract;
+device-profile version 4 is unchanged.
 
 `profiling/device_profile.py` and `profiling/device_probes.py` moved together
 without content changes. Their source fingerprints are unchanged. Loading a
@@ -252,18 +252,27 @@ conservative rank, and default top-K retains the whole boundary group.
 ### Bound-aware memory ranking
 
 `ranking_metric="bound_aware"` keeps the family-independent memory path and
-adds a coarse roofline gate. It divides dynamic tensor-core FLOPs by distinct
-global tensor bytes and compares that arithmetic intensity with the target
-architecture's reference ridge point. The current table uses `200 FLOPs/byte`
-for Ampere and `281.25 FLOPs/byte` specifically for B200 (`sm_100a`), derived
-from 2.25 dense BF16/FP16 PFLOP/s and 8 TB/s of HBM3e bandwidth. An unknown
-architecture or unresolved kernel falls back to the neutral memory ordering.
+adds a launch-underfill adjustment. The compute/memory occupancy gate is
+disabled: classification is diagnostic only and cannot change the score.
+The diagnostic divides dynamic tensor-core FLOPs by distinct global tensor
+bytes and compares that arithmetic intensity with the target architecture's
+reference ridge point. The current table uses `200 FLOPs/byte`
+for Ampere and `281.25 FLOPs/byte` for B200 (`sm_100a`) and B300
+(`sm_103`, `sm_103a`). Both use the same coarse dense BF16/FP16 reference:
+2.25 PFLOP/s divided by 8 TB/s of HBM3e bandwidth. NVIDIA's HGX table lists
+36 sparse BF16/FP16 PFLOP/s across eight B300 GPUs; dense performance is half
+that figure. The reference sources are the NVIDIA HGX specification table
+(`https://www.nvidia.com/en-us/data-center/hgx/`) and Blackwell Ultra architecture
+overview (`https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/`).
+This is not a dtype-specific calibrated performance model. Other Blackwell
+architectures do not inherit the B300 reference. Every classification, including
+an unknown architecture or unresolved kernel, retains an occupancy penalty of
+one and receives the launch-underfill adjustment when `bound_aware` is selected.
 
-For a compute-bound kernel, the scorer estimates resident warps from shared
-memory and launch limits, then multiplies the byte-wave term by the integer
-penalty `ceil(8 / active_warps_per_sm)`. It does not call the timing, full
-occupancy, register-allocation, warp-specialization, or family models. The
-three-level lexicographic key remains:
+This path no longer estimates resident warps or performs additional shared-memory
+analysis for an occupancy penalty, even for compute-bound kernels. It does not
+call the timing, full occupancy, register-allocation, warp-specialization, or
+family models. The three-level lexicographic key is:
 
 ```text
 W = ceil(grid_blocks / SM_count)
@@ -271,17 +280,128 @@ Q = max(0, 3 * SM_count - grid_blocks)
 U = ceil(logical_bytes_per_CTA * W
          * (grid_blocks + accesses_per_CTA + Q)
          / (grid_blocks + accesses_per_CTA))
-U_eff = U * occupancy_penalty
-key = (U_eff, -pipeline_depth, logical_access_waves)
+key = (U, -pipeline_depth, logical_access_waves)
 ```
 
 The three-SM-wave target detects underfilled launches; the per-CTA logical
 access count dampens its penalty. No separate launch-wave component is added:
-`U` already contains `W`. Memory-bound kernels use a neutral occupancy penalty
-of one while retaining the launch-underfill adjustment. The split, ridge point,
-resident-warp facts, and selected penalty are reported under `modules.bound`;
-the launch target and shortfall are reported under `modules.ranking`. Exported
+`U` already contains `W`. The diagnostic split and ridge point are reported
+under `modules.bound`, together with `occupancy_gate_enabled=false` and
+`occupancy_penalty=1`; resident-warps facts are no longer estimated by this path.
+The launch target and shortfall are reported under `modules.ranking`. Exported
 facts use `bound_aware.v1`.
+
+The metric remains opt-in; the default is still `memory`. The portable runner
+accepts the `b300` target preset and `--metric bound_aware` without requiring a
+primitive timing profile:
+
+```bash
+python -m experiments.common.run --devices b300 --workloads gemm_decode \
+  --method analyze --metric bound_aware --output experiments/results/b300-bound-aware
+```
+
+### Pool-scoped rank product
+
+`ranking_metric="rank_product"` combines the original memory order and its
+launch-underfill variant without adding timing profiles, compute/memory
+classification, occupancy estimation, or hardware-specific weights:
+
+```text
+score = tail_rank(memory) * tail_rank(underfill)
+```
+
+Both component ranks use the same eligible candidate pool. Equal component
+scores share their group's last rank, and equal products also form complete tie
+groups. `alpha=0.5` keeps the existing original-pool budget and excludes a whole
+group that crosses it; failed, rejected, or incompletely scored candidates do
+not enter either component ranking.
+
+Individual analyses cache only `tile_cost.component_scores`, with
+`score_scope="candidate_pool"` and `score=None`. `rank_records` computes the
+product after the pool is known and reports it, together with
+`component_tail_ranks`, in each ranking entry. Changing the pool recomputes the
+ranks; cached kernel facts never contain a reusable fused score. Exported
+access-ledger facts use `rank_product.v1` and can be replayed with
+`tiletune_core.score_rank_product` followed by `rank_records`.
+
+```bash
+python -m experiments.common.run --devices b300 --workloads gemm_decode \
+  --method top_k --metric rank_product --alpha 0.5 --output experiments/results/b300-rank-product
+```
+
+### Fixed-rate memory/compute max (opt-in)
+
+`ranking_metric="work_max"` keeps the lean, family-independent analysis path
+and requires an explicit `performance_model` (or dtype-specific CLI profiles).
+It does not replace the default `memory` metric:
+
+```text
+waves = ceil(grid_blocks / sm_count)
+memory_cycles = logical_bytes_per_cta * waves / global_bytes_per_cycle
+compute_cycles = waves * sum(logical_work_per_cta[kind] / rate[kind])
+service = max(memory_cycles, compute_cycles)
+```
+
+All rates use logical work per SM per cycle. No candidate-pool min/max,
+candidate timings, occupancy gate, or kernel-family policy enters the score.
+Compute counting includes matrix FLOPs, scalar value arithmetic, exp/exp2,
+rsqrt and sum/max reductions. Parallel and serial visits are counted once;
+buffer-index arithmetic is excluded. Unsupported computation or missing
+nonzero-work rates leaves the score unknown, never silently zero.
+
+The scorer converts compute cycles to equivalent bytes at the fixed bandwidth,
+rounds upward by less than one byte, and preserves the existing ordering by
+deeper pipeline and fewer accesses only within equal normalized work. Equal
+complete keys stay tied; `alpha=0.5` still excludes entire boundary groups and
+never exceeds half the original pool. Resource rejection thresholds do not change.
+
+Use independently measured primitive rates with matching target, matrix dtype
+and instruction. TCGen05 cannot borrow an MMA/WGMMA rate; max reductions need
+`reduction_max_ops_per_cycle` from a regenerated profile. `memory_regime` is
+explicit: logical byte requests are not measured HBM traffic. The model omits
+cache-capacity effects, physical scalar ownership, synchronization, shared/TMEM
+service and block-scale/two-CTA overhead; it is a ranking proxy, not a latency
+prediction. Profiles are never measured by analysis itself.
+
+`modules.compute_work` records the compute ledger, and
+`modules.ranking.service_cycles` exposes both normalized views. Portable facts
+use `work_max.v1` and replay through `tiletune_core.score_work_max` without TVM.
+The portable CLI accepts `--metric work_max` and keeps profile loading enabled.
+
+This metric is experimental and opt-in. The default remains `memory`; resource
+policies and candidate pools are unchanged. Fusion is an ordinal pruning
+heuristic, not a latency estimate or a guarantee of oracle retention.
+
+### Work-max/underfill rank product
+
+`ranking_metric="work_rank_product"` combines the unchanged `work_max` order
+with the unchanged ungated underfill order:
+
+```text
+score = tail_rank(work_max) * tail_rank(underfill)
+```
+
+It uses the same compute facts and fixed primitive profiles as `work_max`.
+There is no extra penalty weight, pool-max cost normalization, bound gate,
+occupancy predictor, or kernel-family rule. Each component preserves its
+`(-pipeline_depth, access_waves)` ordering; complete equal-product groups
+remain tied under the existing strict original-pool budget.
+
+Select it with `--metric work_rank_product` and the existing dtype-specific
+profile configuration. Portable facts use `work_rank_product.v1` and replay
+through `tiletune_core.score_work_rank_product` followed by `rank_records`.
+Missing nonzero-work rates make both ranking views unknown, never silently
+falling back to memory. Analysis version 42 separates cached reports.
+
+The default remains `memory`, and the existing `work_max` and `rank_product`
+metrics are unchanged. Exact-best retention on a development ledger is not
+a guarantee for unseen workloads or new measurements.
+
+The frozen E1/E2/E3 coordinator accepts `--gpu-model B300`, verifying CUDA name,
+compute capability and physical UUID even if NVML reports an alias. This device
+option does not change the frozen protocol's default `memory` metric. Its B200
+spill/local thresholds transfer unchanged to B300 and are independent of the
+ranking metric; they are not a guarantee that every B300 oracle is retained.
 
 This is logical work rather than measured traffic: it does not model cache
 behavior, coalescing, bandwidth, transaction size, compute throughput, or

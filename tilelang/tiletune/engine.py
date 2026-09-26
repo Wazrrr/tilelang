@@ -19,13 +19,13 @@ from .trace import AnalysisTrace, collector_snapshot, propagation_snapshot
 from .families import select_specialization
 
 
-# Datasheet roofline split (dense tensor-core FLOPs per byte) used only as a
-# coarse gate. B200 uses 2.25 PFLOP/s dense BF16/FP16 divided by 8 TB/s HBM3e.
-# Unknown architectures retain the pure memory ordering.
-BOUND_RIDGE_FLOPS_PER_BYTE = {"ampere": 200.0, "sm_100a": 281.25}
-# Below this resident-warp count, compute-bound schedules receive a coarse,
-# piecewise-constant latency-hiding penalty.
-BOUND_TARGET_ACTIVE_WARPS = 8
+# Datasheet roofline references for diagnostics, not ranking gates.
+BOUND_RIDGE_FLOPS_PER_BYTE = {
+    "ampere": 200.0,
+    "sm_100a": 281.25,
+    "sm_103": 281.25,
+    "sm_103a": 281.25,
+}
 
 
 @dataclass
@@ -116,7 +116,7 @@ def run_modules(context, pressure):
     from .ranking import apply_ranking_metric
 
     trace = context.trace
-    memory_mode = context.config.ranking_metric in ("memory", "bound_aware")
+    memory_mode = context.config.ranking_metric in ("memory", "bound_aware", "rank_product", "work_max", "work_rank_product")
     detailed_memory = memory_mode and context.config.memory_diagnostics
     if memory_mode:
         specialization = None
@@ -178,8 +178,8 @@ def run_modules(context, pressure):
     tile_cost = {"score": None, "precision": "disabled"}
     modules.update({name: {"precision": "disabled"} for name in ("memory_traffic", "waves", "pipeline_overlap", "ranking")})
     if context.config.ranking and memory_mode:
-        from .memory import analyze_compute_intensity, analyze_memory_accesses, resident_warps_estimate
-        from tiletune_core.memory import classify_bound, score_memory
+        from .memory import analyze_compute_intensity, analyze_memory_accesses
+        from tiletune_core.memory import classify_bound, score_memory, score_rank_product
 
         memory = analyze_memory_accesses(
             context.collector, context.buffer_facts, include_dependencies=detailed_memory
@@ -189,7 +189,6 @@ def run_modules(context, pressure):
             if detailed_memory
             else _disabled_shared_memory()
         )
-        occupancy_penalty = 1
         if context.config.ranking_metric == "bound_aware":
             bound = analyze_compute_intensity(context.collector, context.buffer_facts, memory["grid_blocks"])
             target_model = pressure.get("target_model") or {}
@@ -202,36 +201,44 @@ def run_modules(context, pressure):
                 else None
             )
             bound["ridge_flops_per_byte"] = ridge
-            if bound["bound"] == "compute":
-                occupancy_shared = shared
-                if not detailed_memory:
-                    occupancy_shared = shared_memory.analyze_shared_memory(
-                        context.collector, context.buffer_facts, context.pass_configs
-                    )
-                occupancy_facts = resident_warps_estimate(
-                    context.collector,
-                    occupancy_shared.get("shared_memory_bytes_estimate"),
-                    context.device_limits,
-                )
-                active = (occupancy_facts or {}).get("active_warps_per_sm_estimate") or 0
-                if active > 0:
-                    occupancy_penalty = max(1, -(-BOUND_TARGET_ACTIVE_WARPS // active))
-                bound["occupancy"] = occupancy_facts
-            bound["occupancy_penalty"] = occupancy_penalty
+            bound["occupancy_gate_enabled"] = False
+            bound["occupancy_penalty"] = 1
             modules["bound"] = bound
             trace.record("bound", lambda: bound)
-        ranking = score_memory(
-            memory["accesses"],
-            memory["grid_blocks"],
-            (context.device_limits or {}).get("sm_count"),
-            memory["pipeline_depth"],
-            occupancy_penalty=occupancy_penalty,
-            launch_underfill=context.config.ranking_metric == "bound_aware",
-        )
+        if context.config.ranking_metric in ("work_max", "work_rank_product"):
+            from .work_max import analyze_compute_work
+            from tiletune_core.work_max import score_work_max, score_work_rank_product
+
+            compute = analyze_compute_work(context.collector, pressure, context.pass_configs)
+            modules["compute_work"] = compute
+            trace.record("compute_work", lambda: compute)
+            score_work = score_work_rank_product if context.config.ranking_metric == "work_rank_product" else score_work_max
+            ranking = score_work(
+                memory["accesses"], compute, memory["grid_blocks"],
+                (context.device_limits or {}).get("sm_count"), context.config.performance_model,
+                memory["pipeline_depth"],
+            )
+        elif context.config.ranking_metric == "rank_product":
+            ranking = score_rank_product(
+                memory["accesses"],
+                memory["grid_blocks"],
+                (context.device_limits or {}).get("sm_count"),
+                memory["pipeline_depth"],
+            )
+        else:
+            ranking = score_memory(
+                memory["accesses"],
+                memory["grid_blocks"],
+                (context.device_limits or {}).get("sm_count"),
+                memory["pipeline_depth"],
+                launch_underfill=context.config.ranking_metric == "bound_aware",
+            )
         ranking["metric"] = context.config.ranking_metric
         if memory["unknown"]:
             ranking.update(score=None, tie_break_score=None, precision="unknown")
             ranking["unknown"].extend(memory["unknown"])
+            if "component_scores" in ranking:
+                ranking["component_scores"] = dict.fromkeys(ranking["component_scores"])
         tile_cost = {
             **memory,
             **shared,
@@ -244,6 +251,10 @@ def run_modules(context, pressure):
             "precision": ranking["precision"],
             "unknown": ranking["unknown"],
         }
+        if "component_scores" in ranking:
+            tile_cost.update(component_scores=ranking["component_scores"], score_scope=ranking["score_scope"])
+        if context.config.ranking_metric in ("work_max", "work_rank_product"):
+            tile_cost.update(service_cycles=ranking["service_cycles"], normalized_work=ranking["adjusted_logical_byte_waves"])
         modules.update(memory_traffic=memory, shared_memory=shared, ranking=ranking)
         trace.record("memory", lambda: memory)
         trace.record("shared_memory", lambda: shared)
@@ -252,10 +263,18 @@ def run_modules(context, pressure):
             import json
             from pathlib import Path
 
-            backend = "memory.v2" if context.config.ranking_metric == "memory" else "bound_aware.v1"
+            backend = {
+                "memory": "memory.v2",
+                "bound_aware": "bound_aware.v1",
+                "rank_product": "rank_product.v1",
+                "work_max": "work_max.v1",
+                "work_rank_product": "work_rank_product.v1",
+            }[context.config.ranking_metric]
             facts = {"version": 1, "backend": backend, **memory, "sm_count": (context.device_limits or {}).get("sm_count")}
             if context.config.ranking_metric == "bound_aware":
                 facts["bound"] = modules["bound"]
+            if context.config.ranking_metric in ("work_max", "work_rank_product"):
+                facts.update(compute=modules["compute_work"], performance_model=context.config.performance_model)
             path = Path(context.config.facts_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(facts, indent=2, allow_nan=False) + "\n")
@@ -374,7 +393,7 @@ def analyze_kernel(func, config, target, device_limits, pass_configs, trace_cont
             },
         )
         trace.record("prim_func", lambda: func.script())
-        memory_mode = config.ranking_metric in ("memory", "bound_aware")
+        memory_mode = config.ranking_metric in ("memory", "bound_aware", "rank_product", "work_max", "work_rank_product")
         detailed_memory = memory_mode and config.memory_diagnostics
         strict_registers = memory_mode and _strict_register_analysis(config)
         col = _Collector(

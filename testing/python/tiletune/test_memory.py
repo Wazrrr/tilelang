@@ -125,7 +125,7 @@ def test_new_softmax_prim_func_is_analyzed_directly(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "settings", [dict(specialization="gemm"), dict(specialization="attention"), dict(attention_spill_budget_registers_per_thread=32)]
 )
-@pytest.mark.parametrize("metric", ["memory", "bound_aware"])
+@pytest.mark.parametrize("metric", ["memory", "bound_aware", "rank_product"])
 def test_memory_mode_rejects_kernel_family_hints(settings, metric):
     with pytest.raises(ValueError, match="kernel-family independent"):
         TileTuneConfig(ranking_metric=metric, **settings)
@@ -291,6 +291,7 @@ def test_bound_aware_metric_stays_lightweight(monkeypatch):
 
     monkeypatch.setattr("tilelang.tiletune.pipeline.analyze_pipeline", forbidden)
     monkeypatch.setattr("tilelang.tiletune.occupancy.analyze_waves", forbidden)
+    monkeypatch.setattr("tilelang.tiletune.memory.resident_warps_estimate", forbidden)
     monkeypatch.setattr("tilelang.tiletune.engine.predict_warp_specialization", forbidden)
     monkeypatch.setattr("tilelang.tiletune.engine.select_specialization", forbidden)
     monkeypatch.setattr("tilelang.tiletune.families.base.KernelSpecialization.__init__", forbidden)
@@ -305,7 +306,14 @@ def test_bound_aware_metric_stays_lightweight(monkeypatch):
     assert result["modules"]["waves"]["precision"] == "disabled"
 
 
-def test_bound_aware_reports_and_applies_the_coarse_gate(tmp_path):
+@pytest.mark.parametrize("architecture", ["sm_100a", "sm_103", "sm_103a"])
+def test_bound_aware_reports_compute_diagnostics_without_gating(tmp_path, architecture, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("bound-aware ranking must not estimate occupancy or add its shared-memory analysis")
+
+    monkeypatch.setattr("tilelang.tiletune.memory.resident_warps_estimate", forbidden)
+    monkeypatch.setattr("tilelang.tiletune.shared_memory.analyze_shared_memory", forbidden)
+
     @T.prim_func
     def repeated_gemm(
         A: T.Tensor((32, 32), "float16"),
@@ -328,14 +336,16 @@ def test_bound_aware_reports_and_applies_the_coarse_gate(tmp_path):
     result = analyze_prim_func(
         repeated_gemm,
         {"ranking_metric": "bound_aware", "facts_path": str(path)},
-        target={"kind": "cuda", "arch": "sm_100a"},
+        target={"kind": "cuda", "arch": architecture},
         device_limits=limits,
     )
     bound = result["modules"]["bound"]
     memory = result["modules"]["memory_traffic"]
     assert bound["bound"] == "compute"
     assert bound["ridge_flops_per_byte"] == 281.25
-    assert bound["occupancy_penalty"] == 2
+    assert not bound["occupancy_gate_enabled"]
+    assert bound["occupancy_penalty"] == 1
+    assert "occupancy" not in bound
     assert result["tile_cost"]["ranking_metric"] == "bound_aware"
     assert result["modules"]["ranking"]["launch_target_waves"] == 3
     assert (
@@ -347,14 +357,21 @@ def test_bound_aware_reports_and_applies_the_coarse_gate(tmp_path):
         memory["grid_blocks"],
         limits["sm_count"],
         memory["pipeline_depth"],
-        occupancy_penalty=bound["occupancy_penalty"],
         launch_underfill=True,
     )
     assert result["tile_cost"]["score"] == expected["score"]
+    more_resident_blocks = analyze_prim_func(
+        repeated_gemm,
+        {"ranking_metric": "bound_aware"},
+        target={"kind": "cuda", "arch": architecture},
+        device_limits={**limits, "max_blocks_per_sm": 2},
+    )
+    assert more_resident_blocks["tile_cost"]["score"] == result["tile_cost"]["score"]
     assert json.loads(path.read_text())["backend"] == "bound_aware.v1"
 
 
-def test_bound_aware_keeps_a_pure_copy_on_memory_order():
+@pytest.mark.parametrize("architecture", ["sm_80", "sm_100a", "sm_103", "sm_103a"])
+def test_bound_aware_keeps_a_pure_copy_on_memory_order(architecture):
     @T.prim_func
     def kernel(A: T.Tensor((4096,), "float16"), B: T.Tensor((4096,), "float16")):
         with T.Kernel(1, threads=128):
@@ -366,11 +383,41 @@ def test_bound_aware_keeps_a_pure_copy_on_memory_order():
     result = analyze_prim_func(
         kernel,
         {"ranking_metric": "bound_aware"},
-        target={"kind": "cuda", "arch": "sm_80"},
+        target={"kind": "cuda", "arch": architecture},
         device_limits=LIMITS,
     )
     assert result["modules"]["bound"]["bound"] == "memory"
+    assert not result["modules"]["bound"]["occupancy_gate_enabled"]
     assert result["modules"]["bound"]["occupancy_penalty"] == 1
+    assert result["modules"]["ranking"]["launch_underfill"]
+
+
+def test_b300_ridge_does_not_apply_to_unconfigured_blackwell_targets():
+    result = analyze_prim_func(
+        gemm(stages=2),
+        {"ranking_metric": "bound_aware"},
+        target={"kind": "cuda", "arch": "sm_120"},
+        device_limits=LIMITS,
+    )
+    assert result["modules"]["bound"]["bound"] is None
+    assert result["modules"]["bound"]["ridge_flops_per_byte"] is None
+    assert result["modules"]["bound"]["occupancy_penalty"] == 1
+    assert result["modules"]["ranking"]["launch_underfill"]
+
+
+def test_b300_adaptation_preserves_the_default_memory_score():
+    scores = []
+    for architecture in ("sm_100a", "sm_103", "sm_103a"):
+        result = analyze_prim_func(
+            gemm(stages=2),
+            TileTuneConfig(),
+            target={"kind": "cuda", "arch": architecture},
+            device_limits=LIMITS,
+        )
+        assert "bound" not in result["modules"]
+        assert not result["modules"]["ranking"]["launch_underfill"]
+        scores.append(result["tile_cost"]["score"])
+    assert scores[0] is not None and len(set(scores)) == 1
 
 
 def test_data_dependent_addresses_keep_resolved_memory_volume():
